@@ -1,0 +1,151 @@
+@startuml Request Confirmation Code Sequence Diagram
+
+title Sistema de Autenticación - Diagrama de Secuencia: SOLICITAR NUEVO CÓDIGO DE CONFIRMACIÓN
+
+actor Cliente as C
+participant "AuthController" as AC
+participant "AuthService" as AS
+participant "UsersService" as US
+participant "TokensService" as TS
+participant "AuthEmailService" as AES
+participant "MailerService" as MS
+participant "Token Utils" as TU
+database "Database" as DB
+
+== Proceso de Solicitar Nuevo Código de Confirmación ==
+
+C -> AC: POST /auth/request-code
+note right of C: RequestConfirmationCodeDto:\n- email
+
+activate AC
+AC -> AS: requestConfirmationCode(requestConfirmationCodeDto)
+note right of AC: Invoca el método\nrequestConfirmationCode\ndel AuthService
+
+activate AS
+AS -> AS: Extraer email de\nrequestConfirmationCodeDto
+note over AS: const { email } = requestConfirmationCodeDto
+
+=== Verificar si el usuario existe ===
+AS -> US: findByEmail(email)
+note right of AS: Busca usuario por email\npara validar existencia
+activate US
+US -> DB: SELECT * FROM users\nWHERE email = :email
+activate DB
+DB --> US: Retorna usuario o null\nsi no existe
+deactivate DB
+US --> AS: user | null
+deactivate US
+
+alt Usuario no existe
+    note over AS: user === null
+    AS --> AC: NotFoundException(\n"El Usuario no existe")
+    AC --> C: HTTP 404\n{"message": "El Usuario no existe"}
+    note right of C: Email no registrado\nen el sistema
+    
+else Usuario existe
+    note over AS: user encontrado
+    
+    === Verificar si la cuenta ya está confirmada ===
+    alt Cuenta ya confirmada
+        note over AS: user.confirmed === true
+        AS --> AC: BadRequestException(\n"El Usuario ya está confirmado")
+        AC --> C: HTTP 400\n{"message": "El Usuario ya está confirmado"}
+        note right of C: No necesita\nconfirmación adicional
+        
+    else Cuenta no confirmada
+        note over AS: user.confirmed === false\nProceder con nuevo token
+        
+        === Generar nuevo token ===
+        AS -> TU: generateToken()
+        note right of AS: Genera token aleatorio\nde 6 dígitos numéricos
+        activate TU
+        TU -> TU: Math.floor(Math.random() * 900000) + 100000
+        TU --> AS: tokenValue (string de 6 dígitos)
+        deactivate TU
+        
+        === Crear y guardar token en base de datos ===
+        AS -> TS: create({token: tokenValue, userId: user.id})
+        note right of AS: Crea nuevo token\nasociado al usuario
+        activate TS
+        TS -> DB: INSERT INTO tokens\n(token, user_id, created_at)\nVALUES (:token, :userId, NOW())
+        activate DB
+        
+        note over DB: Se puede configurar\nTTL/expiración del token
+        
+        DB --> TS: Token creado\nsuccessfully
+        deactivate DB
+        TS --> AS: tokenEntity
+        deactivate TS
+        
+        === Enviar email con nuevo código ===
+        AS -> AES: sendConfirmationEmail({\nemail: user.email,\nname: user.name,\ntoken: tokenValue})
+        note right of AS: Envía email con\nel nuevo código
+        activate AES
+        
+        AES -> AES: Construir contenido HTML\ncon token y enlaces
+        note over AES: HTML incluye:\n- Saludo personalizado\n- Enlace al frontend\n- Token destacado\n- Tiempo de expiración
+        
+        AES -> MS: sendMail({\nto: user.email,\nsubject: "UpTask - Confirma tu cuenta",\nhtml: htmlContent\n})
+        activate MS
+        MS -> MS: Configurar SMTP\ny enviar email
+        MS --> AES: Email enviado\nsuccessfully
+        deactivate MS
+        AES --> AS: void
+        deactivate AES
+        
+        === Respuesta exitosa ===
+        AS --> AC: {message: "Se envió un nuevo token a tu e-mail"}
+        AC --> C: HTTP 200\n{"message": "Se envió un nuevo token a tu e-mail"}
+        note right of C: Nuevo código enviado\nRevisar bandeja de entrada
+    end
+end
+
+deactivate AS
+deactivate AC
+
+== Casos de Uso y Escenarios ==
+
+note over C, DB
+**¿Cuándo se usa este endpoint?**
+
+1. **Usuario perdió el email original** de registro
+2. **Email llegó a spam** y no lo encontró  
+3. **Token anterior expiró** antes de confirmarlo
+4. **Usuario eliminó** accidentalmente el email
+5. **Problemas de entrega** del email inicial
+
+**Flujo típico:**
+REGISTRO → Email no recibido → REQUEST-CODE → Email reenviado → CONFIRM-ACCOUNT
+end note
+
+== Validaciones y Seguridad ==
+
+note over C, DB
+**Validaciones implementadas:**
+• ✓ Usuario debe existir en el sistema
+• ✓ Cuenta NO debe estar ya confirmada  
+• ✓ Email válido requerido
+
+**Consideraciones de seguridad:**
+• Rate limiting recomendado (evitar spam)
+• Tokens anteriores pueden coexistir  
+• Validación de formato de email
+• Log de intentos para auditoría
+
+**Estados posibles:**
+• Usuario no existe → 404 Not Found
+• Usuario ya confirmado → 400 Bad Request  
+• Usuario pendiente → 200 OK + nuevo token
+end note
+
+== Flujo Email Detallado ==
+
+C -> C: Usuario revisa email
+note over C: Email contiene:\n- Enlace: /auth/confirm-account\n- Código: 123456\n- Instrucciones claras
+
+C -> C: Click en enlace o\ncopiar código manualmente
+
+C -> AC: POST /auth/confirm-account\n{token: "123456"}
+note right of C: Usar el nuevo código\nen el endpoint de confirmación
+
+@enduml

@@ -1,0 +1,181 @@
+@startuml Authentication Entities Class Diagram
+
+title Sistema de Autenticación - Diagrama de Clases (Entidades del Dominio)
+
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam classFontSize 11
+
+class User {
+    - id: string {PK}
+    - name: string
+    - email: string {unique}
+    - password: string
+    - age: number
+    - confirmed: boolean
+    - createdAt: Date
+    - updatedAt: Date
+    - deletedAt: Date
+    --
+    + getId(): string
+    + getName(): string
+    + setName(name: string): void
+    + getEmail(): string
+    + setEmail(email: string): void
+    + getPassword(): string
+    + setPassword(password: string): void
+    + getAge(): number
+    + setAge(age: number): void
+    + isConfirmed(): boolean
+    + setConfirmed(confirmed: boolean): void
+    + getCreatedAt(): Date
+    + getUpdatedAt(): Date
+    + getDeletedAt(): Date
+    + hasRole(roleName: string): boolean
+    + addRole(role: Role): void
+    + removeRole(role: Role): void
+    + getActiveTokens(): Token[]
+    + addToken(token: Token): void
+    + removeToken(token: Token): void
+}
+
+class Role {
+    - id: string {PK}
+    - name: string {unique}
+    - description: string
+    --
+    + getId(): string
+    + getName(): string
+    + setName(name: string): void
+    + getDescription(): string
+    + setDescription(description: string): void
+    + addUser(user: User): void
+    + removeUser(user: User): void
+    + getUserCount(): number
+}
+
+class Token {
+    - id: string {PK}
+    - token: string
+    - userId: string {FK}
+    - createdAt: Date
+    - expiresAt: Date
+    --
+    + getId(): string
+    + getToken(): string
+    + setToken(token: string): void
+    + getUserId(): string
+    + setUserId(userId: string): void
+    + getCreatedAt(): Date
+    + getExpiresAt(): Date
+    + setExpiresAt(expiresAt: Date): void
+    + isExpired(): boolean
+    + isValid(): boolean
+    + getUser(): User
+    + setUser(user: User): void
+}
+
+' === RELACIONES ===
+
+User ||--o{ Token : "posee\n1 usuario puede tener\nmúltiples tokens"
+note on link
+Un usuario puede tener
+múltiples tokens activos:
+- Confirmación de cuenta
+- Reset de password
+- Múltiples dispositivos
+end note
+
+User }o--o{ Role : "tiene roles\n1 usuario puede tener\nmúltiples roles"
+note on link
+Relación Many-to-Many:
+- Un usuario puede tener múltiples roles
+- Un rol puede ser asignado a múltiples usuarios
+- Tabla intermedia: user_roles
+end note
+
+' === NOTAS DE LAS ENTIDADES ===
+
+note top of User
+**Entidad Usuario**
+- Representa a los usuarios del sistema
+- Email único y transformado a minúsculas
+- Password encriptado con bcrypt
+- Campo confirmed para activación de cuenta
+- Soft delete con deletedAt
+- Timestamps automáticos (createdAt, updatedAt)
+end note
+
+note right of Role
+**Entidad Rol**
+- Define permisos y roles del sistema
+- Nombre único (ej: "admin", "user")
+- Descripción opcional del rol
+- Relación Many-to-Many con User
+end note
+
+note bottom of Token
+**Entidad Token**
+- Tokens de seguridad temporales
+- Token de 6 dígitos numéricos
+- Expiración automática (10 minutos)
+- Usado para confirmación y reset password
+- Eliminación en cascada con User
+- Un token pertenece a un solo usuario
+end note
+
+' === RESTRICCIONES Y REGLAS DE NEGOCIO ===
+
+note as BusinessRules
+**Reglas de Negocio:**
+
+**Usuario:**
+• Email debe ser único en el sistema
+• Password mínimo 6 caracteres
+• Debe estar confirmado para hacer login
+• Puede tener múltiples roles
+• Soft delete preserva integridad referencial
+
+**Token:**
+• Duración máxima 10 minutos
+• Solo 6 dígitos numéricos
+• Un token por propósito (confirmación/reset)
+• Se elimina después de uso exitoso
+• Validación de expiración antes de uso
+
+**Role:**
+• Nombre único en el sistema
+• Múltiples usuarios pueden compartir rol
+• Roles predefinidos del sistema
+end note
+
+' === ENUMERACIONES ===
+
+enum TokenType {
+    CONFIRMATION
+    PASSWORD_RESET
+}
+
+enum UserStatus {
+    PENDING_CONFIRMATION
+    ACTIVE
+    SUSPENDED
+    DELETED
+}
+
+Token --> TokenType : "tipo"
+User --> UserStatus : "estado"
+
+note bottom of TokenType
+Aunque no está implementado
+en el código actual, sería
+útil tipificar los tokens
+end note
+
+note bottom of UserStatus
+Estados derivados basados
+en los campos confirmed
+y deletedAt
+end note
+
+@enduml

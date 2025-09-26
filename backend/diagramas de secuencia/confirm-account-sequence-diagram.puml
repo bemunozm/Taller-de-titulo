@@ -1,0 +1,111 @@
+@startuml Confirm Account Sequence Diagram
+
+title Sistema de Autenticación - Diagrama de Secuencia: CONFIRMACIÓN DE CUENTA
+
+actor Cliente as C
+participant "AuthController" as AC
+participant "AuthService" as AS
+participant "TokensService" as TS
+participant "UsersService" as US
+database "Database" as DB
+
+== Proceso de Confirmación de Cuenta ==
+
+C -> AC: POST /auth/confirm-account
+note right of C: ConfirmAccountDto:\n- token (6 dígitos)
+
+activate AC
+AC -> AS: confirmAccount(confirmAccountDto)
+note right of AC: Invoca el método\nconfirmAccount del AuthService
+
+activate AS
+AS -> AS: Extraer token de\nconfirmAccountDto
+note over AS: const { token } = confirmAccountDto
+
+=== Verificar si el token existe y es válido ===
+AS -> TS: findByTokenWithUser(token)
+note right of AS: Busca token con relación\nal usuario asociado
+activate TS
+TS -> DB: SELECT tokens.*, users.*\nFROM tokens\nJOIN users ON tokens.user_id = users.id\nWHERE tokens.token = :token
+activate DB
+DB --> TS: Retorna token con usuario\no null si no existe
+deactivate DB
+TS --> AS: tokenExists | null
+deactivate TS
+
+alt Token no válido o no existe
+    note over AS: tokenExists === null
+    AS --> AC: NotFoundException(\n"Token no válido")
+    AC --> C: HTTP 404\n{"message": "Token no válido"}
+    note right of C: Token incorrecto\no expirado
+    
+else Token válido y existe
+    note over AS: tokenExists contiene:\n- token data\n- user data
+    
+    === Actualizar estado de confirmación del usuario ===
+    AS -> AS: user = tokenExists.user
+    AS -> AS: user.confirmed = true
+    note over AS: Marca la cuenta\ncomo confirmada
+    
+    AS -> US: save(user)
+    note right of AS: Persiste los cambios\nen el usuario
+    activate US
+    US -> DB: UPDATE users\nSET confirmed = true,\nupdated_at = NOW()\nWHERE id = :userId
+    activate DB
+    DB --> US: Usuario actualizado\nsuccessfully
+    deactivate DB
+    US --> AS: void
+    deactivate US
+    
+    === Eliminar token usado ===
+    AS -> TS: remove(tokenExists.id)
+    note right of AS: Elimina el token\nusado para evitar\nreutilización
+    activate TS
+    TS -> DB: DELETE FROM tokens\nWHERE id = :tokenId
+    activate DB
+    DB --> TS: Token eliminado\nsuccessfully
+    deactivate DB
+    TS --> AS: void
+    deactivate TS
+    
+    === Confirmación exitosa ===
+    AS --> AC: {message: "Cuenta confirmada correctamente"}
+    AC --> C: HTTP 200\n{"message": "Cuenta confirmada correctamente"}
+    note right of C: Cuenta activada\nUsuario puede hacer login
+end
+
+deactivate AS
+deactivate AC
+
+== Estados y Validaciones Adicionales ==
+
+note over C, DB
+**Estados del Token:**
+• Token válido: Existe en DB y no ha expirado
+• Token inválido: No existe en DB
+• Token expirado: Existe pero superó tiempo límite
+
+**Estados del Usuario:**
+• ANTES: confirmed = false
+• DESPUÉS: confirmed = true
+
+**Seguridad:**
+• Un token solo se puede usar una vez
+• El token se elimina después del uso
+• Validación de existencia antes de procesar
+end note
+
+== Flujo Completo desde Registro hasta Confirmación ==
+
+note over C, DB
+**Contexto del flujo:**
+
+1. REGISTRO → Se crea usuario con confirmed = false
+2. REGISTRO → Se genera token y se envía por email  
+3. USUARIO → Recibe email con token de 6 dígitos
+4. CONFIRMACIÓN → Usuario ingresa token en frontend
+5. CONFIRMACIÓN → Este diagrama (validar y activar cuenta)
+6. LOGIN → Ahora el usuario puede hacer login normalmente
+end note
+
+@enduml
