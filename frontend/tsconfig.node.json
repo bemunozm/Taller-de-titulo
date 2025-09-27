@@ -15,7 +15,9 @@
       "@/context/*": ["context/*"],
       "@/utils/*": ["utils/*"],
       "@/types/*": ["types/*"],
-      "@/lib/*": ["lib/*"]
+      "@/lib/*": ["lib/*"],
+      "@/helpers/*": ["helpers/*"],
+      "@/api/*": ["api/*"]
     },
 
     /* Bundler mode */

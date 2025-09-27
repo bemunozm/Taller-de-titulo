@@ -8,11 +8,17 @@ export class User {
     @PrimaryGeneratedColumn("uuid")
     id: string;
 
+    @Column({ type: "varchar", length: 50, nullable: false, unique: true })
+    rut: string;
+
     @Column({ type: "varchar", length: 100, nullable: false })
     name: string;
 
     @Column({ type: "varchar", nullable: false, unique: true, transformer: { to: (value: string) => value.toLowerCase(), from: (value: string) => value } })
     email: string;
+
+    @Column({ type: "varchar", length: 15, nullable: false, unique: true })
+    phone: string;
 
     @Column({ type: "varchar", select: false, nullable: false })
     password: string;
