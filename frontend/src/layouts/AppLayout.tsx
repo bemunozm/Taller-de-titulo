@@ -1,8 +1,14 @@
-import React from 'react'
-import { Outlet } from 'react-router-dom'
+import { useAuth } from '@/hooks/useAuth'
+import { Navigate, Outlet } from 'react-router-dom'
 
 export default function AppLayout() {
-  return (
+  const { data, isError, isLoading} = useAuth()
+    if(isLoading) return 'Cargando...'
+    if(isError) {
+        return <Navigate to='/auth/login' />
+    }
+
+    if(data) return (
     <>
       <header className="p-4 bg-gray-800 text-white">
         <h1 className="text-2xl font-bold">App Header</h1>

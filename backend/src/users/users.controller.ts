@@ -5,7 +5,6 @@ import { UpdateUserDto } from './dto/update-user.dto';
 import { AuthGuard } from '../auth/auth.guard';
 import { AuthorizationGuard } from '../auth/guards/authorization.guard';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
-import { RequireRoles } from 'src/auth/decorators/roles.decorator';
 
 @Controller('users')
 @UseGuards(AuthGuard, AuthorizationGuard)
