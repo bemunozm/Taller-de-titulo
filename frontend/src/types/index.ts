@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { ru } from 'zod/v4/locales'
 
 // Define el esquema de un permiso
 // Sirve para validar los datos de un permiso antes de enviarlos al servidor o de mostrarlos en la aplicación
@@ -47,48 +48,49 @@ export type TokenFormData = Pick<Token, 'token' | 'userId'>
 // Define el esquema de un usuario
 // Sirve para validar los datos de un usuario antes de enviarlos al servidor o de mostrarlos en la aplicación
 // El esquema de un usuario es un objeto que tiene las siguientes propiedades:
+
+export const authSchema = z.object({
+    name: z.string().max(100),
+    rut: z.string().max(50),
+    phone: z.string().max(15),
+    age: z.number().int().positive(),
+    email: z.email(),
+    password: z.string().min(6).max(100),
+    current_password: z.string().min(6).max(100),
+    password_confirmation: z.string().min(6).max(100),
+    token: z.string().length(6),
+})
+export type Auth = z.infer<typeof authSchema>
+export type UserLoginForm = Pick<Auth   , 'email' | 'password'>
+export type UserRegistrationForm = Pick<Auth, 'name' | 'email' | 'password' | 'password_confirmation' | 'age' | 'phone' | 'rut' >
+export type RequestConfirmationCodeForm = Pick<Auth, 'email'>
+export type ForgotPasswordForm = Pick<Auth, 'email'>
+export type NewPasswordForm = Pick<Auth, 'password' | 'password_confirmation'>
+export type UpdateCurrentUserPasswordForm = Pick<Auth, 'current_password' | 'password' | 'password_confirmation'>
+export type ConfirmToken = Pick<Auth, 'token'>
+export type CheckPasswordForm = Pick<Auth, 'password'>
+
 export const userSchema = z.object({
     id: z.uuid(),
+    rut: z.string().max(50),
     name: z.string().max(100),
     email: z.email(),
+    phone: z.string().max(15),
     password: z.string().optional(), // Opcional porque no siempre se incluye en las respuestas
     age: z.number().int().positive().optional(),
     confirmed: z.boolean().default(false),
-    createdAt: z.date(),
-    updatedAt: z.date(),
-    deletedAt: z.date().optional(),
+    createdAt: z.string().transform((date) => new Date(date)),
+    updatedAt: z.string().transform((date) => new Date(date)),
+    deletedAt: z.string().transform((date) => new Date(date)).nullable(),
     roles: z.array(roleSchema).optional(),
     tokens: z.array(tokenSchema).optional(),
 })
 
 // Define el tipo User que es el tipo inferido del esquema userSchema
 export type User = z.infer<typeof userSchema>
-export type UserFormData = Pick<User, 'name' | 'email' | 'password' | 'age'>
-export type UserUpdateData = Pick<User, 'name' | 'email' | 'age'>
+export type UserFormData = Pick<User, 'name' | 'email' | 'password'  | 'age' | 'phone' | 'rut'>
+export type UserUpdateData = Pick<User, 'name' | 'email' | 'age' | 'phone' | 'rut'>
 export type UserLoginData = Pick<User, 'email' | 'password'>
 export type UserAuthResponse = Omit<User, 'password' | 'tokens'> & {
     token?: string
 }
-
-// Tipos adicionales para la API de autenticación basados en los schemas existentes
-
-// Define el tipo para el registro de usuario (mismo que UserFormData)
-export type UserRegistrationForm = UserFormData
-
-// Define el tipo para el login de usuario 
-export type UserLoginForm = UserLoginData
-
-// Define el tipo para tokens de confirmación (basado en tokenSchema)
-export type ConfirmToken = Pick<Token, 'token'>
-
-// Define el tipo para solicitar código de confirmación (basado en userSchema)
-export type RequestConfirmationCodeForm = Pick<User, 'email'>
-
-// Define el tipo para forgot password (basado en userSchema)
-export type ForgotPasswordForm = Pick<User, 'email'>
-
-// Define el tipo para nueva contraseña (basado en userSchema)
-export type NewPasswordForm = Pick<User, 'password'>
-
-// Define el tipo para verificar contraseña (basado en userSchema)
-export type CheckPasswordForm = Pick<User, 'password'>

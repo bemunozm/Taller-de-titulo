@@ -10,7 +10,7 @@ export async function createAccount(formData: UserRegistrationForm) {
         return data
     } catch (error) {
         if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.error)
+            throw new Error(error.response.data.message)
         }
     }
 }
@@ -22,7 +22,7 @@ export async function confirmAccount(formData: ConfirmToken) {
         return data
     } catch (error) {
         if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.error)
+            throw new Error(error.response.data.message)
         }
     }
 }
@@ -34,7 +34,7 @@ export async function requestConfirmationCode(formData: RequestConfirmationCodeF
         return data
     } catch (error) {
         if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.error)
+            throw new Error(error.response.data.message)
         }
     }
 }
@@ -47,7 +47,7 @@ export async function authenticateUser(formData: UserLoginForm) {
         return data
     } catch (error) {
         if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.error)
+            throw new Error(error.response.data.message)
         }
     }
 }
@@ -59,7 +59,7 @@ export async function forgotPassword(formData: ForgotPasswordForm) {
         return data
     } catch (error) {
         if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.error)
+            throw new Error(error.response.data.message)
         }
     }
 }
@@ -71,7 +71,7 @@ export async function validateToken(formData: ConfirmToken) {
         return data
     } catch (error) {
         if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.error)
+            throw new Error(error.response.data.message)
         }
     }
 }
@@ -79,12 +79,12 @@ export async function validateToken(formData: ConfirmToken) {
 export async function updatePasswordWithToken({formData, token}: {formData: NewPasswordForm, token: ConfirmToken['token']}) {
     try {
         
-        const url = `/auth/update-password/${token}`
-        const { data } = await api.post<string>(url, formData)
+        const url = `/auth/update-password`
+        const { data } = await api.post<string>(url, { token: token, password: formData.password })
         return data
     } catch (error) {
         if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.error)
+            throw new Error(error.response.data.message)
         }
     }
 }
@@ -98,7 +98,7 @@ export async function getUser() {
         }
     } catch (error) {
         if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.error)
+            throw new Error(error.response.data.message)
         }
     }
 }
@@ -110,7 +110,7 @@ export async function checkPassword(formData: CheckPasswordForm) {
         return data
     } catch (error) {
         if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.error)
+            throw new Error(error.response.data.message)
         }
     }
 }
