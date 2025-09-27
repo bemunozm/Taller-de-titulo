@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, InternalServerErrorException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, LessThan } from 'typeorm';
 import { CreateTokenDto } from './dto/create-token.dto';
 import { UpdateTokenDto } from './dto/update-token.dto';
 import { Token } from './entities/token.entity';
@@ -27,6 +27,14 @@ export class TokensService {
       if (!foundToken) {
         throw new NotFoundException('Token no encontrado');
       }
+      
+      // Verificar si el token ha expirado
+      if (foundToken.isExpired()) {
+        // Eliminar el token expirado
+        await this.tokenRepository.remove(foundToken);
+        throw new NotFoundException('Token expirado');
+      }
+      
       return foundToken;
     } catch (error) {
       if (error instanceof NotFoundException) {
@@ -45,6 +53,14 @@ export class TokensService {
       if (!foundToken) {
         throw new NotFoundException('Token no encontrado');
       }
+      
+      // Verificar si el token ha expirado
+      if (foundToken.isExpired()) {
+        // Eliminar el token expirado
+        await this.tokenRepository.remove(foundToken);
+        throw new NotFoundException('Token expirado');
+      }
+      
       return foundToken;
     } catch (error) {
       if (error instanceof NotFoundException) {
@@ -101,6 +117,43 @@ export class TokensService {
         throw error;
       }
       throw new InternalServerErrorException('Error al actualizar el token');
+    }
+  }
+
+  /**
+   * Elimina todos los tokens expirados de la base de datos
+   * Este método puede ser llamado periódicamente para limpiar tokens antiguos
+   */
+  async cleanupExpiredTokens(): Promise<number> {
+    try {
+      const expiredTokens = await this.tokenRepository.find({
+        where: {
+          expiresAt: LessThan(new Date())
+        }
+      });
+
+      if (expiredTokens.length > 0) {
+        await this.tokenRepository.remove(expiredTokens);
+        console.log(`Se eliminaron ${expiredTokens.length} tokens expirados`);
+        return expiredTokens.length;
+      }
+      
+      return 0;
+    } catch (error) {
+      console.error('Error al limpiar tokens expirados:', error);
+      throw new InternalServerErrorException('Error al limpiar tokens expirados');
+    }
+  }
+
+  /**
+   * Elimina todos los tokens asociados a un usuario específico
+   * Útil cuando un usuario cambia su contraseña o se desloguea
+   */
+  async removeTokensByUserId(userId: string): Promise<void> {
+    try {
+      await this.tokenRepository.delete({ userId });
+    } catch (error) {
+      throw new InternalServerErrorException('Error al eliminar tokens del usuario');
     }
   }
 }

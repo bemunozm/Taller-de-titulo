@@ -27,7 +27,7 @@ export class AuthService {
 
     async register(registerDto: RegisterDto) {
         try {
-            const { password, email } = registerDto;
+            const { password, email, password_confirmation, ...restData } = registerDto;
 
             // Prevenir duplicados
             const userExists = await this.usersService.findByEmail(email);
@@ -35,9 +35,14 @@ export class AuthService {
                 throw new BadRequestException('El Usuario ya está registrado');
             }
 
-            // Crear un usuario
+            // Verificar que las contraseñas coincidan (validación adicional)
+            if (password !== password_confirmation) {
+                throw new BadRequestException('Las contraseñas no coinciden');
+            }
+
+            // Crear un usuario (excluir password_confirmation)
             const userData = {
-                ...registerDto,
+                ...restData,
                 password: await hashPassword(password),
                 email: email.toLowerCase()
             };
@@ -48,14 +53,14 @@ export class AuthService {
             const tokenValue = generateToken();
             await this.tokensService.create({ token: tokenValue, userId: user.id });
 
-            // Enviar el email
+            // Enviar el email de confirmación con el nuevo template profesional
             await this.authEmailService.sendConfirmationEmail({
                 email: user.email,
                 name: user.name,
                 token: tokenValue
             });
 
-            return { message: 'Cuenta creada, revisa tu email para confirmarla' };
+            return 'Cuenta creada exitosamente. Revisa tu email para confirmarla y activar todas las funcionalidades.';
         } catch (error) {
             if (error instanceof BadRequestException) {
                 throw error;
@@ -79,7 +84,13 @@ export class AuthService {
             await this.usersService.save(user);
             await this.tokensService.remove(tokenExists.id);
 
-            return { message: 'Cuenta confirmada correctamente' };
+            // Enviar email de bienvenida después de confirmar la cuenta
+            await this.authEmailService.sendWelcomeEmail({
+                email: user.email,
+                name: user.name
+            });
+
+            return '¡Cuenta confirmada exitosamente! Ahora puedes acceder a todas las funcionalidades de la plataforma.'
         } catch (error) {
             if (error instanceof NotFoundException) {
                 throw error;
@@ -101,14 +112,14 @@ export class AuthService {
                 const tokenValue = generateToken();
                 await this.tokensService.create({ token: tokenValue, userId: user.id });
 
-                // Enviar el email
+                // Enviar email de confirmación con el template profesional
                 await this.authEmailService.sendConfirmationEmail({
                     email: user.email,
                     name: user.name,
                     token: tokenValue
                 });
 
-                throw new UnauthorizedException('La Cuenta no ha sido confirmada, hemos enviado un e-mail de confirmación');
+                throw new UnauthorizedException('Tu cuenta no está confirmada. Hemos enviado un nuevo código de verificación a tu email.');
             }
 
             // Revisar password
@@ -120,7 +131,7 @@ export class AuthService {
             const payload = { id: user.id };
             const jwtToken = this.jwtService.sign(payload);
 
-            return { token: jwtToken };
+            return jwtToken;
         } catch (error) {
             if (error instanceof UnauthorizedException) {
                 throw error;
@@ -147,14 +158,14 @@ export class AuthService {
             const tokenValue = generateToken();
             await this.tokensService.create({ token: tokenValue, userId: user.id });
 
-            // Enviar el email
+            // Enviar email con el template profesional de confirmación
             await this.authEmailService.sendConfirmationEmail({
                 email: user.email,
                 name: user.name,
                 token: tokenValue
             });
 
-            return { message: 'Se envió un nuevo token a tu e-mail' };
+            return 'Nuevo código de verificación enviado. Revisa tu email y completa la confirmación de tu cuenta.'
         } catch (error) {
             if (error instanceof NotFoundException || error instanceof BadRequestException) {
                 throw error;
@@ -177,14 +188,14 @@ export class AuthService {
             const tokenValue = generateToken();
             await this.tokensService.create({ token: tokenValue, userId: user.id });
 
-            // Enviar el email
+            // Enviar email con el template profesional de recuperación de contraseña
             await this.authEmailService.sendPasswordResetToken({
                 email: user.email,
                 name: user.name,
                 token: tokenValue
             });
 
-            return { message: 'Revisa tu email para instrucciones' };
+            return 'Instrucciones de recuperación enviadas. Revisa tu email para restablecer tu contraseña de forma segura.';
         } catch (error) {
             if (error instanceof NotFoundException) {
                 throw error;
@@ -202,7 +213,7 @@ export class AuthService {
                 throw new NotFoundException('Token no válido');
             }
 
-            return { message: 'Token válido, Define tu nuevo password' };
+            return 'Código verificado correctamente. Ahora puedes establecer tu nueva contraseña.';
         } catch (error) {
             if (error instanceof NotFoundException) {
                 throw error;
@@ -214,7 +225,8 @@ export class AuthService {
     async updatePasswordWithToken(updatePasswordWithTokenDto: UpdatePasswordWithTokenDto) {
         try {
             const { token, password } = updatePasswordWithTokenDto;
-
+            console.log('Received token:', token);
+            console.log('Received password:', password);
             const tokenExists = await this.tokensService.findByTokenWithUser(token);
             if (!tokenExists) {
                 throw new NotFoundException('Token no válido');
@@ -226,7 +238,7 @@ export class AuthService {
             await this.usersService.save(user);
             await this.tokensService.remove(tokenExists.id);
 
-            return { message: 'El password se modificó correctamente' };
+            return '¡Contraseña actualizada exitosamente! Ya puedes iniciar sesión con tu nueva contraseña.';
         } catch (error) {
             if (error instanceof NotFoundException) {
                 throw error;
@@ -261,7 +273,7 @@ export class AuthService {
             user.email = email.toLowerCase();
 
             await this.usersService.save(user);
-            return { message: 'Perfil actualizado correctamente' };
+            return 'Perfil actualizado correctamente';
         } catch (error) {
             if (error instanceof NotFoundException || error instanceof BadRequestException) {
                 throw error;
@@ -284,7 +296,7 @@ export class AuthService {
             user.password = await hashPassword(password);
             await this.usersService.save(user);
 
-            return { message: 'El password se modificó correctamente' };
+            return 'El password se modificó correctamente';
         } catch (error) {
             if (error instanceof NotFoundException || error instanceof BadRequestException) {
                 throw error;
@@ -304,7 +316,7 @@ export class AuthService {
                 throw new BadRequestException('Password Incorrecto');
             }
 
-            return { message: 'Password Correcto' };
+            return 'Password Correcto';
         } catch (error) {
             if (error instanceof NotFoundException || error instanceof BadRequestException) {
                 throw error;

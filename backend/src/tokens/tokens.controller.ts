@@ -31,4 +31,15 @@ export class TokensController {
   remove(@Param('id') id: string) {
     return this.tokensService.remove(id);
   }
+
+  @Delete('cleanup/expired')
+  async cleanupExpiredTokens() {
+    const removedCount = await this.tokensService.cleanupExpiredTokens();
+    return {
+      message: removedCount > 0 
+        ? `Se eliminaron ${removedCount} tokens expirados` 
+        : 'No se encontraron tokens expirados',
+      removedCount
+    };
+  }
 }
