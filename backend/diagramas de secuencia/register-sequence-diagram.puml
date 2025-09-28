@@ -1,0 +1,124 @@
+@startuml register-sequence-diagram
+!theme plain
+title Diagrama de Secuencia - Registro de Usuario
+
+actor Cliente as C
+participant "AuthController" as AC
+participant "AuthService" as AS
+participant "UsersService" as US
+participant "TokensService" as TS
+participant "AuthEmailService" as AES
+database "Base de Datos" as BD
+participant "Servicio de Email\n(SMTP)" as EMAIL
+
+note over C, EMAIL
+    Flujo para el registro de un nuevo usuario en el sistema
+    con validaciones, creación de token y envío de email de confirmación
+end note
+
+C -> AC: POST /auth/create-account\n{RegisterDto}
+activate AC
+
+AC -> AS: register(registerDto)
+activate AS
+
+note over AS
+    Validaciones iniciales:
+    - Extraer datos del DTO
+    - Validar formato de email
+    - Verificar contraseñas coincidan
+end note
+
+AS -> US: findByEmail(email)
+activate US
+US -> BD: SELECT * FROM user\nWHERE email = ?
+activate BD
+BD --> US: User | null
+deactivate BD
+US --> AS: userExists
+deactivate US
+
+alt userExists != null
+    AS --> AC: BadRequestException\n"El Usuario ya está registrado"
+    AC --> C: HTTP 400\n"El Usuario ya está registrado"
+else password != password_confirmation
+    AS --> AC: BadRequestException\n"Las contraseñas no coinciden"
+    AC --> C: HTTP 400\n"Las contraseñas no coinciden"
+else Validación exitosa
+    
+    note over AS
+        Preparar datos del usuario:
+        - Hashear contraseña
+        - Normalizar email a lowercase
+        - Excluir password_confirmation
+    end note
+    
+    AS -> AS: hashPassword(password)
+    
+    AS -> US: create(userData)
+    activate US
+    US -> BD: INSERT INTO user\n(rut, name, email, phone, password, age)
+    activate BD
+    BD --> US: User creado
+    deactivate BD
+    US --> AS: user
+    deactivate US
+    
+    note over AS
+        Generar token de confirmación
+        de 6 dígitos aleatorio
+    end note
+    
+    AS -> AS: generateToken()
+    AS -> TS: create({token, userId})
+    activate TS
+    TS -> BD: INSERT INTO token\n(token, userId, createdAt, expiresAt)
+    activate BD
+    
+    note over TS, BD
+        Token expira en 10 minutos
+        desde su creación
+    end note
+    
+    BD --> TS: Token creado
+    deactivate BD
+    TS --> AS: tokenRecord
+    deactivate TS
+    
+    AS -> AES: sendConfirmationEmail({email, name, token})
+    activate AES
+    
+    note over AES
+        Generar template HTML
+        con información del usuario
+        y enlace de confirmación
+    end note
+    
+    AES -> EMAIL: Enviar email con token
+    activate EMAIL
+    
+    note over EMAIL
+        Asunto: "✨ Confirma tu cuenta - Taller de Título"
+        Contenido: Template HTML con token
+        y enlace de confirmación
+    end note
+    
+    EMAIL --> AES: Email enviado
+    deactivate EMAIL
+    AES --> AS: Email confirmación enviado
+    deactivate AES
+    
+    AS --> AC: "Cuenta creada exitosamente.\nRevisa tu email para confirmarla\ny activar todas las funcionalidades."
+    AC --> C: HTTP 201\nMensaje de éxito
+end
+
+deactivate AS
+deactivate AC
+
+note over C, EMAIL
+    El usuario debe revisar su email y usar el token
+    recibido para confirmar su cuenta mediante
+    el endpoint POST /auth/confirm-account
+end note
+
+@enduml
