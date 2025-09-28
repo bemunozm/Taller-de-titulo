@@ -1,0 +1,197 @@
+@startuml account-confirmation-sequence-diagram
+!theme plain
+title Diagrama de Secuencia - Solicitar Código y Confirmar Cuenta
+
+actor Cliente as C
+participant "AuthController" as AC
+participant "AuthService" as AS
+participant "UsersService" as US
+participant "TokensService" as TS
+participant "AuthEmailService" as AES
+database "Base de Datos" as BD
+participant "Servicio de Email\n(SMTP)" as EMAIL
+
+note over C, EMAIL
+    Flujo para solicitar código de confirmación y confirmar cuenta
+    Incluye: reenvío de código y confirmación con email de bienvenida
+end note
+
+== Fase 1: Solicitud de Código de Confirmación ==
+
+C -> AC: POST /auth/request-code\n{RequestConfirmationCodeDto: email}
+activate AC
+
+AC -> AS: requestConfirmationCode(requestConfirmationCodeDto)
+activate AS
+
+note over AS
+    Extraer email del DTO
+end note
+
+AS -> US: findByEmail(email)
+activate US
+US -> BD: SELECT * FROM user\nWHERE email = ?
+activate BD
+BD --> US: User | null
+deactivate BD
+US --> AS: user
+deactivate US
+
+alt user == null
+    AS --> AC: NotFoundException\n"El Usuario no existe"
+    AC --> C: HTTP 404\n"El Usuario no existe"
+else user.confirmed == true
+    AS --> AC: BadRequestException\n"El Usuario ya está confirmado"
+    AC --> C: HTTP 400\n"El Usuario ya está confirmado"
+else Usuario válido y no confirmado
+    
+    note over AS
+        Generar nuevo token de confirmación
+        de 6 dígitos aleatorio
+    end note
+    
+    AS -> AS: generateToken()
+    AS -> TS: create({token, userId})
+    activate TS
+    TS -> BD: INSERT INTO token\n(token, userId, createdAt, expiresAt)
+    activate BD
+    
+    note over TS, BD
+        Token expira en 10 minutos
+        Se pueden generar múltiples tokens
+        (los anteriores siguen válidos hasta expirar)
+    end note
+    
+    BD --> TS: Token creado
+    deactivate BD
+    TS --> AS: tokenRecord
+    deactivate TS
+    
+    AS -> AES: sendConfirmationEmail({email, name, token})
+    activate AES
+    
+    note over AES
+        Generar template HTML de confirmación
+        con token incluido y enlace de activación
+    end note
+    
+    AES -> EMAIL: Enviar email de confirmación
+    activate EMAIL
+    
+    note over EMAIL
+        Asunto: "✨ Confirma tu cuenta - Taller de Título"
+        Contenido: Token de 6 dígitos
+        y enlace de confirmación
+    end note
+    
+    EMAIL --> AES: Email enviado
+    deactivate EMAIL
+    AES --> AS: Email confirmación enviado
+    deactivate AES
+    
+    AS --> AC: "Nuevo código de verificación enviado.\nRevisa tu email y completa la\nconfirmación de tu cuenta."
+    AC --> C: HTTP 200\nCódigo enviado
+end
+
+deactivate AS
+deactivate AC
+
+== Fase 2: Confirmación de Cuenta ==
+
+C -> AC: POST /auth/confirm-account\n{ConfirmAccountDto: token}
+activate AC
+
+AC -> AS: confirmAccount(confirmAccountDto)
+activate AS
+
+note over AS
+    Extraer token del DTO
+    (6 caracteres exactos)
+end note
+
+AS -> TS: findByTokenWithUser(token)
+activate TS
+TS -> BD: SELECT token.*, user.*\nFROM token JOIN user\nWHERE token = ? AND expiresAt > NOW()
+activate BD
+BD --> TS: Token with User | null
+deactivate BD
+
+alt Token no válido o expirado
+    TS --> AS: NotFoundException\n"Token no válido"
+    AS --> AC: NotFoundException\n"Token no válido"
+    AC --> C: HTTP 404\n"Token no válido"
+else Token válido
+    TS --> AS: tokenExists (with user)
+    deactivate TS
+    
+    note over AS
+        Marcar usuario como confirmado
+        en la base de datos
+    end note
+    
+    AS -> AS: user.confirmed = true
+    
+    AS -> US: save(user)
+    activate US
+    US -> BD: UPDATE user SET confirmed = true\nWHERE id = ?
+    activate BD
+    BD --> US: Usuario actualizado
+    deactivate BD
+    US --> AS: Usuario guardado
+    deactivate US
+    
+    note over AS
+        Eliminar token usado
+        para evitar reutilización
+    end note
+    
+    AS -> TS: remove(tokenId)
+    activate TS
+    TS -> BD: DELETE FROM token\nWHERE id = ?
+    activate BD
+    BD --> TS: Token eliminado
+    deactivate BD
+    TS --> AS: Token removido
+    deactivate TS
+    
+    note over AS
+        Enviar email de bienvenida
+        para notificar confirmación exitosa
+    end note
+    
+    AS -> AES: sendWelcomeEmail({email, name})
+    activate AES
+    
+    note over AES
+        Generar template HTML de bienvenida
+        sin token, solo información de bienvenida
+    end note
+    
+    AES -> EMAIL: Enviar email de bienvenida
+    activate EMAIL
+    
+    note over EMAIL
+        Asunto: "🎉 ¡Bienvenido a Taller de Título!"
+        Contenido: Mensaje de bienvenida
+        y enlaces útiles de la plataforma
+    end note
+    
+    EMAIL --> AES: Email enviado
+    deactivate EMAIL
+    AES --> AS: Email bienvenida enviado
+    deactivate AES
+    
+    AS --> AC: "¡Cuenta confirmada exitosamente!\nAhora puedes acceder a todas las\nfuncionalidades de la plataforma."
+    AC --> C: HTTP 200\nCuenta confirmada
+end
+
+deactivate AS
+deactivate AC
+
+note over C, EMAIL
+    El usuario puede ahora iniciar sesión
+    con acceso completo a todas las funcionalidades
+    de la plataforma
+end note
+
+@enduml

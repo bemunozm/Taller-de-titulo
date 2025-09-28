@@ -1,160 +1,120 @@
-@startuml Login Sequence Diagram
-
-title Sistema de Autenticación - Diagrama de Secuencia: LOGIN
+@startuml login-sequence-diagram
+!theme plain
+title Diagrama de Secuencia - Login de Usuario
 
 actor Cliente as C
 participant "AuthController" as AC
-participant "AuthGuard" as AG
 participant "AuthService" as AS
 participant "UsersService" as US
 participant "TokensService" as TS
 participant "AuthEmailService" as AES
-participant "JwtUtilService" as JUS
 participant "JwtService" as JWT
-participant "Auth Utils" as AU
-database "Database" as DB
+database "Base de Datos" as BD
+participant "Servicio de Email\n(SMTP)" as EMAIL
 
-== Proceso de Login ==
+note over C, EMAIL
+    Flujo para el login de usuario en el sistema
+    con validaciones, verificación de credenciales y generación de JWT
+end note
 
-C -> AC: POST /auth/login
-note right of C: LoginDto:\n- email\n- password
-
+C -> AC: POST /auth/login\n{LoginDto: email, password}
 activate AC
+
 AC -> AS: login(loginDto)
-note right of AC: Invoca el método\nlogin del AuthService
-
 activate AS
-AS -> AS: Extraer email y password\nde loginDto
 
-=== Verificar si el usuario existe ===
+note over AS
+    Extraer credenciales:
+    - email
+    - password
+end note
+
 AS -> US: findByEmailWithPassword(email)
-note right of AS: Busca usuario con password\npara validación
 activate US
-US -> DB: SELECT * FROM users\nWHERE email = :email
-activate DB
-DB --> US: Retorna usuario con password\no null si no existe
-deactivate DB
-US --> AS: user | null
+US -> BD: SELECT id, email, password, name, confirmed\nFROM user WHERE email = ?
+activate BD
+BD --> US: User | null
+deactivate BD
+US --> AS: user
 deactivate US
 
-alt Usuario no encontrado
-    AS --> AC: UnauthorizedException(\n"Usuario No Encontrado")
-    AC --> C: HTTP 401\n{"message": "Usuario No Encontrado"}
-    note right of C: Login fallido
-else Usuario existe
+alt user == null
+    AS --> AC: UnauthorizedException\n"Usuario No Encontrado"
+    AC --> C: HTTP 401\n"Usuario No Encontrado"
+else user.confirmed == false
+    note over AS
+        Usuario no confirmado:
+        Generar nuevo token y
+        reenviar email de confirmación
+    end note
     
-    === Verificar si la cuenta está confirmada ===
-    alt Cuenta NO confirmada
-        note over AS: user.confirmed = false
+    AS -> AS: generateToken()
+    AS -> TS: create({token, userId})
+    activate TS
+    TS -> BD: INSERT INTO token\n(token, userId, createdAt, expiresAt)
+    activate BD
+    BD --> TS: Token creado
+    deactivate BD
+    TS --> AS: tokenRecord
+    deactivate TS
+    
+    AS -> AES: sendConfirmationEmail({email, name, token})
+    activate AES
+    AES -> EMAIL: Enviar email de confirmación
+    activate EMAIL
+    EMAIL --> AES: Email enviado
+    deactivate EMAIL
+    AES --> AS: Email confirmación enviado
+    deactivate AES
+    
+    AS --> AC: UnauthorizedException\n"Tu cuenta no está confirmada.\nHemos enviado un nuevo código de verificación a tu email."
+    AC --> C: HTTP 401\nMensaje de cuenta no confirmada
+else Usuario válido y confirmado
+    
+    note over AS
+        Verificar contraseña:
+        Comparar password en texto plano
+        con hash almacenado usando bcrypt
+    end note
+    
+    AS -> AS: checkPassword(password, user.password)
+    
+    alt Password incorrecto
+        AS --> AC: UnauthorizedException\n"Password Incorrecto"
+        AC --> C: HTTP 401\n"Password Incorrecto"
+    else Password correcto
         
-        AS -> AS: generateToken()
-        note right of AS: Genera token de 6 dígitos\naleatorios
+        note over AS
+            Generar JWT Token:
+            Payload: {id: user.id}
+            Configuración: expiresIn '1d'
+        end note
         
-        AS -> TS: create({token: tokenValue, userId: user.id})
-        activate TS
-        TS -> DB: INSERT INTO tokens\n(token, user_id, created_at)
-        DB --> TS: Token creado
-        TS --> AS: tokenEntity
-        deactivate TS
+        AS -> JWT: sign({id: user.id})
+        activate JWT
         
-        AS -> AES: sendConfirmationEmail({\nemail, name, token})
-        activate AES
-        AES -> AES: Construir HTML del email
-        AES -> AES: Configurar destinatario y asunto
-        AES --> AS: Email enviado
-        deactivate AES
+        note over JWT
+            Crear JWT con:
+            - Secret key del entorno
+            - Expiración: 1 día
+            - Payload: ID del usuario
+        end note
         
-        AS --> AC: UnauthorizedException(\n"La Cuenta no ha sido confirmada,\nhemos enviado un e-mail de confirmación")
-        AC --> C: HTTP 401\n{"message": "Cuenta no confirmada..."}
-        note right of C: Requiere confirmación
+        JWT --> AS: jwtToken
+        deactivate JWT
         
-    else Cuenta confirmada
-        note over AS: user.confirmed = true
-        
-        === Verificar password ===
-        AS -> AU: checkPassword(password, user.password)
-        activate AU
-        AU -> AU: bcrypt.compare(password, hashedPassword)
-        AU --> AS: boolean (isPasswordCorrect)
-        deactivate AU
-        
-        alt Password incorrecto
-            AS --> AC: UnauthorizedException(\n"Password Incorrecto")
-            AC --> C: HTTP 401\n{"message": "Password Incorrecto"}
-            note right of C: Credenciales inválidas
-            
-        else Password correcto
-            note over AS: Autenticación exitosa
-            
-            === Generar JWT Token ===
-            AS -> AS: Crear payload = {id: user.id}
-            AS -> JUS: generateJWT(payload)
-            activate JUS
-            JUS -> JWT: sign(payload, secret, options)
-            activate JWT
-            JWT --> JUS: jwtToken
-            deactivate JWT
-            JUS --> AS: jwtToken
-            deactivate JUS
-            
-            AS --> AC: {token: jwtToken}
-            AC --> C: HTTP 200\n{"token": "eyJhbGciOiJIUzI1NiIs..."}
-            note right of C: Login exitoso\nGuardar token para\nsiguientes requests
-        end
+        AS --> AC: jwtToken
+        AC --> C: HTTP 200\n{token: "eyJ..."}
     end
 end
 
 deactivate AS
 deactivate AC
 
-== Uso del Token en Requests Protegidos ==
-
-C -> AC: GET /auth/user\nAuthorization: Bearer <token>
-activate AC
-AC -> AG: canActivate(context)
-note right of AC: AuthGuard intercepta\nel request
-
-activate AG
-AG -> AG: extractTokenFromHeader(request)
-note over AG: Extrae token del header\nAuthorization: Bearer <token>
-
-alt Token no presente
-    AG --> AC: UnauthorizedException()
-    AC --> C: HTTP 401\n{"message": "Unauthorized"}
-    note right of C: Token requerido
-else Token presente
-    AG -> JWT: verifyAsync(token, {secret: JWT_SECRET})
-    activate JWT
-    
-    alt Token inválido/expirado
-        JWT --> AG: Error
-        AG --> AC: UnauthorizedException()
-        AC --> C: HTTP 401\n{"message": "Unauthorized"}
-        note right of C: Token inválido
-        
-    else Token válido
-        JWT --> AG: payload = {id: userId, iat, exp}
-        AG -> AG: request.user = payload
-        note over AG: Añade usuario al request
-        AG --> AC: true (permite acceso)
-        deactivate JWT
-        
-        AC -> AS: getUser(req.user.id)
-        activate AS
-        AS -> US: findOne(userId)
-        activate US
-        US -> DB: SELECT * FROM users\nWHERE id = :userId
-        DB --> US: userData
-        US --> AS: user
-        deactivate US
-        AS --> AC: user
-        deactivate AS
-        AC --> C: HTTP 200\n{user data}
-        note right of C: Datos del usuario
-    end
-end
-
-deactivate AG
-deactivate AC
+note over C, EMAIL
+    El cliente debe incluir el JWT token recibido
+    en el header Authorization: Bearer <token>
+    para acceder a endpoints protegidos
+end note
 
 @enduml
