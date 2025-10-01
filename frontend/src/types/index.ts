@@ -1,5 +1,4 @@
 import { z } from 'zod'
-import { ru } from 'zod/v4/locales'
 
 // Define el esquema de un permiso
 // Sirve para validar los datos de un permiso antes de enviarlos al servidor o de mostrarlos en la aplicación
