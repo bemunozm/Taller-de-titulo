@@ -7,8 +7,8 @@ export class UpdateCurrentUserPasswordDto {
         example: 'miPasswordActual123',
         minLength: 6
     })
-    @IsString()
-    @MinLength(6)
+    @IsString({ message: 'La contraseña actual debe ser una cadena de texto' })
+    @MinLength(6, { message: 'La contraseña actual debe tener al menos 6 caracteres' })
     current_password: string;
 
     @ApiProperty({
@@ -16,7 +16,7 @@ export class UpdateCurrentUserPasswordDto {
         example: 'miNuevaPassword456',
         minLength: 6
     })
-    @IsString()
-    @MinLength(6)
+    @IsString({ message: 'La nueva contraseña debe ser una cadena de texto' })
+    @MinLength(6, { message: 'La nueva contraseña debe tener al menos 6 caracteres' })
     password: string;
 }

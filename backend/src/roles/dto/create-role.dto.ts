@@ -7,9 +7,9 @@ export class CreateRoleDto {
         example: 'Administrador',
         maxLength: 100
     })
-    @IsNotEmpty()
-    @IsString()
-    @MaxLength(100)
+    @IsNotEmpty({ message: 'El nombre del rol es obligatorio' })
+    @IsString({ message: 'El nombre del rol debe ser una cadena de texto' })
+    @MaxLength(100, { message: 'El nombre del rol no puede exceder los 100 caracteres' })
     name: string;
 
     @ApiProperty({
@@ -19,8 +19,8 @@ export class CreateRoleDto {
         maxLength: 255
     })
     @IsOptional()
-    @IsString()
-    @MaxLength(255)
+    @IsString({ message: 'La descripción debe ser una cadena de texto' })
+    @MaxLength(255, { message: 'La descripción no puede exceder los 255 caracteres' })
     description?: string;
 
     @ApiProperty({

@@ -128,7 +128,7 @@ export class AuthService {
                 throw new UnauthorizedException('Password Incorrecto');
             }
 
-            const payload = { id: user.id };
+            const payload = { id: user.id, email: user.email, name: user.name, roles: user.roles };
             const jwtToken = this.jwtService.sign(payload);
 
             return jwtToken;

@@ -7,7 +7,7 @@ export class CheckPasswordDto {
         example: 'miPasswordActual123',
         minLength: 6
     })
-    @IsString()
-    @MinLength(6)
+    @IsString({ message: 'La contraseña debe ser una cadena de texto' })
+    @MinLength(6, { message: 'La contraseña debe tener al menos 6 caracteres' })
     password: string;
 }

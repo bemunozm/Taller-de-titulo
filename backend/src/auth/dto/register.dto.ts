@@ -1,5 +1,5 @@
 import { Transform } from "class-transformer";
-import { IsEmail, IsNumber, IsString, MinLength, Validate, ValidationArguments, ValidatorConstraint, ValidatorConstraintInterface } from "class-validator";
+import { IsEmail, IsNotEmpty, IsNumber, IsString, MinLength, Validate, ValidationArguments, ValidatorConstraint, ValidatorConstraintInterface } from "class-validator";
 import { ApiProperty } from "@nestjs/swagger";
 
 @ValidatorConstraint({ name: 'PasswordMatch', async: false })
@@ -18,20 +18,18 @@ export class RegisterDto {
 
     @ApiProperty({
         description: 'RUT del usuario (con guión y dígito verificador)',
-        example: '12345678-9',
-        minLength: 1
+        example: '12345678-9'
     })
-    @IsString()
-    @MinLength(1)
+    @IsString({ message: 'El RUT debe ser una cadena de texto' })
+    @IsNotEmpty({ message: 'El RUT es obligatorio' })
     rut:string;
 
     @ApiProperty({
         description: 'Nombre completo del usuario',
-        example: 'Juan Pérez González',
-        minLength: 1
+        example: 'Juan Pérez González'
     })
-    @IsString()
-    @MinLength(1)
+    @IsString({ message: 'El nombre debe ser una cadena de texto' })
+    @IsNotEmpty({ message: 'El nombre es obligatorio' })
     name: string;
 
     @ApiProperty({
@@ -39,16 +37,15 @@ export class RegisterDto {
         example: 'juan.perez@example.com',
         format: 'email'
     })
-    @IsEmail()
+    @IsEmail({}, { message: 'El correo electrónico debe tener un formato válido' })
     email: string;
 
     @ApiProperty({
         description: 'Número de teléfono del usuario',
-        example: '+56912345678',
-        minLength: 1
+        example: '+56912345678'
     })
-    @IsString()
-    @MinLength(1)
+    @IsString({ message: 'El número de teléfono debe ser una cadena de texto' })
+    @IsNotEmpty({ message: 'El número de teléfono es obligatorio' })
     phone: string;
 
     @ApiProperty({
@@ -56,8 +53,8 @@ export class RegisterDto {
         example: 'miPassword123',
         minLength: 6
     })
-    @IsString()
-    @MinLength(6)
+    @IsString({ message: 'La contraseña debe ser una cadena de texto' })
+    @MinLength(6, { message: 'La contraseña debe tener al menos 6 caracteres' })
     @Transform(({ value }) => value.trim())
     password: string;
 
@@ -66,8 +63,8 @@ export class RegisterDto {
         example: 'miPassword123',
         minLength: 6
     })
-    @IsString()
-    @MinLength(6)
+    @IsString({ message: 'La confirmación de la contraseña debe ser una cadena de texto' })
+    @MinLength(6, { message: 'La confirmación de la contraseña debe tener al menos 6 caracteres' })
     @Validate(PasswordMatchConstraint)
     @Transform(({ value }) => value.trim())
     password_confirmation: string;
@@ -78,6 +75,7 @@ export class RegisterDto {
         minimum: 1,
         maximum: 120
     })
-    @IsNumber()
+    @IsNumber({}, { message: 'La edad debe ser un número' })
+    @IsNotEmpty({ message: 'La edad es obligatoria' })
     age: number;
 }

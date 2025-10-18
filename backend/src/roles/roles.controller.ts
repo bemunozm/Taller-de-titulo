@@ -52,7 +52,7 @@ export class RolesController {
   }
 
   @Get()
-  @RequirePermissions('roles.read')
+  // @RequirePermissions('roles.read')
   @ApiOperation({
     summary: 'Obtener todos los roles',
     description: 'Retorna la lista completa de roles del sistema con sus permisos. Requiere permiso "roles.read".'

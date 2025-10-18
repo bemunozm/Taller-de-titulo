@@ -8,8 +8,8 @@ export class ConfirmAccountDto {
         minLength: 6,
         maxLength: 6
     })
-    @IsString()
-    @MinLength(6)
-    @MaxLength(6)
+    @IsString({ message: 'El token debe ser una cadena de texto' })
+    @MinLength(6, { message: 'El token debe tener al menos 6 caracteres' })
+    @MaxLength(6, { message: 'El token debe tener exactamente 6 caracteres' })
     token: string;
 }

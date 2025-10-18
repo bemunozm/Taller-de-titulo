@@ -7,6 +7,6 @@ export class ForgotPasswordDto {
         example: 'juan.perez@example.com',
         format: 'email'
     })
-    @IsEmail()
+    @IsEmail({}, { message: 'El correo electrónico debe tener un formato válido' })
     email: string;
 }
