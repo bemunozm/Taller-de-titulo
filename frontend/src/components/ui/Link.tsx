@@ -10,16 +10,25 @@ import * as Headless from '@headlessui/react'
 import {
   Link as RouterLink,
   type LinkProps as RouterLinkProps,
-} from "react-router-dom";
+} from 'react-router-dom'
 import React, { forwardRef } from 'react'
 
+type Props = (RouterLinkProps & React.ComponentPropsWithoutRef<'a'>) | ({ href: string } & React.ComponentPropsWithoutRef<'a'>)
+
 export const Link = forwardRef(function Link(
-  props: RouterLinkProps & React.ComponentPropsWithoutRef<'a'>,
+  props: Props,
   ref: React.ForwardedRef<HTMLAnchorElement>
 ) {
+  // Allow passing `href` (legacy) or `to` (react-router). Prefer href when present.
+  const anyProps = props as any
+  const to = anyProps.href ?? anyProps.to ?? '#'
+
+  // Build props for RouterLink: copy all but remove href
+  const { href, ...rest } = anyProps
+
   return (
     <Headless.DataInteractive>
-      <RouterLink {...props} ref={ref} />
+      <RouterLink {...(rest as RouterLinkProps)} to={to} ref={ref} />
     </Headless.DataInteractive>
   )
 })

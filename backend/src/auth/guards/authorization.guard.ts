@@ -37,21 +37,15 @@ export class AuthorizationGuard implements CanActivate {
       throw new ForbiddenException('Usuario no autenticado');
     }
 
-    // Obtener usuario completo con roles y permisos
-    const userWithRoles = await this.userRepository.findOne({
-      where: { id: user.id },
-      relations: ['roles', 'roles.permissions'],
-    });
-
-    if (!userWithRoles || !userWithRoles.roles || userWithRoles.roles.length === 0) {
+    if (!user.roles || user.roles.length === 0) {
       throw new ForbiddenException('Usuario sin roles asignados');
     }
 
     // Obtener nombres de roles del usuario
-    const userRoleNames = userWithRoles.roles.map(role => role.name);
+    const userRoleNames = user.roles.map(role => role.name);
     
     // Obtener todos los permisos del usuario
-    const userPermissions = userWithRoles.roles.reduce((allPermissions, role) => {
+    const userPermissions = user.roles.reduce((allPermissions, role) => {
       const rolePermissions = role.permissions?.map(p => p.name) || [];
       return [...allPermissions, ...rolePermissions];
     }, []);

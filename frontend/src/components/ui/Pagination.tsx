@@ -18,9 +18,7 @@ export function PaginationPrevious({
   return (
     <span className={clsx(className, 'grow basis-0')}>
       <Button
-        {...(href === null
-          ? { disabled: true }
-          : { to: href })}
+        {...(href === null ? { disabled: true } : { href })}
         plain
         aria-label="Previous page"
       >
@@ -45,7 +43,7 @@ export function PaginationNext({
 }: React.PropsWithChildren<{ href?: string | null; className?: string }>) {
   return (
     <span className={clsx(className, 'flex grow basis-0 justify-end')}>
-      <Button {...(href === null ? { disabled: true } : { to: href })} plain aria-label="Next page">
+  <Button {...(href === null ? { disabled: true } : { href })} plain aria-label="Next page">
         {children}
         <svg className="stroke-current" data-slot="icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <path
@@ -72,7 +70,7 @@ export function PaginationPage({
 }: React.PropsWithChildren<{ href: string; className?: string; current?: boolean }>) {
   return (
     <Button
-      to={href}
+      href={href}
       plain
       aria-label={`Page ${children}`}
       aria-current={current ? 'page' : undefined}

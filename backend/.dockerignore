@@ -1,0 +1,44 @@
+# Archivos de configuración Docker
+.dockerignore
+Dockerfile
+docker-compose*.yml
+
+# Dependencias
+node_modules/
+npm-debug.log*
+
+# Build output
+dist/
+build/
+
+# Logs
+*.log
+logs/
+
+# Variables de entorno
+.env
+.env.local
+.env.development
+.env.production
+
+# Cache
+.npm
+.cache
+
+# OS generated
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Coverage
+coverage/

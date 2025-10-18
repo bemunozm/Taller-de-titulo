@@ -3,6 +3,8 @@
 import * as Headless from '@headlessui/react'
 import React, { useState } from 'react'
 import { NavbarItem } from '@/components/ui/Navbar'
+import { SidebarItem } from '@/components/ui/Sidebar'
+import { Outlet, useLocation } from 'react-router-dom'
 
 function OpenMenuIcon() {
   return (
@@ -47,9 +49,41 @@ function MobileSidebar({ open, close, children }: React.PropsWithChildren<{ open
 export function StackedLayout({
   navbar,
   sidebar,
-  children,
-}: React.PropsWithChildren<{ navbar: React.ReactNode; sidebar: React.ReactNode }>) {
+}: React.PropsWithChildren<{ navbar?: React.ReactNode; sidebar?: React.ReactNode }>) {
   let [showSidebar, setShowSidebar] = useState(false)
+  const location = useLocation()
+
+  // Recorre un árbol de React nodes y marca como `current` los NavbarItem/SidebarItem
+  function markActive(node: React.ReactNode): React.ReactNode {
+    if (!React.isValidElement(node)) return node
+
+    // procesa children recursivamente
+    const children = (node as any).props?.children
+    const newChildren = React.Children.map(children, (child) => markActive(child))
+
+    // si el elemento es NavbarItem o SidebarItem, comprobar prop `to` o `href`
+    const elementType = (node.type as any)
+    const isNavItem = elementType === NavbarItem || elementType === SidebarItem
+
+    if (isNavItem) {
+      const props: any = (node as any).props || {}
+      const link = props.to ?? props.href
+      if (typeof link === 'string') {
+        // marcar current si coincide exactamente o si es prefijo (para secciones)
+        const isCurrent = link === location.pathname || (link !== '/' && location.pathname.startsWith(link))
+        if (isCurrent) {
+          return React.cloneElement(node, { ...(props as any), current: true, children: newChildren ?? props.children })
+        }
+      }
+    }
+
+    // si hubo children transformados, devolver clon con children nuevos
+    if (newChildren !== undefined) {
+      return React.cloneElement(node, { ...( (node as any).props as any ), children: newChildren })
+    }
+
+    return node
+  }
 
   return (
     <div className="relative isolate flex min-h-svh w-full flex-col bg-white lg:bg-zinc-100 dark:bg-zinc-900 dark:lg:bg-zinc-950">
@@ -65,13 +99,15 @@ export function StackedLayout({
             <OpenMenuIcon />
           </NavbarItem>
         </div>
-        <div className="min-w-0 flex-1">{navbar}</div>
+        <div className="min-w-0 flex-1 flex items-center gap-4">
+          <div className="flex-1">{markActive(navbar) ?? null}</div>
+        </div>
       </header>
 
       {/* Content */}
       <main className="flex flex-1 flex-col pb-2 lg:px-2">
         <div className="grow p-6 lg:rounded-lg lg:bg-white lg:p-10 lg:shadow-xs lg:ring-1 lg:ring-zinc-950/5 dark:lg:bg-zinc-900 dark:lg:ring-white/10">
-          <div className="mx-auto max-w-6xl">{children}</div>
+          <div className="mx-auto max-w-6xl"><Outlet /></div>
         </div>
       </main>
     </div>

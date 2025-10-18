@@ -8,7 +8,7 @@ export class LoginDto {
     example: 'juan.perez@example.com',
     format: 'email'
   })
-  @IsEmail()
+  @IsEmail({}, { message: 'El correo electrónico debe tener un formato válido' })
   email: string;
 
   @ApiProperty({
@@ -16,8 +16,8 @@ export class LoginDto {
     example: 'miPassword123',
     minLength: 6
   })
-  @IsString()
-  @MinLength(6)
+  @IsString({ message: 'La contraseña debe ser una cadena de texto' })
+  @MinLength(6, { message: 'La contraseña debe tener al menos 6 caracteres' })
   @Transform(({ value }) => value.trim())
   password: string;
 }

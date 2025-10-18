@@ -7,10 +7,12 @@ import { RolesModule } from './roles/roles.module';
 import { TokensModule } from './tokens/tokens.module';
 import { AuthModule } from './auth/auth.module';
 import { PermissionsModule } from './permissions/permissions.module';
+import { StreamsModule } from './streams/streams.module';
 import { DataInitializationService } from './common/services/data-initialization.service';
 import { CleanupService } from './common/services/cleanup.service';
 import { Role } from './roles/entities/role.entity';
 import { Permission } from './permissions/entities/permission.entity';
+import { CamerasModule } from './cameras/cameras.module';
 
 @Module({
   imports: [
@@ -32,6 +34,8 @@ import { Permission } from './permissions/entities/permission.entity';
     TokensModule,
     AuthModule,
     PermissionsModule,
+    StreamsModule,
+    CamerasModule,
   ],
   controllers: [],
   providers: [DataInitializationService, CleanupService],

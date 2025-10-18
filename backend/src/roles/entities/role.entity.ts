@@ -1,5 +1,6 @@
 import { User } from "src/users/entities/user.entity";
 import { Permission } from "src/permissions/entities/permission.entity";
+import { Camera } from 'src/cameras/entities/camera.entity';
 import { Column, Entity, JoinTable, ManyToMany, PrimaryGeneratedColumn } from "typeorm";
 
 @Entity()
@@ -19,4 +20,7 @@ export class Role {
     @ManyToMany(() => Permission, (permission) => permission.roles)
     @JoinTable()
     permissions: Permission[];
+
+    @ManyToMany(() => Camera, (camera) => camera.roles)
+    cameras: Camera[];
 }

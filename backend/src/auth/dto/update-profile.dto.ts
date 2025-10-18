@@ -1,4 +1,4 @@
-import { IsString, IsEmail, MinLength } from 'class-validator';
+import { IsString, IsEmail, MinLength, IsNotEmpty } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class UpdateProfileDto {
@@ -7,8 +7,8 @@ export class UpdateProfileDto {
         example: 'Juan Carlos Pérez González',
         minLength: 1
     })
-    @IsString()
-    @MinLength(1)
+    @IsString({ message: 'El nombre debe ser una cadena de texto' })
+    @IsNotEmpty({ message: 'El nombre es obligatorio' })
     name: string;
 
     @ApiProperty({
@@ -16,6 +16,6 @@ export class UpdateProfileDto {
         example: 'juan.carlos@example.com',
         format: 'email'
     })
-    @IsEmail()
+    @IsEmail({}, { message: 'El correo electrónico debe tener un formato válido' })
     email: string;
 }

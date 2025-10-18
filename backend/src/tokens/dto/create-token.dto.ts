@@ -8,8 +8,8 @@ export class CreateTokenDto {
         minLength: 6,
         maxLength: 6
     })
-    @IsString()
-    @Length(6, 6)
+    @IsString({ message: 'El token debe ser una cadena de texto' })
+    @Length(6, 6, { message: 'El token debe tener exactamente 6 caracteres' })
     token: string;
 
     @ApiProperty({
@@ -17,7 +17,7 @@ export class CreateTokenDto {
         example: 'user-uuid-123',
         format: 'uuid'
     })
-    @IsString()
-    @IsUUID()
+    @IsString({ message: 'El ID de usuario debe ser una cadena de texto' })
+    @IsUUID('4', { message: 'El ID de usuario debe ser un UUID válido' })
     userId: string;
 }
