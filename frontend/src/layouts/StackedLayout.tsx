@@ -1,7 +1,9 @@
 'use client'
 
 import * as Headless from '@headlessui/react'
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { useAuth } from '@/hooks/useAuth'
 import { NavbarItem } from '@/components/ui/Navbar'
 import { SidebarItem } from '@/components/ui/Sidebar'
 import { Outlet, useLocation } from 'react-router-dom'
@@ -52,6 +54,19 @@ export function StackedLayout({
 }: React.PropsWithChildren<{ navbar?: React.ReactNode; sidebar?: React.ReactNode }>) {
   let [showSidebar, setShowSidebar] = useState(false)
   const location = useLocation()
+  const navigate = useNavigate()
+  const { data: user, isError, isLoading } = useAuth()
+
+  // Redirigir a la pantalla de login si el usuario no está autenticado
+  useEffect(() => {
+    // esperar a que termine la carga
+    if (isLoading) return
+    const path = location.pathname || ''
+    // si no hay usuario y no estamos ya en las rutas de auth, redirigir
+    if ((!user || isError) && !path.startsWith('/auth')) {
+      navigate('/auth/login')
+    }
+  }, [user, isError, isLoading, navigate, location.pathname])
 
   // Recorre un árbol de React nodes y marca como `current` los NavbarItem/SidebarItem
   function markActive(node: React.ReactNode): React.ReactNode {

@@ -27,6 +27,29 @@ import {
   ShieldCheckIcon,
   UserIcon,
 } from "@heroicons/react/16/solid";
+import { useNavigate } from 'react-router-dom'
+import { toast } from 'react-toastify'
+import { useAuth } from './hooks/useAuth'
+
+function LogoutItem() {
+  const navigate = useNavigate()
+  const { logout } = useAuth()
+  const handle = () => {
+    try {
+      logout()
+    } catch (e) {
+      // ignore
+    }
+    toast.success('Cerraste sesión correctamente')
+    navigate('/auth/login')
+  }
+  return (
+    <DropdownItem onClick={handle}>
+      <ArrowRightStartOnRectangleIcon />
+      <DropdownLabel>Cerrar sesión</DropdownLabel>
+    </DropdownItem>
+  )
+}
 import { InboxIcon, MagnifyingGlassIcon } from "@heroicons/react/20/solid";
 import {
   Navbar,
@@ -135,10 +158,7 @@ export default function Router() {
                           <DropdownLabel>Enviar comentarios</DropdownLabel>
                         </DropdownItem>
                         <DropdownDivider />
-                        <DropdownItem href="/logout">
-                          <ArrowRightStartOnRectangleIcon />
-                          <DropdownLabel>Cerrar sesión</DropdownLabel>
-                        </DropdownItem>
+                        <LogoutItem />
                       </DropdownMenu>
                     </Dropdown>
                   </NavbarSection>
