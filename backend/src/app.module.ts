@@ -13,6 +13,9 @@ import { CleanupService } from './common/services/cleanup.service';
 import { Role } from './roles/entities/role.entity';
 import { Permission } from './permissions/entities/permission.entity';
 import { CamerasModule } from './cameras/cameras.module';
+import { DetectionsModule } from './detections/detections.module';
+import { VehiclesModule } from './vehicles/vehicles.module';
+import { WorkersModule } from './workers/workers.module';
 
 @Module({
   imports: [
@@ -36,6 +39,9 @@ import { CamerasModule } from './cameras/cameras.module';
     PermissionsModule,
     StreamsModule,
     CamerasModule,
+  DetectionsModule,
+  VehiclesModule,
+  WorkersModule,
   ],
   controllers: [],
   providers: [DataInitializationService, CleanupService],

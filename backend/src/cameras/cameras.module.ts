@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CamerasService } from './cameras.service';
+import { WorkerNotifierService } from 'src/workers/worker-notifier.service';
 import { CamerasController } from './cameras.controller';
 import { Camera } from './entities/camera.entity';
 import { Role } from 'src/roles/entities/role.entity';
@@ -12,7 +13,7 @@ import { UsersModule } from 'src/users/users.module';
 @Module({
   imports: [TypeOrmModule.forFeature([Camera, Role]), MediamtxModule, AuthModule, UsersModule],
   controllers: [CamerasController],
-  providers: [CamerasService, CameraViewGuard],
-  exports: [CameraViewGuard, CamerasService],
+  providers: [CamerasService, CameraViewGuard, WorkerNotifierService],
+  exports: [CameraViewGuard, CamerasService, WorkerNotifierService],
 })
 export class CamerasModule {}

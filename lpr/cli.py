@@ -1,6 +1,6 @@
 import logging
 import cv2
-from .config import load_from_env_or_args
+from .settings import build_worker_config as load_from_env_or_args
 from .detector.yolo_detector import load_detector, detect
 from .ocr.fast_ocr_adapter import FastPlateOCR
 from .processor.worker import LprWorker

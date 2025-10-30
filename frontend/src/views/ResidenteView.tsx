@@ -79,7 +79,21 @@ export default function ResidenteView() {
 
         <div className="relative rounded-lg overflow-hidden bg-black shadow-lg">
           {/* etiqueta de cámara */}
-          <div className="absolute left-4 top-4 z-20 px-3 py-1 rounded bg-black/50 text-white text-sm">{current}</div>
+          {currentCamera ? (
+            (() => {
+              const mountOrId = currentCamera.mountPath ?? currentCamera.id
+              const displayName = currentCamera.name ?? mountOrId
+              const displayLocation = currentCamera.location ?? ''
+              return (
+                <div className="absolute left-4 top-4 z-20 px-3 py-1 rounded bg-black/50 text-white text-sm max-w-[60%]">
+                  <div className="truncate font-medium">{displayName}</div>
+                  {displayLocation ? <div className="text-xs text-zinc-300 truncate">{displayLocation}</div> : null}
+                </div>
+              )
+            })()
+          ) : (
+            <div className="absolute left-4 top-4 z-20 px-3 py-1 rounded bg-black/50 text-white text-sm">{current}</div>
+          )}
 
           {/* botón anterior */}
           <button

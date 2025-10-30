@@ -8,6 +8,7 @@ import { Camera } from './entities/camera.entity';
 import { Role } from 'src/roles/entities/role.entity';
 import { encryptString, decryptString } from 'src/utils/crypto.util';
 import { MediamtxService } from 'src/mediamtx/mediamtx.service';
+import { WorkerNotifierService } from 'src/workers/worker-notifier.service';
 import { v4 as uuidv4 } from 'uuid';
 
 @Injectable()
@@ -20,6 +21,7 @@ export class CamerasService {
     private readonly roleRepository: Repository<Role>,
     private readonly mediamtxService?: MediamtxService,
     private readonly dataSource?: DataSource,
+    private readonly workerNotifier?: WorkerNotifierService,
   ) {}
 
   // Ayudante: comprobación rápida tipo UUID v4 para evitar consultar la columna UUID con cadenas no UUID
@@ -120,6 +122,15 @@ export class CamerasService {
 
       // Comportamiento por defecto (no strict): guardar e intentar el registro de forma best-effort
       const saved = await this.cameraRepository.save(camera);
+      // notify worker manager if LPR enabled
+      try {
+        if (saved.enableLpr && this.workerNotifier) {
+          const decrypted = await this.getDecryptedSourceUrl(saved.id);
+          await this.workerNotifier.registerCamera(saved.id, decrypted || '', saved.mountPath);
+        }
+      } catch (err) {
+        this.logger.warn(`No se pudo notificar al worker manager tras crear cámara: ${err?.message || err}`);
+      }
       if (registerEnabled && this.mediamtxService) {
         try {
           const mount = saved.mountPath && saved.mountPath.length > 0 ? saved.mountPath : saved.id;
@@ -303,6 +314,18 @@ export class CamerasService {
 
       // Comportamiento por defecto (no strict): guardar e intentar registro/deregistro de forma best-effort
       const saved = await this.cameraRepository.save(camera);
+      // notify worker manager about enableLpr changes
+      try {
+        if (saved.enableLpr && this.workerNotifier) {
+          const decrypted = await this.getDecryptedSourceUrl(saved.id);
+          await this.workerNotifier.registerCamera(saved.id, decrypted || '', saved.mountPath);
+        } else if (!saved.enableLpr && this.workerNotifier) {
+          // if LPR was disabled, unregister
+          await this.workerNotifier.unregisterCamera(saved.id);
+        }
+      } catch (err) {
+        this.logger.warn(`No se pudo notificar al worker manager tras actualizar cámara: ${err?.message || err}`);
+      }
       if (registerEnabled && this.mediamtxService) {
         try {
           const newMount = saved.mountPath && saved.mountPath.length > 0 ? saved.mountPath : saved.id;
@@ -365,6 +388,12 @@ export class CamerasService {
           await this.mediamtxService.deregisterSource(mount);
           await queryRunner.manager.delete(Camera, id);
           await queryRunner.commitTransaction();
+          // notify worker manager to unregister LPR for this camera (best-effort)
+          try {
+            if (this.workerNotifier) await this.workerNotifier.unregisterCamera(id);
+          } catch (err) {
+            this.logger.warn(`No se pudo notificar al worker manager para desregistrar cámara tras delete (strict): ${err?.message || err}`);
+          }
           return { message: 'Cámara eliminada' };
         } catch (err) {
           await queryRunner.rollbackTransaction();
@@ -388,6 +417,12 @@ export class CamerasService {
 
       const result = await this.cameraRepository.delete(id);
       if (result.affected === 0) throw new NotFoundException(`Cámara con ID ${id} no encontrada`);
+      // notify worker manager to unregister LPR for this camera (best-effort)
+      try {
+        if (this.workerNotifier) await this.workerNotifier.unregisterCamera(id);
+      } catch (err) {
+        this.logger.warn(`No se pudo notificar al worker manager para desregistrar cámara tras delete: ${err?.message || err}`);
+      }
       return { message: 'Cámara eliminada' };
     } catch (error) {
       if (error instanceof NotFoundException) throw error;
@@ -407,6 +442,14 @@ export class CamerasService {
       await this.mediamtxService.registerSource(mount, decrypted);
       camera.registeredInMediamtx = true;
       await this.cameraRepository.save(camera);
+      // if camera has LPR enabled, notify worker manager to (re)start analysis
+      try {
+        if (camera.enableLpr && this.workerNotifier) {
+          await this.workerNotifier.registerCamera(camera.id, decrypted, mount);
+        }
+      } catch (err) {
+        this.logger.warn(`No se pudo notificar al worker manager tras registerInMediamtx: ${err?.message || err}`);
+      }
       return true;
     } catch (err) {
       camera.registeredInMediamtx = false;

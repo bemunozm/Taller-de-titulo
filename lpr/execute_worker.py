@@ -24,7 +24,6 @@ def _run_from_args_or_env():
             from lpr.cli import main  # type: ignore
         except Exception:
             import os
-            import sys
             import importlib
             script_dir = os.path.dirname(__file__)
             parent_dir = os.path.abspath(os.path.join(script_dir, os.pardir))

@@ -1,0 +1,11 @@
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.30.0
+huggingface-hub>=0.15.0
+ultralytics>=8.1.0
+opencv-python-headless>=4.7.0
+Pillow>=9.5.0
+requests>=2.31.0
+
+# Optional (GPU builds)
+# For CUDA-enabled PyTorch, install the appropriate torch wheel from https://pytorch.org

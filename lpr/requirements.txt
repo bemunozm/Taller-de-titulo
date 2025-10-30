@@ -12,5 +12,10 @@ numpy>=1.25.0
 # fast-plate-ocr (se recomienda la variante onnx según su documentación)
 fast-plate-ocr[onnx]
 
+# Manager HTTP
+fastapi>=0.95.0
+uvicorn[standard]>=0.23.0
+pydantic>=1.10.0
+
 # Optional (GPU builds)
 # For CUDA-enabled PyTorch, install the appropriate torch wheel from https://pytorch.org

@@ -23,6 +23,9 @@ export class Camera {
 	@Column({ type: 'boolean', default: false })
 	registeredInMediamtx: boolean;
 
+	@Column({ type: 'boolean', default: false })
+	enableLpr: boolean;
+
 	@Column({ type: 'boolean', default: true })
 	active: boolean;
 

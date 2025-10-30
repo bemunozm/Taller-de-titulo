@@ -8,6 +8,8 @@ import { AuthLayout } from "@/layouts/AuthLayout";
 import RequestCodeView from "./views/auth/RequestCodeView";
 import ConserjeView from "./views/ConserjeView";
 import ResidenteView from "./views/ResidenteView";
+import TraceabilityView from "./views/TraceabilityView";
+import TraceabilityDetailView from "./views/TraceabilityDetailView";
 import { StackedLayout } from "./layouts/StackedLayout";
 import { Avatar } from "@/components/ui/Avatar";
 import {
@@ -119,7 +121,7 @@ export default function Router() {
                       { label: "Inicio", url: "/" },
                       { label: "Camaras - Conserje", url: "/conserje" },
                       { label: "Camaras - Residentes", url: "/residente" },
-                      { label: "Transmisiones", url: "/broadcasts" },
+                      { label: "Trazabilidad", url: "/traceability" },
                       { label: "Configuraciones", url: "/settings" },
                     ].map(({ label, url }) => (
                       <NavbarItem key={label} href={url}>
@@ -208,7 +210,7 @@ export default function Router() {
                         { label: "Inicio", url: "/" },
                         { label: "Camaras - Conserje", url: "/conserje" },
                         { label: "Camaras - Residentes", url: "/residente" },
-                        { label: "Transmisiones", url: "/broadcasts" },
+                        { label: "Trazabilidad", url: "/traceability" },
                         { label: "Configuraciones", url: "/settings" },
                       ].map(({ label, url }) => (
                         <SidebarItem key={label} href={url}>
@@ -235,6 +237,8 @@ export default function Router() {
           <Route path="/conserje" element={<ConserjeView />} />
           <Route path="/settings" element={<SettingsView />} />
           <Route path="/residente" element={<ResidenteView />} />
+          <Route path="/traceability" element={<TraceabilityView />} />
+          <Route path="/traceability/:id" element={<TraceabilityDetailView />} />
         </Route>
 
         {/* Rutas de autenticación sin layout principal */}
