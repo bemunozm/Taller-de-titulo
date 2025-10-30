@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lpr"
+version = "0.0.0"
+description = "Lightweight LPR package for project"
+authors = [
+  { name = "Proyecto Taller de Titulo", email = "ben.munozm@gmail.com" }
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lpr*"]

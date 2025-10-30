@@ -1,0 +1,110 @@
+@startuml view-stream-sequence-diagram
+title Visualización de streaming - Diagrama de Secuencia (RF-0202)
+
+actor User
+participant "Frontend (CameraPlayer)" as Frontend
+participant "AuthGuard + AuthorizationGuard" as AuthGuards
+participant "CameraViewGuard (permiso + estado cámara)" as CameraViewGuard
+participant "StreamsController (Backend)" as StreamsController
+participant "StreamsService (Backend)" as StreamsService
+participant "CamerasService (Backend)" as CamerasService
+participant "MediaMTX (WHEP endpoint)" as MediaMTX
+
+== Flujo Principal: reproducción WebRTC/WHEP ==
+User -> Frontend: Abrir vista de cámara (cameraId)
+activate Frontend
+
+Frontend -> Frontend: Crear RTCPeerConnection, addTransceiver('video','recvonly')
+Frontend -> Frontend: createOffer() + setLocalDescription(offer)
+Frontend -> Frontend: Esperar ICE gathering (evento icecandidate null o timeout ~3s)
+note right of Frontend: El cliente espera ICE candidates antes de enviar la oferta
+
+Frontend -> StreamsController: POST /streams/whep { offer: SDP, cameraMount: cameraId } (Authorization: Bearer <token>)
+activate StreamsController
+
+StreamsController -> AuthGuards: comprobar token y autorizaciones (AuthGuard + AuthorizationGuard)
+AuthGuards --> StreamsController: 200 OK (token válido)
+
+StreamsController -> CameraViewGuard: validar acceso a cámara (body.cameraMount)
+activate CameraViewGuard
+CameraViewGuard -> CamerasService: getCameraByIdOrMount(cameraMount)
+CamerasService --> CameraViewGuard: camera entity (or null)
+CameraViewGuard -> CamerasService: userHasAccessToCameraByRoles(cameraMount, user.roles)
+CameraViewGuard --> StreamsController: 200 OK (permitido)
+deactivate CameraViewGuard
+
+StreamsController -> StreamsService: forwardOfferToMediaMtx(offer, cameraMount)
+activate StreamsService
+note right of StreamsService: Resolve camera metadata (mount path, decrypted source) using CamerasService
+StreamsService -> CamerasService: getMountPath(cameraMount)
+StreamsService -> CamerasService: getDecryptedSourceUrl(cameraMount)
+CamerasService --> StreamsService: mountPath, decryptedSource (or fallback to cameraMount)
+
+note over StreamsService,MediaMTX: Construir URL: {MEDIAMTX_URL}/{safePath}/whep
+StreamsService -> MediaMTX: POST /{safePath}/whep (Content-Type: application/sdp) [body = raw SDP string]
+activate MediaMTX
+MediaMTX --> StreamsService: 200 OK (respuesta SDP — puede ser texto plano o JSON { answer: <sdp> })
+deactivate MediaMTX
+
+StreamsService --> StreamsController: answer SDP (string)
+deactivate StreamsService
+StreamsController --> Frontend: 200 OK { answer: <sdp string> }
+deactivate StreamsController
+
+Frontend -> Frontend: setRemoteDescription(answer)
+note over Frontend: ICE/DTLS handshake procede; luego RTP/RTCP media flows con MediaMTX
+MediaMTX --> Frontend: Media track(s) (ontrack event)
+Frontend -> Frontend: Render video frame
+deactivate Frontend
+
+== Casos alternativos y comprobaciones ==
+alt cameraMount faltante/ inválido
+  StreamsService -> StreamsController: BadRequestException
+  StreamsController --> Frontend: 400 Bad Request
+end
+
+alt CameraViewGuard deniega (no roles / cámara no encontrada)
+  CameraViewGuard --> StreamsController: 403 Forbidden | 404 Not Found
+  StreamsController --> Frontend: 403/404 según corresponde
+end
+
+alt Cámara encontrada pero inactiva o no registrada en MediaMTX
+  CameraViewGuard --> StreamsController: 503 Service Unavailable (cámara no disponible/ no registrada)
+  StreamsController --> Frontend: 503 Service Unavailable
+end
+
+alt MediaMTX error / timeout
+  MediaMTX --> StreamsService: error/timeout
+  StreamsService -> StreamsController: InternalServerErrorException
+  StreamsController --> Frontend: 500 Internal Server Error
+  Frontend -> Frontend: mostrar error y planificar reintento (backoff exponencial)
+end
+
+== Reconexión cliente (comportamiento frontend) ==
+loop Reintentos de reconexión (backoff exponencial, maxRetries = 3)
+  Frontend -> Frontend: crear nuevo RTCPeerConnection y generar nueva oferta (offer SDP)
+  Frontend -> StreamsController: POST /streams/whep { offer: SDP, cameraMount }
+  StreamsController -> StreamsService: forwardOfferToMediaMtx(offer, cameraMount)
+  StreamsService -> MediaMTX: POST /{safePath}/whep (offer)
+  alt MediaMTX responde (200)
+    MediaMTX --> StreamsService: answer SDP
+    StreamsService --> StreamsController: answer SDP
+    StreamsController --> Frontend: 200 OK {answer}
+    Frontend -> Frontend: aplicar answer y restablecer pc
+    break
+  else MediaMTX error / timeout
+    StreamsService --> StreamsController: 500 InternalServerError
+    StreamsController --> Frontend: 500 Error
+    Frontend -> Frontend: esperar backoff y reintentar (backoff base ~1500ms * 2^(attempt-1))
+  end
+end
+
+note left
+Observaciones:
+* CameraViewGuard comprueba existencia de la cámara, estado (active) y flag registeredInMediamtx. Si falla devuelve 403/404/503 según el caso.
+* StreamsService valida cameraMount y usa CamerasService.getMountPath / getDecryptedSourceUrl; construye URL segura usando encodeURIComponent por segmento.
+* MediaMTX puede devolver SDP como texto plano o como JSON { answer } — StreamsController/Service devuelven el contenido tal cual al frontend.
+* Frontend espera ICE gather antes de POST y realiza retries con backoff y un máximo de intentos (3 por defecto).
+end note
+
+@enduml

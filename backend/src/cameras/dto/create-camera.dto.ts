@@ -31,6 +31,11 @@ export class CreateCameraDto {
 	@IsOptional()
 	active?: boolean;
 
+	@ApiProperty({ description: 'Habilitar análisis LPR (reconocimiento de patentes) para esta cámara', required: false, example: false })
+	@IsBoolean({ message: 'enableLpr debe ser booleano' })
+	@IsOptional()
+	enableLpr?: boolean;
+
 	@ApiProperty({ description: 'IDs de roles que tendrán acceso a esta cámara', example: ['role-uuid-1', 'role-uuid-2'], required: false })
 	@IsArray({ message: 'Los IDs de roles deben ser un arreglo' })
 	@ArrayUnique({ message: 'Los IDs de roles deben ser únicos' })

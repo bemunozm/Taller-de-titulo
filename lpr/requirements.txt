@@ -1,0 +1,21 @@
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.30.0
+huggingface-hub>=0.15.0
+ultralytics>=8.1.0
+opencv-python-headless>=4.7.0
+Pillow>=9.5.0
+requests>=2.31.0
+
+# Añadidos necesarios detectados por el análisis de código
+numpy>=1.25.0
+# fast-plate-ocr (se recomienda la variante onnx según su documentación)
+fast-plate-ocr[onnx]
+
+# Manager HTTP
+fastapi>=0.95.0
+uvicorn[standard]>=0.23.0
+pydantic>=1.10.0
+
+# Optional (GPU builds)
+# For CUDA-enabled PyTorch, install the appropriate torch wheel from https://pytorch.org

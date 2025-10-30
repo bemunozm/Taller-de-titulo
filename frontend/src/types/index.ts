@@ -119,6 +119,8 @@ export const createCameraSchema = z.object({
     sourceUrl: z.string().min(1).max(500),
     // optional: whether the camera is active
     active: z.boolean().optional(),
+    // optional: enable license plate recognition for this camera
+    enableLpr: z.boolean().optional(),
     // role IDs that will be associated to the camera
     roleIds: z.array(z.string().uuid()).optional(),
 })

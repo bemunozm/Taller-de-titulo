@@ -1,0 +1,78 @@
+@startuml camera-crud-sequence-diagram
+title Alta / Gestión de Cámaras - Diagrama de Secuencia (RF-0201)
+actor Admin
+participant "Frontend (UI)" as Frontend
+participant "AuthService" as Auth
+participant "CamerasController (Backend)" as Controller
+participant "CamerasService" as Service
+participant "DB / Cameras Repository" as DB
+participant "MediamtxService (Control API)" as Mediamtx
+participant "WorkerNotifierService (Worker Manager)" as WorkerNotifier
+participant "LPR Manager (lpr manager)" as LPRManager
+participant "Worker Process (lpr worker)" as Worker
+participant "Background Queue / Reconciler" as Queue
+
+== Flujo principal: Crear cámara ==
+Admin -> Frontend: Formulario crear cámara (name, location, sourceUrl, creds, enableLpr, roles)
+Frontend -> Controller: POST /api/cameras {payload}
+activate Controller
+Controller -> Auth: validar token y permisos [rol=Admin]
+Auth --> Controller: 200 OK (permiso concedido)
+Controller -> Service: validar payload y construir entidad
+activate Service
+Service -> DB: INSERT camera
+DB --> Service: 201 Created (camera.id)
+Service -> Mediamtx: registerSource(mountPath, rtspUrl)
+activate Mediamtx
+Mediamtx --> Service: 200 OK (registro aceptado)
+deactivate Mediamtx
+Service -> WorkerNotifier: if enableLpr true -> registerCamera(camera.id)
+activate WorkerNotifier
+WorkerNotifier -> LPRManager: POST /register-camera { cameraId, rtspUrl, config }
+activate LPRManager
+LPRManager -> Worker: spawn worker process for camera
+activate Worker
+Worker --> LPRManager: worker started (pid/identifier)
+deactivate Worker
+LPRManager --> WorkerNotifier: 200 OK (worker registrado)
+deactivate LPRManager
+WorkerNotifier --> Service: 200 OK (worker registrado)
+deactivate WorkerNotifier
+Service --> Controller: camera entity (persistido)
+deactivate Service
+Controller --> Frontend: 201 Created + camera
+deactivate Controller
+
+note over Frontend,Controller
+  UI actualiza lista de cámaras y notifica al usuario
+end note
+
+== Flujo alternativo A: Validación falla ==
+alt Datos inválidos
+  Controller --> Frontend: 400 Bad Request (errores de validación)
+end
+
+== Flujo alternativo B: Permiso denegado ==
+alt Usuario sin rol Admin
+  Controller --> Frontend: 403 Forbidden
+end
+
+== Flujo alternativo C: MediaMTX inaccesible (política configurable) ==
+alt Mediamtx register falla (timeout/500)
+  Service -> Queue: Encolar tarea "reintentar registro en MediaMTX" (async)
+  Queue --> Service: ack
+  Service --> Controller: persistido con flag mediamtx_sync=false
+  Controller --> Frontend: 201 Created + camera (advertencia: registro pendiente)
+else Política: bloquear operación
+  Service --> Controller: lanza InternalServerError
+  Controller --> Frontend: 500 Internal Server Error (detallar causa)
+end
+
+== Notas de diseño ==
+note left
+- Registrar en MediaMTX puede realizarse síncrona o asíncronamente según SLA.
+- WorkerNotifier registra la cámara en el manager para habilitar consumo de IA.
+- Es recomendable encolar reintentos y exponer estado de sincronización en la UI.
+end note
+
+@enduml

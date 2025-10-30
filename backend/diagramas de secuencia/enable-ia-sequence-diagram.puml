@@ -1,0 +1,62 @@
+@startuml enable-ia-sequence-diagram
+title Activar detección IA por cámara - Diagrama de Secuencia (RF-0301)
+
+actor Admin
+participant "Frontend (CamerasPanel)" as Frontend
+participant "CamerasController (Backend)" as CamerasController
+participant "CamerasService (Backend)" as CamerasService
+participant "WorkerNotifierService" as WorkerNotifier
+participant "LPR Manager (lpr manager)" as LPRManager
+participant "Worker Process (lpr worker)" as Worker
+participant "DB / Cameras" as DB
+
+== Flujo principal: Activar LPR en una cámara ==
+Admin -> Frontend: Toggle 'enableLpr' ON for cameraId
+Frontend -> CamerasController: PATCH /cameras/:id { enableLpr: true }
+activate CamerasController
+CamerasController -> CamerasService: update(id, { enableLpr: true })
+activate CamerasService
+CamerasService -> DB: UPDATE camera.enableLpr = true
+DB --> CamerasService: 200 OK (camera saved)
+
+alt decrypted source disponible
+  CamerasService -> WorkerNotifier: registerCamera(camera.id, decryptedSource, mountPath)
+  activate WorkerNotifier
+  WorkerNotifier -> LPRManager: POST /register-camera { cameraId, rtspUrl, mountPath } (with secret)
+  activate LPRManager
+  LPRManager -> Worker: spawn subprocess `python -m lpr.execute_worker rtsp cameraId backendUrl`
+  activate Worker
+  Worker --> LPRManager: started (pid)
+  deactivate Worker
+  LPRManager --> WorkerNotifier: 200 OK (started)
+  deactivate LPRManager
+  WorkerNotifier --> CamerasService: 200 OK
+else no source disponible
+  CamerasService --> CamerasController: 200 OK (saved but worker not started - missing source)
+end
+
+CamerasService --> CamerasController: 200 OK (camera updated)
+deactivate CamerasService
+CamerasController --> Frontend: 200 OK { camera }
+deactivate CamerasController
+
+== Flujo alternativo: Desactivar LPR ==
+alt Admin desactiva enableLpr
+  Frontend -> CamerasController: PATCH /cameras/:id { enableLpr: false }
+  CamerasController -> CamerasService: update(...)
+  CamerasService -> DB: UPDATE camera.enableLpr = false
+  CamerasService -> WorkerNotifier: unregisterCamera(camera.id)
+  WorkerNotifier -> LPRManager: POST /unregister-camera { cameraId }
+  LPRManager -> Worker: terminate subprocess
+  LPRManager --> WorkerNotifier: 200 OK
+  CamerasController --> Frontend: 200 OK
+end
+
+== Consideraciones ==
+note left
+- Registro al manager requiere secret/config (WORKER_MANAGER_URL, WORKER_MANAGER_SECRET).
+- Si el manager no arranca el worker, la cámara queda con enableLpr=true pero sin análisis (UI debe mostrar estado).
+- Reintentos y reconciliación manejados por LPR Manager (reconcile_with_backend on startup).
+end note
+
+@enduml

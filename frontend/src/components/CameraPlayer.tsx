@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { toast } from 'react-toastify'
 import api from '@/lib/axios';
 
 type Props = {
@@ -9,6 +10,7 @@ export default function CameraPlayer({ cameraId }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const [connected, setConnected] = useState(false);
+  const [hasStream, setHasStream] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retries, setRetries] = useState(0);
@@ -68,6 +70,8 @@ export default function CameraPlayer({ cameraId }: Props) {
         if (!mounted) return;
         if (videoRef.current) {
           videoRef.current.srcObject = ev.streams[0];
+          // mark that we have an active stream
+          try { setHasStream(true); } catch {}
         }
       };
 
@@ -77,6 +81,10 @@ export default function CameraPlayer({ cameraId }: Props) {
         if (!pc) return;
         const st = pc.connectionState as unknown as string;
         setConnected(['connected', 'completed'].includes(st));
+        // if connection lost, consider stream not present
+        if (['disconnected', 'failed', 'closed'].includes(st)) {
+          try { setHasStream(false); } catch {}
+        }
         // When connection lost, try to reconnect
         if (mounted && ['disconnected', 'failed', 'closed'].includes(st)) {
           // if we still have attempts left, schedule reconnect
@@ -147,6 +155,7 @@ export default function CameraPlayer({ cameraId }: Props) {
         pcRef.current.close();
         pcRef.current = null;
       }
+      try { setHasStream(false); } catch {}
       clearRetryTimer();
       retryRef.current = 0;
       setRetries(0);
@@ -155,6 +164,65 @@ export default function CameraPlayer({ cameraId }: Props) {
 
   return (
     <div className="relative h-full">
+      {/* Screenshot button (bottom-right) — mostrarse solo si hay stream activo */}
+      {hasStream && (
+        <div className="absolute right-3 bottom-3 z-40">
+          <button
+            type="button"
+            aria-label="Tomar screenshot"
+            onClick={async () => {
+              try {
+                const v = videoRef.current
+                if (!v) {
+                  toast.error('Video no disponible para capturar')
+                  return
+                }
+                const width = v.videoWidth || v.clientWidth
+                const height = v.videoHeight || v.clientHeight
+                if (!width || !height) {
+                  toast.error('No hay frame disponible para capturar')
+                  return
+                }
+                const canvas = document.createElement('canvas')
+                canvas.width = width
+                canvas.height = height
+                const ctx = canvas.getContext('2d')
+                if (!ctx) {
+                  toast.error('No fue posible crear canvas')
+                  return
+                }
+                ctx.drawImage(v, 0, 0, width, height)
+                // convert to blob and download
+                canvas.toBlob((blob) => {
+                  if (!blob) {
+                    toast.error('No fue posible generar la imagen')
+                    return
+                  }
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url
+                  const safeId = (cameraId || 'camera').toString().replace(/[^a-z0-9-_]/gi, '_')
+                  a.download = `${safeId}-${Date.now()}.png`
+                  document.body.appendChild(a)
+                  a.click()
+                  a.remove()
+                  setTimeout(() => URL.revokeObjectURL(url), 5000)
+                  toast.success('Captura descargada')
+                }, 'image/png')
+              } catch (err: any) {
+                console.error('Screenshot failed', err)
+                try { toast.error(err?.message || 'Error al capturar') } catch {}
+              }
+            }}
+            className="rounded-full bg-black/50 p-3 hover:bg-black/70 text-white shadow-md sm:p-2"
+          >
+            <svg className="h-5 w-5 sm:h-4 sm:w-4" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M3 7h3l2-2h8l2 2h3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              <circle cx="12" cy="13" r="3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
+      )}
       <video
         ref={videoRef}
         autoPlay

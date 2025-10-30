@@ -85,3 +85,39 @@ export async function getCameraHasSource(id: string): Promise<{ hasSource: boole
     throw error
   }
 }
+
+export async function getCameraRecentEventsCount(id: string): Promise<{ recentEvents: number }> {
+  try {
+    const { data } = await api.get(`/cameras/${id}/recent-events-count`)
+    return data
+  } catch (error) {
+    if (isAxiosError(error) && error.response) {
+      throw new Error(error.response.data.message)
+    }
+    throw error
+  }
+}
+
+export async function getIAHealth(): Promise<{ ok: boolean; status: string; details?: any; message?: string }> {
+  try {
+    const { data } = await api.get('/workers/ia-health')
+    return data
+  } catch (error) {
+    if (isAxiosError(error) && error.response) {
+      throw new Error(error.response.data.message)
+    }
+    throw error
+  }
+}
+
+export async function getMediamtxHealth(): Promise<{ ok: boolean; status: string; details?: any; message?: string }> {
+  try {
+    const { data } = await api.get('/mediamtx/health')
+    return data
+  } catch (error) {
+    if (isAxiosError(error) && error.response) {
+      throw new Error(error.response.data.message)
+    }
+    throw error
+  }
+}

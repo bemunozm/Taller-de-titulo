@@ -1,0 +1,108 @@
+@startuml ia-pipeline-sequence-diagram
+title Pipeline de detección IA - Worker LPR -> Backend -> UI
+
+actor "Cámara (RTSP)" as Camera
+participant "Worker LPR (proceso)" as Worker
+participant "Detector (YOLO)" as Detector
+participant "OCR (FastOCR)" as OCR
+participant "Filtro / Dedupe" as Filter
+participant "Almacenamiento (FS)" as FS
+participant "Subida a Cloud (opcional)" as Cloud
+participant "lpr.api.client (HTTP)" as Client
+participant "Backend DetectionsController" as DetectionsController
+participant "DetectionsService" as DetectionsService
+participant "BD / detecciones" as DB
+
+
+== Flujo principal de detección por frame ==
+Camera -> Worker: Frame (image)
+activate Worker
+Worker -> Detector: run_detection(frame)
+activate Detector
+Detector --> Worker: boxes + scores
+deactivate Detector
+
+alt cajas con posible placa
+  Worker -> OCR: run_ocr(crop_of_box)
+  activate OCR
+  OCR --> Worker: text_candidates + confidences
+  deactivate OCR
+
+  Worker -> Filter: apply_rules(text_candidates, scores)
+  activate Filter
+  Filter --> Worker: best_plate (or discard)
+  deactivate Filter
+
+  alt placa aceptada
+    Worker -> FS: save_crop(image_crop) as local_path
+    activate FS
+    FS --> Worker: local_path
+    deactivate FS
+
+    alt cloud upload enabled
+      Worker -> Cloud: upload(local_path)
+      activate Cloud
+      Cloud --> Worker: remote_url
+      deactivate Cloud
+    else no upload
+      note right of Worker: remote_url = null
+    end
+
+  Worker -> Client: POST /detections/plates { cameraId, ts, plate, confidence, local_path, remote_url }
+    activate Client
+    Client --> Worker: 200 OK (backend accepted)
+    deactivate Client
+
+  Worker --> Worker: encolar telemetría local (para dedupe/estado)
+  else descartada (baja confianza / inválida)
+    Worker --> Worker: ignorar
+  end
+
+else no detection
+  Worker --> Worker: continue
+end
+
+deactivate Worker
+
+== Backend processing ==
+Client -> DetectionsController: POST /detections/plates (payload)
+activate DetectionsController
+DetectionsController -> DetectionsService: createPlateDetection(payload)
+activate DetectionsService
+DetectionsService -> DB: INSERT plate_detection, INSERT detection_files (if any)
+activate DB
+DB --> DetectionsService: 201 Created
+deactivate DB
+
+DetectionsService -> DetectionsService: evaluate_access_attempt(plate, cameraId, ts)
+alt registered vehicle match
+  DetectionsService -> DB: INSERT access_attempt { vehicleId, decision: allowed/denied }
+  activate DB
+  DB --> DetectionsService: 201 Created
+  deactivate DB
+else no match
+  note right: Crear access_attempt con decisión: desconocida / pendiente
+end
+
+DetectionsService --> DetectionsController: 201 Created (detection record)
+deactivate DetectionsService
+
+deactivate DetectionsController
+
+== Flujo alternativo: Backend inaccesible desde Worker ==
+alt POST /events falla (timeout o network)
+  note right of Worker: El cliente del worker (lpr.api.client.post_event) implementa
+  note right of Worker: reintentos (3 intentos con backoff). Si todos fallan retorna -1.
+  Worker -> Worker: log/error local (evento no entregado)
+  Worker --> Worker: continuar procesamiento (no hay cola persistente en esta versión)
+end
+
+== Consideraciones y notas ==
+note left
+- Filtrado incluye plausibilidad (longitud placa, caracteres válidos), confianza OCR y deduplicación temporal por cámara.
+- Guardar crops localmente permite reintentos y auditoría; subir a cloud es opcional.
+- Backend debe validar y sanitizar payloads; autenticar requests desde workers (secret/token).
+ 
+end note
+
+@enduml

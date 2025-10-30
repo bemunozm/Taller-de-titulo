@@ -8,6 +8,8 @@ import { AuthLayout } from "@/layouts/AuthLayout";
 import RequestCodeView from "./views/auth/RequestCodeView";
 import ConserjeView from "./views/ConserjeView";
 import ResidenteView from "./views/ResidenteView";
+import TraceabilityView from "./views/TraceabilityView";
+import TraceabilityDetailView from "./views/TraceabilityDetailView";
 import { StackedLayout } from "./layouts/StackedLayout";
 import { Avatar } from "@/components/ui/Avatar";
 import {
@@ -27,6 +29,29 @@ import {
   ShieldCheckIcon,
   UserIcon,
 } from "@heroicons/react/16/solid";
+import { useNavigate } from 'react-router-dom'
+import { toast } from 'react-toastify'
+import { useAuth } from './hooks/useAuth'
+
+function LogoutItem() {
+  const navigate = useNavigate()
+  const { logout } = useAuth()
+  const handle = () => {
+    try {
+      logout()
+    } catch (e) {
+      // ignore
+    }
+    toast.success('Cerraste sesión correctamente')
+    navigate('/auth/login')
+  }
+  return (
+    <DropdownItem onClick={handle}>
+      <ArrowRightStartOnRectangleIcon />
+      <DropdownLabel>Cerrar sesión</DropdownLabel>
+    </DropdownItem>
+  )
+}
 import { InboxIcon, MagnifyingGlassIcon } from "@heroicons/react/20/solid";
 import {
   Navbar,
@@ -96,7 +121,7 @@ export default function Router() {
                       { label: "Inicio", url: "/" },
                       { label: "Camaras - Conserje", url: "/conserje" },
                       { label: "Camaras - Residentes", url: "/residente" },
-                      { label: "Transmisiones", url: "/broadcasts" },
+                      { label: "Trazabilidad", url: "/traceability" },
                       { label: "Configuraciones", url: "/settings" },
                     ].map(({ label, url }) => (
                       <NavbarItem key={label} href={url}>
@@ -135,10 +160,7 @@ export default function Router() {
                           <DropdownLabel>Enviar comentarios</DropdownLabel>
                         </DropdownItem>
                         <DropdownDivider />
-                        <DropdownItem href="/logout">
-                          <ArrowRightStartOnRectangleIcon />
-                          <DropdownLabel>Cerrar sesión</DropdownLabel>
-                        </DropdownItem>
+                        <LogoutItem />
                       </DropdownMenu>
                     </Dropdown>
                   </NavbarSection>
@@ -188,7 +210,7 @@ export default function Router() {
                         { label: "Inicio", url: "/" },
                         { label: "Camaras - Conserje", url: "/conserje" },
                         { label: "Camaras - Residentes", url: "/residente" },
-                        { label: "Transmisiones", url: "/broadcasts" },
+                        { label: "Trazabilidad", url: "/traceability" },
                         { label: "Configuraciones", url: "/settings" },
                       ].map(({ label, url }) => (
                         <SidebarItem key={label} href={url}>
@@ -215,6 +237,8 @@ export default function Router() {
           <Route path="/conserje" element={<ConserjeView />} />
           <Route path="/settings" element={<SettingsView />} />
           <Route path="/residente" element={<ResidenteView />} />
+          <Route path="/traceability" element={<TraceabilityView />} />
+          <Route path="/traceability/:id" element={<TraceabilityDetailView />} />
         </Route>
 
         {/* Rutas de autenticación sin layout principal */}

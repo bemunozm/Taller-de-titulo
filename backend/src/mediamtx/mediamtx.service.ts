@@ -91,4 +91,68 @@ export class MediamtxService {
     return null;
     
   }
+
+  /**
+   * Consulta estado del servidor MediaMTX usando su API de control.
+   * Retorna { ok: boolean, status: string, details?: any, message?: string }
+   */
+  async getHealth() {
+    const base = this.controlUrl.replace(/\/$/, '');
+    // Try a few likely control API endpoints used by MediaMTX (controlApiBase may be '/v3')
+    const apiBase = this.controlApiBase || '';
+    // First, try the canonical /v3/info endpoint which returns version/started info.
+    const infoUrl = `${base}${apiBase}/info`;
+    try {
+      this.logger.debug(`Probing MediaMTX control info url: ${infoUrl}`);
+      const observable = this.httpService.get(infoUrl, { timeout: this.requestTimeoutMs, responseType: 'text' as any });
+      const resp: any = await lastValueFrom(observable.pipe(timeout(this.requestTimeoutMs)) as any);
+      if (resp && resp.status === 200) {
+        const raw = resp.data;
+        let details: any = null;
+        // If axios already parsed JSON, raw may be object. Otherwise it may be a string.
+        if (raw && typeof raw === 'object') {
+          details = {
+            version: raw.version ?? raw.Version ?? null,
+            started: raw.started ?? raw.Started ?? raw.started_at ?? null,
+            raw: raw,
+          };
+        } else if (typeof raw === 'string') {
+          // Try parsing as JSON first
+          try {
+            const parsed = JSON.parse(raw);
+            details = {
+              version: parsed.version ?? parsed.Version ?? null,
+              started: parsed.started ?? parsed.Started ?? parsed.started_at ?? null,
+              raw: parsed,
+            };
+          } catch {
+            // Not JSON — try parsing a whitespace-separated table like the PowerShell output
+            const lines = raw.trim().split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+            if (lines.length >= 2) {
+              const headers = lines[0].split(/\s+/);
+              const values = lines[1].split(/\s+/);
+              const m: any = {};
+              for (let i = 0; i < headers.length; i++) {
+                m[headers[i]] = values[i] ?? null;
+              }
+              details = {
+                version: m.version ?? m.Version ?? null,
+                started: m.started ?? m.Started ?? null,
+                raw: m,
+              };
+            } else {
+              // unknown format, return raw string
+              details = { raw };
+            }
+          }
+        }
+
+        return { ok: true, status: 'running', details };
+      }
+    } catch (err: any) {
+      this.logger.warn(`Probing ${infoUrl} failed: ${err?.message ?? err}`);
+      // Do not fallback to other URLs; only consider /v3/info as canonical for health.
+      return { ok: false, status: 'unavailable', message: err?.message ?? 'info endpoint unreachable' };
+    }
+  }
 }
