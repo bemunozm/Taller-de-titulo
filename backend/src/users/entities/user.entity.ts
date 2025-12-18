@@ -1,6 +1,7 @@
 import { Role } from "src/roles/entities/role.entity";
 import { Token } from "src/tokens/entities/token.entity";
-import { Column, DeleteDateColumn, Entity, JoinTable, ManyToMany, OneToMany, PrimaryGeneratedColumn, UpdateDateColumn } from "typeorm";
+import { Family } from "src/families/entities/family.entity";
+import { Column, DeleteDateColumn, Entity, JoinTable, ManyToMany, ManyToOne, OneToMany, PrimaryGeneratedColumn, UpdateDateColumn } from "typeorm";
 
 
 @Entity()
@@ -26,16 +27,19 @@ export class User {
     @Column({ type: "int", nullable: true })
     age: number;
 
+    @Column({ type: "varchar", length: 512, nullable: true })
+    profilePicture: string | null;
+
     @Column({ type: "boolean", default: false })
     confirmed: boolean;
 
-    @Column({ type: "timestamp", default: () => "CURRENT_TIMESTAMP" })
+    @Column({ type: "timestamptz", default: () => "CURRENT_TIMESTAMP" })
     createdAt: Date;
 
-    @UpdateDateColumn({ type: "timestamp", default: () => "CURRENT_TIMESTAMP" })
+    @UpdateDateColumn({ type: "timestamptz", default: () => "CURRENT_TIMESTAMP" })
     updatedAt: Date;
 
-    @DeleteDateColumn({ type: "timestamp", nullable: true })
+    @DeleteDateColumn({ type: "timestamptz", nullable: true })
     deletedAt: Date;
 
 
@@ -43,6 +47,9 @@ export class User {
     @JoinTable()
     roles: Role[];
 
-    @OneToMany(() => Token, (token) => token.user)
+    @OneToMany(() => Token, token => token.user)
     tokens: Token[];
+
+    @ManyToOne(() => Family, family => family.members, { nullable: true })
+    family: Family | null;
 }

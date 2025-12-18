@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
-import { Dialog, DialogTitle, DialogDescription, DialogActions } from '@/components/ui/Dialog'
+import { Dialog, DialogTitle, DialogDescription, DialogActions, DialogBody } from '@/components/ui/Dialog'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { listCameras, createCamera, updateCamera, deleteCamera, registerCamera, getCameraSourceUrl, getCameraHasSource, getCameraRecentEventsCount, getIAHealth, getMediamtxHealth } from '@/api/CameraAPI'
+import { listCameras, createCamera, updateCamera, deleteCamera, registerCamera, getCameraSourceUrl, getCameraHasSource, getCameraRecentEventsCount, getIAHealth, getMediamtxHealth, enableCameraLpr } from '@/api/CameraAPI'
 import { listRoles } from '@/api/RoleAPI'
 import type { Role } from '@/types/index'
 import MultiSelectCombobox from '@/components/ui/MultiSelectCombobox'
@@ -15,12 +15,33 @@ import { Label, Description } from '@/components/ui/Fieldset'
 import UrlRevealInput from '@/components/ui/UrlRevealInput'
 import { Dropdown, DropdownButton, DropdownItem, DropdownMenu } from '@/components/ui/Dropdown'
 import { EllipsisHorizontalIcon } from '@heroicons/react/20/solid'
+import { 
+  VideoCameraIcon, 
+  CheckCircleIcon, 
+  XCircleIcon,
+  BoltIcon,
+  ServerIcon,
+  PlusIcon
+} from '@heroicons/react/24/outline'
+import { Heading, Subheading } from '@/components/ui/Heading'
 
-export default function CamerasPanel() {
+interface CamerasPanelProps {
+  triggerNew?: boolean
+}
+
+export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
   const queryClient = useQueryClient()
   const [selected, setSelected] = useState<Camera | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [showDelete, setShowDelete] = useState<Camera | null>(null)
+
+  // Responder al trigger para abrir formulario de nueva cámara
+  useEffect(() => {
+    if (triggerNew) {
+      setSelected(null)
+      setShowForm(true)
+    }
+  }, [triggerNew])
 
   const { data: cameras = [], isLoading } = useQuery<Camera[], Error>({ queryKey: ['cameras'], queryFn: () => listCameras() })
   const { data: iaHealth } = useQuery({ queryKey: ['ia-health'], queryFn: () => getIAHealth(), staleTime: 30_000, refetchOnWindowFocus: false, retry: false })
@@ -61,6 +82,15 @@ export default function CamerasPanel() {
       toast.success('Registro enviado a MediaMTX')
     },
     onError: (err: any) => toast.error(err?.message || 'Error al registrar en MediaMTX'),
+  })
+
+  const toggleLprMut = useMutation<any, Error, { id: string; enableLpr: boolean }>({
+    mutationFn: ({ id, enableLpr }) => enableCameraLpr(id, enableLpr),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['cameras'] })
+      toast.success(`LPR ${data.enableLpr ? 'habilitado' : 'deshabilitado'} para ${data.name}`)
+    },
+    onError: (err: any) => toast.error(err?.message || 'Error al cambiar estado de LPR'),
   })
 
   const { register, handleSubmit, reset, setValue, control } = useForm<CreateCameraFormData>({})
@@ -189,116 +219,229 @@ export default function CamerasPanel() {
 
   // Subcomponent: single camera card that requests events count per camera
   function CameraCard({ cam }: { cam: Camera }) {
-    // const { data: eventsData } = useQuery<{ recentEvents: number }, Error>({
-    //   queryKey: ['camera-events-count', cam.id],
-    //   queryFn: () => getCameraRecentEventsCount(cam.id),
-    //   staleTime: 30_000,
-    //   refetchOnWindowFocus: false,
-    //   retry: false,
-    // })
-
-    // // We'll use global iaHealth (from parent) to display general worker state elsewhere.
-
-    // const eventsCount = (eventsData as any)?.recentEvents ?? null
-    // const eventsBadge = (
-    //   <div title="Eventos recientes" className="text-[11px] px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-200">{eventsCount !== null ? `Eventos: ${eventsCount}` : 'Eventos: —'}</div>
-    // )
-
     return (
-      <div className="flex flex-row items-center justify-between gap-3 rounded-md border border-zinc-800 p-3 bg-zinc-900">
-        <div className="flex-1 min-w-0">
-          <div className="flex flex-col">
-            <div className="font-medium text-zinc-100 truncate max-w-full">{cam.name || '(sin nombre)'}</div>
-            <div className="flex items-center gap-2 mt-2 flex-wrap">
-              { (cam as any).active === false ? (
-                <div title="Cámara marcada como inactiva" aria-label="Inactiva" className="text-[11px] px-2 py-0.5 rounded-full bg-red-600 text-white">Inactiva</div>
-              ) : (
-                <>
-                  { (cam as any).registeredInMediamtx ? (
-                    <div title="Registrada en MediaMTX" aria-label="Registrada en MediaMTX" className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-600 text-white">MediaMTX</div>
-                  ) : (
-                    <div title="No registrada en MediaMTX" aria-label="No registrada en MediaMTX" className="text-[11px] px-2 py-0.5 rounded-full bg-zinc-700 text-zinc-200">No MTX</div>
-                  ) }
-                  { (cam as any).enableLpr ? (
-                    <div title="LPR habilitado" aria-label="LPR activado" className="text-[11px] px-2 py-0.5 rounded-full bg-blue-600 text-white">LPR</div>
-                  ) : null }
-                  {/* events count */}
-                  {/* {eventsBadge} */}
-                </>
-              )}
+      <div className="group relative overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 p-4 transition-all hover:border-zinc-700 hover:shadow-lg hover:shadow-zinc-900/50">
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3 mb-3">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 mb-2">
+              <VideoCameraIcon className="h-5 w-5 text-zinc-400 flex-shrink-0" />
+              <h4 className="font-semibold text-zinc-100 truncate">{cam.name || '(sin nombre)'}</h4>
             </div>
-            <div className="text-sm text-gray-400 mt-2">{(cam as any).location} — {cam.mountPath}</div>
+            <p className="text-sm text-zinc-400 truncate">{(cam as any).location || 'Sin ubicación'}</p>
           </div>
-        </div>
-        <div className="flex-shrink-0 ml-4">
+          
           <Dropdown>
-            <DropdownButton plain aria-label="Más opciones" as={Button} className="p-2">
+            <DropdownButton plain aria-label="Más opciones" as={Button} className="p-2 -mr-2">
               <EllipsisHorizontalIcon className="h-5 w-5 text-zinc-300" />
             </DropdownButton>
             <DropdownMenu>
               <DropdownItem onClick={() => { setSelected(cam); setShowForm(true) }}>Editar</DropdownItem>
-              <DropdownItem onClick={() => registerMut.mutate(cam.id)}>Registrar</DropdownItem>
+              <DropdownItem onClick={() => registerMut.mutate(cam.id)}>Registrar en MediaMTX</DropdownItem>
+              {(cam as any).enableLpr ? (
+                <DropdownItem onClick={() => toggleLprMut.mutate({ id: cam.id, enableLpr: false })}>Deshabilitar LPR</DropdownItem>
+              ) : (
+                <DropdownItem onClick={() => toggleLprMut.mutate({ id: cam.id, enableLpr: true })}>Habilitar LPR</DropdownItem>
+              )}
               <DropdownItem onClick={() => setShowDelete(cam)}>Eliminar</DropdownItem>
             </DropdownMenu>
           </Dropdown>
         </div>
+
+        {/* Status Badges */}
+        <div className="flex items-center gap-2 flex-wrap mb-3">
+          {(cam as any).active === false ? (
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/20">
+              <XCircleIcon className="h-3.5 w-3.5 text-red-400" />
+              <span className="text-xs font-medium text-red-400">Inactiva</span>
+            </div>
+          ) : (
+            <>
+              {(cam as any).registeredInMediamtx ? (
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20">
+                  <CheckCircleIcon className="h-3.5 w-3.5 text-emerald-400" />
+                  <span className="text-xs font-medium text-emerald-400">MediaMTX</span>
+                </div>
+              ) : (
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-700/50 border border-zinc-600/50">
+                  <XCircleIcon className="h-3.5 w-3.5 text-zinc-400" />
+                  <span className="text-xs font-medium text-zinc-400">No MTX</span>
+                </div>
+              )}
+              
+              {(cam as any).enableLpr && (
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-blue-500/10 border border-blue-500/20">
+                  <BoltIcon className="h-3.5 w-3.5 text-blue-400" />
+                  <span className="text-xs font-medium text-blue-400">LPR</span>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Mount Path */}
+        <div className="mt-3 pt-3 border-t border-zinc-800">
+          <div className="flex items-center gap-2">
+            <ServerIcon className="h-4 w-4 text-zinc-500 flex-shrink-0" />
+            <code className="text-xs text-zinc-400 font-mono truncate">{cam.mountPath}</code>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Calcular estadísticas
+  const stats = {
+    total: cameras.length,
+    active: cameras.filter((c) => (c as any).active !== false).length,
+    withLpr: cameras.filter((c) => (c as any).enableLpr === true).length,
+    registered: cameras.filter((c) => (c as any).registeredInMediamtx === true).length,
+  }
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600" />
+        <span className="ml-3 text-zinc-400">Cargando cámaras...</span>
       </div>
     )
   }
 
   return (
     <div>
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h3 className="text-lg font-semibold dark:text-white">Administrar cámaras</h3>
-          {/* Global IA worker status badge */}
-          {iaHealth ? (
-            iaHealth.ok ? (
-              <div title={`Motor IA: ${iaHealth.status}`} className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-600 text-white">Motor IA: Activo</div>
-            ) : (
-              <div title={`Motor IA: ${iaHealth.status}`} className="text-[11px] px-2 py-0.5 rounded-full bg-red-600 text-white">Motor IA: Inactivo</div>
-            )
-          ) : (
-            <div title="Estado IA desconocido" className="text-[11px] px-2 py-0.5 rounded-full bg-zinc-700 text-zinc-200">Motor IA: —</div>
-          )}
-          {/* MediaMTX global status */}
-          {mediamtxHealth ? (
-            mediamtxHealth.ok ? (
-              <div title={`MediaMTX: ${mediamtxHealth.status}`} className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-600 text-white">MediaMTX: Activo</div>
-            ) : (
-              <div title={`MediaMTX: ${mediamtxHealth.message ?? mediamtxHealth.status}`} className="text-[11px] px-2 py-0.5 rounded-full bg-red-600 text-white">MediaMTX: Inactivo</div>
-            )
-          ) : (
-            <div title="Estado MediaMTX desconocido" className="text-[11px] px-2 py-0.5 rounded-full bg-zinc-700 text-zinc-200">MediaMTX: —</div>
-          )}
+      {/* Stats Grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        {/* Total Cameras */}
+        <div className="bg-white dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700">
+          <div className="flex items-center gap-3 mb-2">
+            <VideoCameraIcon className="w-6 h-6 text-indigo-600 dark:text-indigo-400" />
+            <div className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
+              Total de Cámaras
+            </div>
+          </div>
+          <div className="text-3xl font-bold text-zinc-900 dark:text-zinc-100">
+            {stats.total}
+          </div>
         </div>
-        <div className="flex items-center gap-3">
-          <Button color="indigo" onClick={() => { setSelected(null); setShowForm(true) }}>Agregar cámara</Button>
+
+        {/* Active Cameras */}
+        <div className="bg-white dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700">
+          <div className="flex items-center gap-3 mb-2">
+            <CheckCircleIcon className="w-6 h-6 text-emerald-600 dark:text-emerald-400" />
+            <div className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
+              Cámaras Activas
+            </div>
+          </div>
+          <div className="text-3xl font-bold text-emerald-600 dark:text-emerald-400">
+            {stats.active}
+          </div>
+          <div className="text-xs text-zinc-500 mt-1">
+            {stats.total > 0
+              ? `${Math.round((stats.active / stats.total) * 100)}% del total`
+              : '0% del total'}
+          </div>
+        </div>
+
+        {/* LPR Enabled */}
+        <div className="bg-white dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700">
+          <div className="flex items-center gap-3 mb-2">
+            <BoltIcon className="w-6 h-6 text-blue-600 dark:text-blue-400" />
+            <div className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
+              Con LPR Habilitado
+            </div>
+          </div>
+          <div className="text-3xl font-bold text-blue-600 dark:text-blue-400">
+            {stats.withLpr}
+          </div>
+          <div className="text-xs text-zinc-500 mt-1">
+            Reconocimiento de patentes activo
+          </div>
+        </div>
+
+        {/* MediaMTX Registered */}
+        <div className="bg-white dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700">
+          <div className="flex items-center gap-3 mb-2">
+            <ServerIcon className="w-6 h-6 text-purple-600 dark:text-purple-400" />
+            <div className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
+              Registradas en MTX
+            </div>
+          </div>
+          <div className="text-3xl font-bold text-purple-600 dark:text-purple-400">
+            {stats.registered}
+          </div>
+          <div className="text-xs text-zinc-500 mt-1">
+            {stats.total > 0
+              ? `${Math.round((stats.registered / stats.total) * 100)}% del total`
+              : '0% del total'}
+          </div>
         </div>
       </div>
 
-      <p className="text-sm text-gray-400 mt-2">Registra cámaras RTSP/NVR indicando nombre, ubicación y credenciales.</p>
+      {/* System Health Status */}
+      <div className="mb-6 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {/* IA Health */}
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className={`rounded-full p-2 ${iaHealth?.ok ? 'bg-emerald-500/10' : 'bg-red-500/10'}`}>
+                <BoltIcon className={`h-5 w-5 ${iaHealth?.ok ? 'text-emerald-400' : 'text-red-400'}`} />
+              </div>
+              <div>
+                <div className="text-sm font-medium text-zinc-300">Motor IA (LPR)</div>
+                <div className={`text-xs ${iaHealth?.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {iaHealth ? (iaHealth.ok ? 'Activo' : iaHealth.status || 'Inactivo') : 'Desconocido'}
+                </div>
+              </div>
+            </div>
+            <div className={`h-2 w-2 rounded-full ${iaHealth?.ok ? 'bg-emerald-400' : 'bg-red-400'} animate-pulse`} />
+          </div>
+        </div>
 
-      <div className="mt-6 space-y-3">
-        {isLoading ? (
-          <div>Cargando cámaras...</div>
+        {/* MediaMTX Health */}
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className={`rounded-full p-2 ${mediamtxHealth?.ok ? 'bg-emerald-500/10' : 'bg-red-500/10'}`}>
+                <ServerIcon className={`h-5 w-5 ${mediamtxHealth?.ok ? 'text-emerald-400' : 'text-red-400'}`} />
+              </div>
+              <div>
+                <div className="text-sm font-medium text-zinc-300">MediaMTX Server</div>
+                <div className={`text-xs ${mediamtxHealth?.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {mediamtxHealth ? (mediamtxHealth.ok ? 'Activo' : mediamtxHealth.message || mediamtxHealth.status || 'Inactivo') : 'Desconocido'}
+                </div>
+              </div>
+            </div>
+            <div className={`h-2 w-2 rounded-full ${mediamtxHealth?.ok ? 'bg-emerald-400' : 'bg-red-400'} animate-pulse`} />
+          </div>
+        </div>
+      </div>
+
+      {/* Cameras Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {cameras.length === 0 ? (
+          <div className="col-span-full text-center py-12 text-zinc-400">
+            <VideoCameraIcon className="h-12 w-12 mx-auto mb-3 text-zinc-600" />
+            <p className="text-sm">No hay cámaras registradas</p>
+            <p className="text-xs mt-1">Comienza agregando tu primera cámara</p>
+          </div>
         ) : (
-          cameras.map((cam: Camera) => (
-            <CameraCard key={cam.id} cam={cam} />
-          ))
+          cameras.map((cam: Camera) => <CameraCard key={cam.id} cam={cam} />)
         )}
       </div>
 
       {/* Form dialog */}
       {showForm && (
-        <Dialog open={showForm} onClose={() => { setShowForm(false); setSelected(null); reset() }}>
-          <div className="p-4 sm:p-6">
-            <DialogTitle>Agregar / editar cámara</DialogTitle>
-            <DialogDescription className="mt-2">Completa los datos de la cámara RTSP / NVR.</DialogDescription>
-
-            <form onSubmit={handleSubmit(onSubmit)} className="mt-4 space-y-3">
-              <Input {...register('name')} placeholder="Nombre" />
-              <Input {...register('location')} placeholder="Ubicación" />
+        <Dialog open={showForm} onClose={() => { setShowForm(false); setSelected(null); reset() }} size="2xl">
+          <DialogTitle>{selected ? 'Editar Cámara' : 'Nueva Cámara'}</DialogTitle>
+          <DialogDescription>
+            {selected 
+              ? 'Modifica los datos de la cámara RTSP / NVR'
+              : 'Completa el formulario para registrar una nueva cámara en el sistema'}
+          </DialogDescription>
+          <DialogBody>
+            <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+              <Input {...register('name')} placeholder="Nombre de la cámara" />
+              <Input {...register('location')} placeholder="Ubicación física" />
               <Controller
                 control={control}
                 name="sourceUrl"
@@ -314,9 +457,10 @@ export default function CamerasPanel() {
                   />
                 )}
               />
-              {/* role selector: searchable multi-checkbox list controlled via react-hook-form Controller */}
+              
+              {/* Role selector */}
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Roles</label>
+                <label className="block text-sm font-medium text-zinc-300 mb-1">Roles con acceso</label>
                 <Controller
                   control={control}
                   name="roleIds"
@@ -333,11 +477,11 @@ export default function CamerasPanel() {
                 />
               </div>
 
-              {/* Switches: LPR and Active (moved to the end of the form) */}
+              {/* Switches */}
               <SwitchGroup>
                 <SwitchField>
                   <Label>Habilitar análisis LPR</Label>
-                  <Description>Habilita el análisis LPR (reconocimiento de patentes) para esta cámara.</Description>
+                  <Description>Activa el reconocimiento automático de patentes para esta cámara</Description>
                   <Controller
                     control={control}
                     name="enableLpr"
@@ -352,7 +496,7 @@ export default function CamerasPanel() {
                 </SwitchField>
                 <SwitchField>
                   <Label>Activar cámara</Label>
-                  <Description>Si está desactivada, la cámara no se reproducirá ni se registrará en MediaMTX.</Description>
+                  <Description>Si está desactivada, la cámara no se reproducirá ni se registrará en MediaMTX</Description>
                   <Controller
                     control={control}
                     name="active"
@@ -368,13 +512,15 @@ export default function CamerasPanel() {
               </SwitchGroup>
 
               <DialogActions>
-                <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full">
-                  <Button type="submit" className="w-full sm:w-auto" disabled={isSubmitting}>{isSubmitting ? 'Guardando...' : 'Guardar'}</Button>
-                  <Button outline type="button" onClick={() => { setShowForm(false); setSelected(null); reset() }} className="w-full sm:w-auto" disabled={isSubmitting}>Cancelar</Button>
-                </div>
+                <Button type="submit" color="indigo" disabled={isSubmitting}>
+                  {isSubmitting ? 'Guardando...' : (selected ? 'Guardar cambios' : 'Crear cámara')}
+                </Button>
+                <Button plain type="button" onClick={() => { setShowForm(false); setSelected(null); reset() }} disabled={isSubmitting}>
+                  Cancelar
+                </Button>
               </DialogActions>
             </form>
-          </div>
+          </DialogBody>
         </Dialog>
       )}
 

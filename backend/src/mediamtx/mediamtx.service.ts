@@ -3,6 +3,8 @@ import { HttpService } from '@nestjs/axios';
 import { lastValueFrom } from 'rxjs';
 import { timeout } from 'rxjs/operators';
 import { AxiosResponse } from 'axios';
+import { LogsService } from '../logs/logs.service';
+import { v4 as uuidv4 } from 'uuid';
 
 @Injectable()
 export class MediamtxService {
@@ -14,7 +16,10 @@ export class MediamtxService {
   private maxAttempts = Number(process.env.MEDIAMTX_MAX_ATTEMPTS || 3);
   private backoffBaseMs = Number(process.env.MEDIAMTX_BACKOFF_BASE_MS || 500);
 
-  constructor(private readonly httpService: HttpService) {}
+  constructor(
+    private readonly httpService: HttpService,
+    private readonly logsService: LogsService,
+  ) {}
 
   /**
    * Registra o actualiza un mount/path en MediaMTX para que haga pull desde la URL RTSP indicada.
@@ -22,74 +27,151 @@ export class MediamtxService {
    * mínimo { source } y se puede ajustar mediante variables de entorno.
    */
   async registerSource(mountPath: string, rtspUrl: string) {
+    const correlationId = uuidv4();
+    const startTime = Date.now();
+    
     // Usar la Control API v3 para añadir la configuración de un path: POST /v3/config/paths/add/{name}
     const url = `${this.controlUrl.replace(/\/$/, '')}${this.controlApiBase}/config/paths/add/${encodeURIComponent(
       mountPath,
     )}`;
-    this.logger.log(`Registrando fuente en MediaMTX: ${url} (mount=${mountPath})`);
+    this.logger.log(`Registrando fuente en MediaMTX: ${url} (mount=${mountPath}) [${correlationId}]`);
+    
     // La API espera un objeto PathConf. Enviamos campos mínimos: source (la URL RTSP)
     const body = {
       source: rtspUrl,
     };
+    
     let lastErr: any = null;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       try {
         const observable = this.httpService.post(url, body, { timeout: this.requestTimeoutMs });
         const resp: AxiosResponse<any> = await lastValueFrom(observable.pipe(timeout(this.requestTimeoutMs)) as any);
-        this.logger.log(`Respuesta de registro de MediaMTX: ${resp.status} (intento ${attempt})`);
+        const responseTime = Date.now() - startTime;
+        
+        this.logger.log(`Respuesta de registro de MediaMTX: ${resp.status} (intento ${attempt}) [${correlationId}]`);
+        
+        // Log de éxito
+        await this.logsService.logMediaMTX({
+          action: 'register_source',
+          success: true,
+          details: {
+            mountPath,
+            attempt,
+            statusCode: resp.status,
+            responseTime,
+          },
+          correlationId,
+        });
+        
         return resp.data;
       } catch (err: any) {
         lastErr = err;
         const status = err?.response?.status;
         const data = err?.response?.data;
-        this.logger.warn(`Intento ${attempt} falló al registrar fuente en MediaMTX: ${err?.message || err} status=${status} body=${JSON.stringify(data)}`);
+        this.logger.warn(`Intento ${attempt} falló al registrar fuente en MediaMTX: ${err?.message || err} status=${status} body=${JSON.stringify(data)} [${correlationId}]`);
+        
         if (attempt < this.maxAttempts) {
           const waitMs = this.backoffBaseMs * Math.pow(2, attempt - 1);
-          this.logger.log(`Reintentando en ${waitMs}ms...`);
+          this.logger.log(`Reintentando en ${waitMs}ms... [${correlationId}]`);
           await new Promise((res) => setTimeout(res, waitMs));
           continue;
         }
       }
     }
+    
+    const responseTime = Date.now() - startTime;
     const status = lastErr?.response?.status;
     const data = lastErr?.response?.data;
+    
+    // Log de error final
+    await this.logsService.logMediaMTX({
+      action: 'register_source',
+      success: false,
+      details: {
+        mountPath,
+        attempts: this.maxAttempts,
+        statusCode: status,
+        responseTime,
+        errorData: data,
+      },
+      error: lastErr,
+      correlationId,
+    });
     this.logger.error(`No se pudo registrar la fuente en MediaMTX tras ${this.maxAttempts} intentos: ${lastErr?.message || lastErr} status=${status} body=${JSON.stringify(data)}`);
     throw new InternalServerErrorException('No se pudo registrar la fuente en MediaMTX');
     
   }
 
   async deregisterSource(mountPath: string) {
+    const correlationId = uuidv4();
+    const startTime = Date.now();
+    
     // Use Control API v3 to delete path config: DELETE /v3/config/paths/delete/{name}
     const url = `${this.controlUrl.replace(/\/$/, '')}${this.controlApiBase}/config/paths/delete/${encodeURIComponent(
       mountPath,
     )}`;
-    this.logger.log(`Deseleccionando (deregister) fuente en MediaMTX: ${url}`);
+    this.logger.log(`Deseleccionando (deregister) fuente en MediaMTX: ${url} [${correlationId}]`);
+    
     let lastErr: any = null;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       try {
         const observable = this.httpService.delete(url, { timeout: this.requestTimeoutMs });
         const resp: AxiosResponse<any> = await lastValueFrom(observable.pipe(timeout(this.requestTimeoutMs)) as any);
-        this.logger.log(`Respuesta de deregistro de MediaMTX: ${resp.status} (intento ${attempt})`);
+        const responseTime = Date.now() - startTime;
+        
+        this.logger.log(`Respuesta de deregistro de MediaMTX: ${resp.status} (intento ${attempt}) [${correlationId}]`);
+        
+        // Log de éxito
+        await this.logsService.logMediaMTX({
+          action: 'deregister_source',
+          success: true,
+          details: {
+            mountPath,
+            attempt,
+            statusCode: resp.status,
+            responseTime,
+          },
+          correlationId,
+        });
+        
         return resp.data;
       } catch (err: any) {
         lastErr = err;
         const status = err?.response?.status;
         const data = err?.response?.data;
-        this.logger.warn(`Intento ${attempt} falló al deregistrar fuente en MediaMTX: ${err?.message || err} status=${status} body=${JSON.stringify(data)}`);
+        this.logger.warn(`Intento ${attempt} falló al deregistrar fuente en MediaMTX: ${err?.message || err} status=${status} body=${JSON.stringify(data)} [${correlationId}]`);
+        
         if (attempt < this.maxAttempts) {
           const waitMs = this.backoffBaseMs * Math.pow(2, attempt - 1);
-          this.logger.log(`Reintentando deregistrar en ${waitMs}ms...`);
+          this.logger.log(`Reintentando deregistrar en ${waitMs}ms... [${correlationId}]`);
           await new Promise((res) => setTimeout(res, waitMs));
           continue;
         }
       }
     }
+    
+    const responseTime = Date.now() - startTime;
     const status = lastErr?.response?.status;
     const data = lastErr?.response?.data;
-    this.logger.error(`No se pudo deregistrar la fuente en MediaMTX tras ${this.maxAttempts} intentos: ${lastErr?.message || lastErr} status=${status} body=${JSON.stringify(data)}`);
+    
+    // Log de error
+    await this.logsService.logMediaMTX({
+      action: 'deregister_source',
+      success: false,
+      details: {
+        mountPath,
+        attempts: this.maxAttempts,
+        statusCode: status,
+        responseTime,
+        errorData: data,
+      },
+      error: lastErr,
+      correlationId,
+    });
+    
+    this.logger.error(`No se pudo deregistrar la fuente en MediaMTX tras ${this.maxAttempts} intentos: ${lastErr?.message || lastErr} status=${status} body=${JSON.stringify(data)} [${correlationId}]`);
     // no lanzamos excepción para evitar romper eliminaciones si MediaMTX está temporalmente no disponible
     return null;
-    
   }
 
   /**

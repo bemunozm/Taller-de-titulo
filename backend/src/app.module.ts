@@ -9,13 +9,24 @@ import { AuthModule } from './auth/auth.module';
 import { PermissionsModule } from './permissions/permissions.module';
 import { StreamsModule } from './streams/streams.module';
 import { DataInitializationService } from './common/services/data-initialization.service';
-import { CleanupService } from './common/services/cleanup.service';
+import { ExpirationService } from './common/services/expiration.service';
 import { Role } from './roles/entities/role.entity';
 import { Permission } from './permissions/entities/permission.entity';
+import { AccessAttempt } from './detections/entities/access-attempt.entity';
+import { Notification } from './notifications/entities/notification.entity';
+import { Visit } from './visits/entities/visit.entity';
 import { CamerasModule } from './cameras/cameras.module';
 import { DetectionsModule } from './detections/detections.module';
 import { VehiclesModule } from './vehicles/vehicles.module';
 import { WorkersModule } from './workers/workers.module';
+import { FamiliesModule } from './families/families.module';
+import { UnitsModule } from './units/units.module';
+import { VisitsModule } from './visits/visits.module';
+import { NotificationsModule } from './notifications/notifications.module';
+import { DigitalConciergeModule } from './digital-concierge/digital-concierge.module';
+import { AuditModule } from './audit/audit.module';
+import { LogsModule } from './logs/logs.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 
 @Module({
   imports: [
@@ -31,7 +42,7 @@ import { WorkersModule } from './workers/workers.module';
       autoLoadEntities: true, // Carga automaticamente las entidades
       synchronize: true, // no usar en produccion
     }),
-    TypeOrmModule.forFeature([Role, Permission]),
+    TypeOrmModule.forFeature([Role, Permission, AccessAttempt, Notification, Visit]),
     UsersModule,
     RolesModule,
     TokensModule,
@@ -42,8 +53,16 @@ import { WorkersModule } from './workers/workers.module';
   DetectionsModule,
   VehiclesModule,
   WorkersModule,
+  FamiliesModule,
+  UnitsModule,
+  VisitsModule,
+  NotificationsModule,
+  DigitalConciergeModule,
+  AuditModule,
+  LogsModule,
+  DashboardModule,
   ],
   controllers: [],
-  providers: [DataInitializationService, CleanupService],
+  providers: [DataInitializationService, ExpirationService],
 })
 export class AppModule {}

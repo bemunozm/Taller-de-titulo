@@ -46,21 +46,24 @@ export default function MultiSelectCombobox<T extends { [k: string]: any }>({
         if (selectedIds.includes(id)) onChange(selectedIds.filter((x) => x !== id))
         else onChange([...selectedIds, id])
       }
-    }} multiple>
-      <div className={clsx('relative', className)}>
-        <Headless.ComboboxInput
-          className="w-full rounded-md bg-zinc-800 border border-zinc-700 p-2 text-sm text-white"
-          displayValue={() => (selected.length ? selected.map((s) => displayValue(s)).filter(Boolean).join(', ') : '')}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={placeholder}
-          aria-label={ariaLabel}
-        />
+    }} onClose={() => setQuery('')} multiple>
+      {({ open }) => (
+        <div className={clsx('relative', className)}>
+          <Headless.ComboboxButton as="div" className="relative">
+            <Headless.ComboboxInput
+              className="w-full rounded-md bg-zinc-800 border border-zinc-700 p-2 pr-8 text-sm text-white cursor-pointer"
+              displayValue={() => (selected.length ? selected.map((s) => displayValue(s)).filter(Boolean).join(', ') : '')}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={placeholder}
+              aria-label={ariaLabel}
+            />
 
-        <Headless.ComboboxButton className="absolute inset-y-0 right-0 flex items-center pr-2">
-          <svg className="w-4 h-4 stroke-zinc-400" viewBox="0 0 24 24" fill="none">
-            <path d="M19 9l-7 7-7-7" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </Headless.ComboboxButton>
+            <div className="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
+              <svg className="w-4 h-4 stroke-zinc-400" viewBox="0 0 24 24" fill="none">
+                <path d="M19 9l-7 7-7-7" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </div>
+          </Headless.ComboboxButton>
 
         <Headless.ComboboxOptions className="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-md bg-zinc-900 border border-zinc-700 p-2">
           {filtered.length === 0 && <div className="text-sm text-gray-400 p-2">No hay resultados</div>}
@@ -92,6 +95,7 @@ export default function MultiSelectCombobox<T extends { [k: string]: any }>({
           })}
         </Headless.ComboboxOptions>
       </div>
+      )}
     </Headless.Combobox>
   )
 }

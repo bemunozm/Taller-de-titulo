@@ -32,12 +32,14 @@ export class PlateDetection {
     char_confidences?: any;
     char_conf_min?: number | null;
     char_conf_mean?: number | null;
-    timestamp?: string;
     confirmed_by?: string | null;
   } | null;
 
+  @Column({ type: 'bigint', nullable: true })
+  detectionTimestamp: number | null; // Timestamp real de detección desde el LPR (ms desde epoch)
+
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt: Date; // Timestamp de recepción en backend
 
   @OneToMany(() => AccessAttempt, (a) => a.detection, { cascade: true })
   accessAttempts: AccessAttempt[];

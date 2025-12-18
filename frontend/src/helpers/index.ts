@@ -134,3 +134,56 @@ export function isValidChileanId(id: string): boolean {
   // Si no, validar como pasaporte
   return isValidPassport(cleanId);
 }
+
+/**
+ * Formatea una fecha como tiempo relativo en español
+ * Ejemplos: "Ahora", "Hace 5 min", "Hace 2 h", "Hace 3 días"
+ * @param date - Fecha a formatear (Date o string ISO)
+ * @returns Texto con el tiempo relativo
+ */
+export function formatRelativeTime(date: Date | string): string {
+  const now = new Date()
+  const targetDate = typeof date === 'string' ? new Date(date) : date
+  
+  const diffMs = now.getTime() - targetDate.getTime()
+  const diffMins = Math.floor(diffMs / 60000)
+  const diffHours = Math.floor(diffMs / 3600000)
+  const diffDays = Math.floor(diffMs / 86400000)
+
+  // Menos de 1 minuto
+  if (diffMins < 1) return 'Ahora'
+  
+  // Menos de 1 hora
+  if (diffMins < 60) return `Hace ${diffMins} min`
+  
+  // Menos de 24 horas
+  if (diffHours < 24) return `Hace ${diffHours} h`
+  
+  // Menos de 7 días
+  if (diffDays < 7) return `Hace ${diffDays} día${diffDays !== 1 ? 's' : ''}`
+  
+  // Más de 7 días, mostrar fecha formateada
+  return targetDate.toLocaleDateString('es-ES', {
+    day: 'numeric',
+    month: 'short',
+    year: targetDate.getFullYear() !== now.getFullYear() ? 'numeric' : undefined,
+  })
+}
+
+/**
+ * Formatea una fecha y hora en formato legible en español
+ * Ejemplo: "4 nov 2024, 14:30"
+ * @param date - Fecha a formatear (Date o string ISO)
+ * @returns Texto con fecha y hora formateada
+ */
+export function formatDateTime(date: Date | string): string {
+  const targetDate = typeof date === 'string' ? new Date(date) : date
+  
+  return targetDate.toLocaleString('es-ES', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}

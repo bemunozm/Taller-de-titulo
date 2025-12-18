@@ -5,6 +5,7 @@ import sys
 import time
 import threading
 import subprocess
+import logging
 from pathlib import Path
 from typing import Dict, Optional
 import requests
@@ -12,6 +13,13 @@ import requests
 from fastapi import FastAPI, HTTPException, Request, status, Depends
 from pydantic import BaseModel
 from lpr.settings import settings
+
+# Configurar logging
+logging.basicConfig(
+    level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 APP = FastAPI(title="LPR Worker Manager")
 

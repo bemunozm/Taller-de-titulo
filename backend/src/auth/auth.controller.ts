@@ -1,5 +1,7 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Request, UseGuards } from "@nestjs/common";
-import { ApiTags, ApiOperation, ApiResponse, ApiBody, ApiBearerAuth, ApiUnauthorizedResponse, ApiBadRequestResponse, ApiNotFoundResponse } from "@nestjs/swagger";
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Request, UseGuards, UseInterceptors, UploadedFile } from "@nestjs/common";
+import { ApiTags, ApiOperation, ApiResponse, ApiBody, ApiBearerAuth, ApiUnauthorizedResponse, ApiBadRequestResponse, ApiNotFoundResponse, ApiConsumes } from "@nestjs/swagger";
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import { AuthService } from "./auth.service";
 import { AuthGuard } from "./auth.guard";
 import { LoginDto } from "./dto/login.dto";
@@ -12,7 +14,10 @@ import { UpdatePasswordWithTokenDto } from "./dto/update-password-with-token.dto
 import { UpdateProfileDto } from "./dto/update-profile.dto";
 import { UpdateCurrentUserPasswordDto } from "./dto/update-current-user-password.dto";
 import { CheckPasswordDto } from "./dto/check-password.dto";
+import { CreateServiceTokenDto } from "./dto/create-service-token.dto";
 import { AuthEmailService } from "./services/auth-email.service";
+import { Auditable } from "../audit/decorators/auditable.decorator";
+import { AuditModule, AuditAction } from "../audit/entities/audit-log.entity";
 
 @ApiTags('Autenticación')
 @Controller("auth")
@@ -22,34 +27,43 @@ export class AuthController {
     private readonly authEmailService: AuthEmailService
   ) {}
 
-  @Post("create-account")
-  @ApiOperation({ 
-    summary: 'Crear nueva cuenta de usuario',
-    description: 'Registra un nuevo usuario en el sistema. El usuario debe confirmar su email antes de poder iniciar sesión.'
-  })
-  @ApiResponse({ 
-    status: 201, 
-    description: 'Cuenta creada exitosamente. Se envió un email de confirmación.',
-    schema: {
-      type: 'string',
-      example: 'Cuenta creada exitosamente. Revisa tu email para confirmarla y activar todas las funcionalidades.'
-    }
-  })
-  @ApiBadRequestResponse({ 
-    description: 'Datos inválidos o email ya registrado',
-    schema: {
-      type: 'object',
-      properties: {
-        message: { type: 'string', example: 'El Usuario ya está registrado' },
-        error: { type: 'string', example: 'Bad Request' },
-        statusCode: { type: 'number', example: 400 }
-      }
-    }
-  })
-  @ApiBody({ type: RegisterDto })
-  createAccount(@Body() registerDto: RegisterDto) {
-    return this.authService.register(registerDto);
-  }
+  // ENDPOINT DESHABILITADO: Los usuarios solo pueden ser creados por administradores
+  // @Post("create-account")
+  // @Auditable({
+  //   module: AuditModule.AUTH,
+  //   action: AuditAction.CREATE,
+  //   entityType: 'User',
+  //   description: 'Nueva cuenta de usuario registrada',
+  //   captureResponse: true,
+  //   captureRequest: false
+  // })
+  // @ApiOperation({ 
+  //   summary: 'Crear nueva cuenta de usuario',
+  //   description: 'Registra un nuevo usuario en el sistema. El usuario debe confirmar su email antes de poder iniciar sesión.'
+  // })
+  // @ApiResponse({ 
+  //   status: 201, 
+  //   description: 'Cuenta creada exitosamente. Se envió un email de confirmación.',
+  //   schema: {
+  //     type: 'string',
+  //     example: 'Cuenta creada exitosamente. Revisa tu email para confirmarla y activar todas las funcionalidades.'
+  //   }
+  // })
+  // @ApiBadRequestResponse({ 
+  //   description: 'Datos inválidos o email ya registrado',
+  //   schema: {
+  //     type: 'object',
+  //     properties: {
+  //       message: { type: 'string', example: 'El Usuario ya está registrado' },
+  //       error: { type: 'string', example: 'Bad Request' },
+  //       statusCode: { type: 'number', example: 400 }
+  //     }
+  //   }
+  // })
+  // @ApiBody({ type: RegisterDto })
+  // createAccount(@Body() registerDto: RegisterDto) {
+  //   return this.authService.register(registerDto);
+  // }
 
   @Post("confirm-account")
   @ApiOperation({
@@ -82,6 +96,14 @@ export class AuthController {
 
   @HttpCode(HttpStatus.OK)
   @Post("login")
+  @Auditable({
+    module: AuditModule.AUTH,
+    action: AuditAction.LOGIN,
+    entityType: 'User',
+    description: 'Usuario inició sesión',
+    captureRequest: true,
+    captureResponse: false
+  })
   @ApiOperation({
     summary: 'Iniciar sesión',
     description: 'Autentica al usuario con email y contraseña. Retorna un token JWT válido por 24 horas.'
@@ -211,9 +233,17 @@ export class AuthController {
     return this.authService.validateToken(validateTokenDto);
   }
 
-  @Post("update-password")
+  @Post("reset-password")
+  @Auditable({
+    module: AuditModule.AUTH,
+    action: AuditAction.PASSWORD_RESET,
+    entityType: 'User',
+    description: 'Contraseña restablecida mediante token de recuperación',
+    captureRequest: false,
+    captureResponse: false
+  })
   @ApiOperation({
-    summary: 'Actualizar contraseña con token',
+    summary: 'Restablecer contraseña con token',
     description: 'Establece una nueva contraseña usando un token de recuperación válido.'
   })
   @ApiResponse({
@@ -281,6 +311,13 @@ export class AuthController {
   @Post('profile')
   @UseGuards(AuthGuard)
   @ApiBearerAuth('JWT-auth')
+  @Auditable({
+    module: AuditModule.USERS,
+    action: AuditAction.UPDATE,
+    entityType: 'User',
+    description: 'Usuario actualizó su perfil',
+    captureResponse: false
+  })
   @ApiOperation({
     summary: 'Actualizar perfil del usuario',
     description: 'Permite al usuario actualizar su información de perfil (nombre, teléfono, edad).'
@@ -304,6 +341,14 @@ export class AuthController {
   @Post('update-password')
   @UseGuards(AuthGuard)
   @ApiBearerAuth('JWT-auth')
+  @Auditable({
+    module: AuditModule.AUTH,
+    action: AuditAction.UPDATE,
+    entityType: 'User',
+    description: 'Usuario cambió su contraseña',
+    captureRequest: false,
+    captureResponse: false
+  })
   @ApiOperation({
     summary: 'Cambiar contraseña del usuario actual',
     description: 'Permite al usuario autenticado cambiar su contraseña proporcionando la actual y la nueva.'
@@ -347,32 +392,122 @@ export class AuthController {
     return this.authService.checkPassword(req.user.id, checkPasswordDto);
   }
 
-  // Endpoint temporal para probar el envío de emails
-  @Get('test-email')
-  @ApiOperation({
-    summary: 'Probar envío de email (solo desarrollo)',
-    description: 'Endpoint temporal para probar la configuración del servicio de email.'
+  @Post('upload-profile-picture')
+  @UseGuards(AuthGuard)
+  @UseInterceptors(FileInterceptor('file', {
+    storage: memoryStorage(),
+    limits: {
+      fileSize: 5 * 1024 * 1024, // 5MB
+    },
+  }))
+  @ApiBearerAuth('JWT-auth')
+  @Auditable({
+    module: AuditModule.USERS,
+    action: AuditAction.UPDATE,
+    entityType: 'User',
+    description: 'Usuario actualizó su foto de perfil',
+    captureResponse: false
   })
-  @ApiResponse({
-    status: 200,
-    description: 'Email de prueba enviado',
+  @ApiOperation({
+    summary: 'Subir foto de perfil',
+    description: 'Permite al usuario subir o actualizar su foto de perfil. La imagen se optimiza y almacena en Cloudinary.'
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
     schema: {
       type: 'object',
       properties: {
-        message: { type: 'string', example: 'Email de prueba enviado correctamente' }
+        file: {
+          type: 'string',
+          format: 'binary',
+          description: 'Archivo de imagen (JPG, PNG, etc.)'
+        }
       }
     }
   })
-  async testEmail() {
-    try {
-      await this.authEmailService.sendConfirmationEmail({
-        email: 'test@example.com',
-        name: 'Usuario de Prueba',
-        token: '123456'
-      });
-      return { message: 'Email de prueba enviado correctamente' };
-    } catch (error) {
-      return { error: 'Error al enviar email', details: error.message };
+  @ApiResponse({
+    status: 200,
+    description: 'Foto de perfil actualizada exitosamente',
+    schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', example: 'https://res.cloudinary.com/...' }
+      }
     }
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Token inválido o expirado'
+  })
+  @ApiBadRequestResponse({
+    description: 'No se proporcionó un archivo o el formato no es válido'
+  })
+  uploadProfilePicture(@Request() req, @UploadedFile() file: Express.Multer.File) {
+    return this.authService.uploadProfilePicture(req.user.id, file);
+  }
+
+  @Delete('delete-profile-picture')
+  @UseGuards(AuthGuard)
+  @ApiBearerAuth('JWT-auth')
+  @Auditable({
+    module: AuditModule.USERS,
+    action: AuditAction.UPDATE,
+    entityType: 'User',
+    description: 'Usuario eliminó su foto de perfil',
+    captureResponse: false
+  })
+  @ApiOperation({
+    summary: 'Eliminar foto de perfil',
+    description: 'Elimina la foto de perfil del usuario de Cloudinary y la base de datos.'
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Foto de perfil eliminada exitosamente',
+    schema: {
+      type: 'string',
+      example: 'Foto de perfil eliminada exitosamente'
+    }
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Token inválido o expirado'
+  })
+  deleteProfilePicture(@Request() req) {
+    return this.authService.deleteProfilePicture(req.user.id);
+  }
+
+  @Post("create-service-token")
+  @UseGuards(AuthGuard)
+  @ApiBearerAuth()
+  @Auditable({
+    module: AuditModule.AUTH,
+    action: AuditAction.CREATE,
+    entityType: 'ServiceToken',
+    description: 'Token de servicio de larga duración creado',
+    captureResponse: false,
+    captureRequest: true
+  })
+  @ApiOperation({
+    summary: 'Crear token de servicio de larga duración (Solo Admin)',
+    description: 'Genera un JWT con mayor duración para servicios automatizados. Solo disponible para administradores.'
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Token de servicio creado exitosamente',
+    schema: {
+      type: 'object',
+      properties: {
+        token: { type: 'string', example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' },
+        expiresIn: { type: 'string', example: '365d' },
+        description: { type: 'string', example: 'Token para LPR Worker Manager' },
+        createdAt: { type: 'string', example: '2025-12-07T21:30:00.000Z' }
+      }
+    }
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Token inválido, expirado o usuario sin permisos de administrador'
+  })
+  @ApiBody({ type: CreateServiceTokenDto })
+  createServiceToken(@Request() req, @Body() createServiceTokenDto: CreateServiceTokenDto) {
+    const { duration, description } = createServiceTokenDto;
+    return this.authService.createServiceToken(req.user.id, duration, description);
   }
 }

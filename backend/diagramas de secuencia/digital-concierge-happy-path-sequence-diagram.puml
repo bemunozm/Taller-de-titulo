@@ -1,0 +1,329 @@
+@startuml Conserje Digital - Happy Path
+
+title Sistema de Conserje Digital con IA\nFlujo Happy Path (Caso Exitoso)
+
+' ====================================
+' CONFIGURACIÓN DE ESTILOS
+' ====================================
+skinparam backgroundColor #FEFEFE
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+skinparam maxMessageSize 180
+
+skinparam participant {
+  BackgroundColor<<Frontend>> #E3F2FD
+  BorderColor<<Frontend>> #1976D2
+  BackgroundColor<<Backend>> #FFF3E0
+  BorderColor<<Backend>> #F57C00
+  BackgroundColor<<IA>> #E8F5E9
+  BorderColor<<IA>> #388E3C
+  BackgroundColor<<DB>> #FCE4EC
+  BorderColor<<DB>> #C2185B
+  BackgroundColor<<External>> #F3E5F5
+  BorderColor<<External>> #7B1FA2
+}
+
+' ====================================
+' ACTORES Y SISTEMAS
+' ====================================
+actor "Visitante" as visitor
+actor "Residente" as resident
+
+participant "Frontend\n(React + OpenAI)" as frontend <<Frontend>>
+participant "OpenAI\nRealtime API" as openai <<IA>>
+
+box "Backend NestJS" #FFFACD
+  participant "ConciergeController" as controller <<Backend>>
+  participant "ConciergeService" as service <<Backend>>
+  participant "FamiliesService" as families <<Backend>>
+  participant "VisitsService" as visits <<Backend>>
+  participant "NotificationsGateway" as gateway <<Backend>>
+  participant "SMSService" as sms <<Backend>>
+end box
+
+database "PostgreSQL" as db <<DB>>
+
+participant "App Móvil" as mobile <<External>>
+
+' ====================================
+' FLUJO HAPPY PATH
+' ====================================
+
+== 1. Inicialización ==
+
+visitor -> frontend: Marca casa "A-303"
+activate frontend
+
+frontend -> controller: POST /session/start
+activate controller
+controller -> service: startSession()
+activate service
+service -> openai: Generar token efímero
+activate openai
+openai --> service: {token, expiresAt}
+deactivate openai
+
+service -> db: INSERT concierge_sessions\n(sessionId, status: ACTIVE)
+activate db
+db --> service: Sesión creada
+deactivate db
+
+service --> controller: {sessionId, token}
+deactivate service
+controller --> frontend: Credenciales de sesión
+deactivate controller
+
+frontend -> openai: Conectar + Configurar agente IA
+activate openai
+note right
+  4 herramientas:
+  • guardar_datos_visitante
+  • buscar_residente
+  • notificar_residente
+  • finalizar_llamada
+end note
+openai --> frontend: Conexión establecida
+deactivate openai
+
+== 2. Conversación y Recolección de Datos ==
+
+openai -> visitor: "Hola, soy el asistente.\n¿Cuál es tu nombre?"
+activate openai
+visitor -> openai: "Juan Pérez"
+
+openai -> openai: Llamada de función:\nguardar_datos_visitante
+
+openai -> frontend: Herramienta: guardar_datos_visitante\n{nombre: "Juan Pérez"}
+frontend -> controller: POST /execute-tool
+activate controller
+controller -> service: executeTool("guardar_datos_visitante")
+activate service
+
+service -> service: Formatear datos\n(RUT, teléfono, patente)
+
+service -> db: UPDATE concierge_sessions\nSET visitorName, visitorRut...
+activate db
+db --> service: Datos guardados
+deactivate db
+
+service --> controller: {success: true}
+deactivate service
+controller --> frontend: Datos guardados
+deactivate controller
+frontend --> openai: Resultado: OK
+
+note over openai, visitor
+  El agente continúa preguntando:
+  RUT, teléfono, patente, motivo
+  
+  Cada respuesta se guarda con
+  guardar_datos_visitante
+end note
+
+== 3. Búsqueda de Residente ==
+
+openai -> openai: Llamada de función:\nbuscar_residente
+
+openai -> frontend: Herramienta: buscar_residente\n{casa: "A-303"}
+frontend -> controller: POST /execute-tool
+activate controller
+controller -> service: executeTool("buscar_residente")
+activate service
+service -> families: findByDepartment("A-303")
+activate families
+
+families -> db: SELECT units, families, users\nWHERE identifier = 'A-303'
+activate db
+db --> families: Unit + Family + Users
+deactivate db
+
+families --> service: Family con 3 miembros
+deactivate families
+service --> controller: {encontrado: true,\nresidentes: [Ana, Pedro, María]}
+deactivate service
+controller --> frontend: Residentes encontrados
+deactivate controller
+frontend --> openai: Resultado: 3 residentes
+
+openai -> visitor: "Encontré 3 residentes.\nVoy a notificarlos."
+
+== 4. Notificación y Creación de Visita ==
+
+openai -> openai: Llamada de función:\nnotificar_residente
+
+openai -> frontend: Herramienta: notificar_residente\n{residentes_ids: [id1, id2, id3]}
+frontend -> controller: POST /execute-tool
+activate controller
+controller -> service: executeTool("notificar_residente")
+activate service
+
+service -> service: Validar datos requeridos
+
+service -> db: UPDATE concierge_sessions\nSET residentsNotified,\nresidentResponse = 'pending'
+activate db
+db --> service: Sesión actualizada
+deactivate db
+
+service -> visits: create(Visit PENDING)
+activate visits
+
+visits -> db: INSERT visits\n(status: PENDING, qrCode,\nhost: temporaryHost)
+activate db
+note right
+  Se crea visita en estado PENDING:
+  • QR único generado
+  • Host temporal (primer residente)
+  • Validez: 24 horas
+  • maxUses: 1
+end note
+db --> visits: Visita creada
+deactivate db
+
+visits --> service: Visita creada (PENDING)
+deactivate visits
+
+service -> db: UPDATE concierge_sessions\nSET createdVisitId
+activate db
+db --> service: Visita asociada
+deactivate db
+
+service -> db: INSERT notifications\n(type: VISITOR_ARRIVAL,\nrequiresAction: true)
+activate db
+db --> service: Notificaciones creadas
+deactivate db
+
+service -> gateway: sendToUser(residenteId, notification)
+activate gateway
+gateway -> mobile: emit("notification", {...})
+note right mobile
+  Notificación push a
+  los 3 residentes:
+  
+  "Visitante Juan Pérez
+  en portería"
+  
+  [Aprobar] [Rechazar]
+end note
+deactivate gateway
+
+service --> controller: {visita_creada: true,\ncantidad_notificados: 3}
+deactivate service
+controller --> frontend: Notificaciones enviadas
+deactivate controller
+frontend --> openai: Resultado: Notificados
+
+openai -> visitor: "He notificado a los residentes.\nPor favor espera..."
+
+== 5. Aprobación del Residente ==
+
+mobile -> mobile: Ana ve la notificación
+resident -> mobile: Tap en "Aprobar"
+
+mobile -> controller: POST /session/{id}/respond\n{approved: true, residentId: "ana"}
+activate controller
+controller -> service: respondToVisitor(true, "ana")
+activate service
+
+service -> db: UPDATE concierge_sessions\nSET residentResponse = 'approved'
+activate db
+db --> service: Respuesta guardada
+deactivate db
+
+service -> visits: checkIn(visitId)
+activate visits
+
+visits -> db: UPDATE visits\nSET status = ACTIVE,\nentryTime = NOW(),\nusedCount = usedCount + 1
+activate db
+note right
+  Actualizar visita:
+  • status: PENDING → ACTIVE
+  • entryTime: NOW()
+  • usedCount: 0 → 1
+end note
+db --> visits: Visita actualizada
+deactivate db
+
+visits --> service: Visita ACTIVA
+deactivate visits
+
+service -> visits: update({hostId: "ana"})
+activate visits
+
+visits -> db: UPDATE visits\nSET hostId = 'ana'
+activate db
+note right: Actualizar anfitrión temporal → Ana
+db --> visits: Anfitrión actualizado
+deactivate db
+
+visits --> service: Anfitrión actualizado
+deactivate visits
+
+service -> sms: sendQRCodeSMS(visitante)
+activate sms
+note right
+  SMS: "Hola Juan, tu visita
+  fue aprobada. Usa este QR
+  para registrar tu salida"
+end note
+sms --> service: SMS enviado
+deactivate sms
+
+service -> db: UPDATE notifications\nSET actionTaken = true
+activate db
+db --> service: Notificaciones procesadas
+deactivate db
+
+service -> gateway: broadcast("visitor:response:{id}")
+activate gateway
+gateway -> frontend: Evento WebSocket
+note right: Respuesta en tiempo real
+deactivate gateway
+
+service --> controller: {success: true}
+deactivate service
+controller --> mobile: Aprobación registrada
+deactivate controller
+
+== 6. Notificación al Visitante ==
+
+frontend -> frontend: handleResidentResponse()
+note right
+  collectedData.visitApproved = true
+end note
+
+frontend -> openai: "Residente aprobó.\nDespide al visitante."
+
+openai -> visitor: "¡Excelente! Tu visita fue aprobada.\nPuedes ingresar. ¡Que tengas un buen día!"
+
+== 7. Finalización ==
+
+openai -> openai: Llamada de función:\nfinalizar_llamada
+
+openai -> frontend: Herramienta: finalizar_llamada
+frontend -> controller: POST /session/{id}/end
+activate controller
+controller -> service: endSession("completed")
+activate service
+
+service -> db: UPDATE concierge_sessions\nSET status = 'completed',\nendTime = NOW()
+activate db
+db --> service: Sesión finalizada
+deactivate db
+
+service --> controller: {status: "completed", duration: 180s}
+deactivate service
+controller --> frontend: Sesión finalizada
+deactivate controller
+
+frontend -> openai: Desconectar
+deactivate openai
+
+frontend -> frontend: Limpiar estado
+deactivate frontend
+
+note over visitor
+  Visitante recibe SMS con QR
+  y procede a ingresar al condominio
+end note
+
+@enduml

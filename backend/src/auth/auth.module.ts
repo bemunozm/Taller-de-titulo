@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuthController } from './auth.controller';
@@ -11,17 +11,19 @@ import { Token } from 'src/tokens/entities/token.entity';
 import { AuthEmailService } from './services/auth-email.service';
 import { AuthorizationGuard } from './guards/authorization.guard';
 import { MailerModule } from '@nestjs-modules/mailer';
+import { CloudinaryModule } from 'src/cloudinary/cloudinary.module';
 
 @Module({
   imports: [
-    UsersModule,
+    forwardRef(() => UsersModule),
     TokensModule,
     ConfigModule,
+    CloudinaryModule,
     TypeOrmModule.forFeature([User, Token]),
     JwtModule.register({
       global: true,
       secret: process.env.JWT_SECRET || 'yourSecretKey',
-      signOptions: { expiresIn: '1d' },
+      signOptions: { expiresIn: process.env.JWT_EXPIRATION || '1d' },
     }),
     MailerModule.forRootAsync({
       imports: [ConfigModule],
@@ -53,6 +55,6 @@ import { MailerModule } from '@nestjs-modules/mailer';
   ],
   controllers: [AuthController],
   providers: [AuthService, AuthEmailService, AuthorizationGuard],
-  exports: [AuthorizationGuard],
+  exports: [AuthorizationGuard, AuthEmailService],
 })
 export class AuthModule {}

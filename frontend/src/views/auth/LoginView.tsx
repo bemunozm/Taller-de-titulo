@@ -175,20 +175,6 @@ export default function LoginView() {
           </TextLink>
         </div>
 
-        {/* Footer Link */}
-        <Divider className="my-4 sm:my-6" />
-        
-        <div className="text-center">
-          <Text className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">
-            ¿No tienes una cuenta?{' '}
-            <TextLink 
-              to="/auth/register"
-              className="font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300 underline-offset-2"
-            >
-              Crear cuenta
-            </TextLink>
-          </Text>
-        </div>
       </form>
     </div>
   )

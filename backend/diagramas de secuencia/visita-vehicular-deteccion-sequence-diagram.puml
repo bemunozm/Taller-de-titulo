@@ -1,0 +1,281 @@
+@startuml visita-vehicular-deteccion
+title Flujo Completo: Visita Vehicular con Detección Automática y Notificaciones
+
+' ====================================
+' CONFIGURACIÓN DE ESTILOS
+' ====================================
+skinparam backgroundColor #FEFEFE
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+skinparam maxMessageSize 200
+
+skinparam participant {
+  BackgroundColor<<Frontend>> #E3F2FD
+  BorderColor<<Frontend>> #1976D2
+  BackgroundColor<<Backend>> #FFF3E0
+  BorderColor<<Backend>> #F57C00
+  BackgroundColor<<DB>> #FCE4EC
+  BorderColor<<DB>> #C2185B
+  BackgroundColor<<External>> #F3E5F5
+  BorderColor<<External>> #7B1FA2
+  BackgroundColor<<LPR>> #E8F5E9
+  BorderColor<<LPR>> #388E3C
+}
+
+actor "Residente" as resident
+
+participant "Frontend\n(React)" as frontend <<Frontend>>
+participant "NotificationsGateway\n(WebSocket)" as ws <<Backend>>
+
+box "Backend NestJS - Visitas" #FFFACD
+  participant "VisitsController" as visitsCtrl <<Backend>>
+  participant "VisitsService" as visits <<Backend>>
+  participant "VehiclesService" as vehicles <<Backend>>
+  participant "NotificationsService" as notif <<Backend>>
+end box
+
+database "PostgreSQL" as db <<DB>>
+
+box "Backend NestJS - Detecciones" #FFE4B5
+  participant "DetectionsController" as detectionsCtrl <<Backend>>
+  participant "DetectionsService" as detections <<Backend>>
+end box
+
+participant "LPR Worker\n(Python + IA)" as lpr <<LPR>>
+participant "Barrera\nAutomática" as gate <<External>>
+
+== 0. Inicialización ==
+resident -> frontend: Abre aplicación
+frontend -> ws: Conectar WebSocket
+ws --> frontend: Conectado
+frontend -> ws: emit('register', {userId})
+ws --> frontend: {success: true}
+note right: Usuario registrado\npara notificaciones
+
+== 1. Programación de Visita ==
+resident -> frontend: Programa visita vehicular\n(Nombre, Patente, Fecha/Hora)
+frontend -> visitsCtrl: POST /visits\n{type: vehicular, vehiclePlate: ABC123}
+activate visitsCtrl
+visitsCtrl -> visits: create(createVisitDto)
+activate visits
+
+visits -> db: SELECT * FROM users\nWHERE id = hostId
+activate db
+db --> visits: Anfitrión encontrado
+deactivate db
+
+visits -> vehicles: findByPlate("ABC123")
+activate vehicles
+vehicles -> db: SELECT * FROM vehicles\nWHERE plate = ABC123
+activate db
+alt Vehículo NO existe
+    db --> vehicles: null
+    deactivate db
+    vehicles --> visits: null
+    deactivate vehicles
+    
+    visits -> vehicles: create({plate: ABC123,\nvehicleType: visitante,\naccessLevel: temporal})
+    activate vehicles
+    vehicles -> db: INSERT INTO vehicles\n{plate: ABC123, type: visitante}
+    activate db
+    db --> vehicles: Vehículo creado
+    deactivate db
+    vehicles --> visits: Entidad Vehículo
+    deactivate vehicles
+else Vehículo existe
+    db --> vehicles: Entidad Vehículo
+    deactivate db
+    vehicles --> visits: Entidad Vehículo
+    deactivate vehicles
+end
+
+visits -> visits: generateQRCode()
+note right: Genera código QR único\npara respaldo
+
+visits -> db: INSERT INTO visits\n{status: PENDING,\nqrCode, vehicle, host,\nvalidFrom, validUntil}
+activate db
+db --> visits: Visita creada
+deactivate db
+
+visits --> visitsCtrl: Entidad Visita
+deactivate visits
+visitsCtrl --> frontend: {id, status: PENDING, qrCode}
+deactivate visitsCtrl
+frontend --> resident: ✅ Visita programada
+
+== 2. Llegada del Visitante (ENTRADA) ==
+lpr -> lpr: Detecta patente ABC123\nen cámara de entrada
+note right: Cámara exterior\ncon LPR activo
+lpr -> detectionsCtrl: POST /detections\n{plate: ABC123, confidence: 0.95,\ncameraId, detectionTimestamp}
+activate detectionsCtrl
+detectionsCtrl -> detections: createDetection(dto)
+activate detections
+
+detections -> db: INSERT INTO plate_detections\n{plate, confidence, cameraId}
+activate db
+db --> detections: Detección guardada
+deactivate db
+
+detections -> vehicles: findByPlate("ABC123")
+activate vehicles
+vehicles -> db: SELECT * FROM vehicles\nWHERE plate = ABC123
+activate db
+db --> vehicles: {plate: ABC123,\nvehicleType: visitante,\naccessLevel: temporal,\nactive: true}
+deactivate db
+vehicles --> detections: Entidad Vehículo
+deactivate vehicles
+
+note right of detections: vehicleType = 'visitante'\n→ Verificar visita
+
+detections -> visits: validateAccess("ABC123", "plate")
+activate visits
+visits -> db: SELECT * FROM visits v\nLEFT JOIN vehicles ve ON v.vehicleId = ve.id\nWHERE ve.plate = ABC123\nAND v.status IN ('pending', 'active', 'ready')\nAND NOW() BETWEEN validFrom AND validUntil
+activate db
+db --> visits: Visit {status: PENDING,\nvisitorName: "Juan Pérez"}
+deactivate db
+visits --> detections: {valid: true,\nvisit: {...},\nmessage: "Visita válida"}
+deactivate visits
+
+note right of detections: visit.status = PENDING\n→ Es ENTRADA\n→ Hacer checkIn automático
+
+detections -> visits: checkIn(visitId)
+activate visits
+visits -> db: UPDATE visits\nSET status = 'active',\nentryTime = NOW(),\nusedCount = usedCount + 1
+activate db
+db --> visits: Visita actualizada
+deactivate db
+
+visits -> notif: create({\nrecipientId: host.id,\ntype: VISIT_CHECK_IN,\ntitle: "Visita Arribó"})
+activate notif
+notif -> db: INSERT INTO notifications
+activate db
+db --> notif: Notificación guardada
+deactivate db
+
+notif -> ws: sendToUser(hostId, 'notification')
+activate ws
+ws -> frontend: emit('notification', {data})
+frontend -> resident: 🔔 Notificación:\n"Juan Pérez ha llegado\nPatente: ABC123"
+deactivate ws
+deactivate notif
+
+visits --> detections: Visita ACTIVA
+deactivate visits
+
+detections -> detections: Calcular tiempo de respuesta\n(ms)
+
+detections -> db: INSERT INTO access_attempts\n{decision: 'Permitido',\nreason: "Entrada autorizada - Juan Pérez",\nmethod: "Patente - Entrada",\nresponseTimeMs}
+activate db
+db --> detections: Intento de acceso guardado
+deactivate db
+
+detections -> detections: sendDetectionNotifications()
+note right: Notifica a conserjes\n(el anfitrión ya fue notificado\nen el check-in)
+
+detections --> detectionsCtrl: {detection, attempt,\nisExit: false}
+deactivate detections
+detectionsCtrl --> lpr: {decision: PERMITIDO,\nisExit: false}
+deactivate detectionsCtrl
+
+lpr -> gate: Abrir barrera entrada
+gate --> gate: ✅ ABRE
+note right: Acceso autorizado\nautomáticamente
+
+== 3. Visitante Dentro del Condominio ==
+note over db: Visita.status = ACTIVE\nVisita.entryTime = 10:30:00
+
+== 4. Salida del Visitante ==
+lpr -> lpr: Detecta patente ABC123\nen cámara interior
+note right: Cámara interior/salida\ncon LPR activo
+lpr -> detectionsCtrl: POST /detections\n{plate: ABC123, confidence: 0.97,\ncameraId, detectionTimestamp}
+activate detectionsCtrl
+detectionsCtrl -> detections: createDetection(dto)
+activate detections
+
+detections -> db: INSERT INTO plate_detections\n{plate, confidence, cameraId}
+activate db
+db --> detections: Detección guardada
+deactivate db
+
+detections -> vehicles: findByPlate("ABC123")
+activate vehicles
+vehicles -> db: SELECT * FROM vehicles\nWHERE plate = ABC123
+activate db
+db --> vehicles: {plate: ABC123,\nvehicleType: visitante,\nactive: true}
+deactivate db
+vehicles --> detections: Entidad Vehículo
+deactivate vehicles
+
+detections -> visits: validateAccess("ABC123", "plate")
+activate visits
+visits -> db: SELECT * FROM visits v\nLEFT JOIN vehicles ve ON v.vehicleId = ve.id\nWHERE ve.plate = ABC123\nAND v.status IN ('pending', 'active', 'ready')\nAND NOW() BETWEEN validFrom AND validUntil
+activate db
+db --> visits: Visit {status: ACTIVE,\nvisitorName: "Juan Pérez",\nentryTime: "10:30:00"}
+deactivate db
+visits --> detections: {valid: true,\nvisit: {...},\nmessage: "Visita activa"}
+deactivate visits
+
+note right of detections: visit.status = ACTIVE\n→ Es SALIDA\n→ Hacer checkOut automático
+
+detections -> visits: checkOut(visitId)
+activate visits
+
+visits -> visits: Calcular estado final:\nsi (usedCount < maxUses) → READY_FOR_REENTRY\nsi no → COMPLETED
+
+visits -> db: UPDATE visits\nSET status = 'completed',\nexitTime = NOW()
+activate db
+db --> visits: Visita actualizada
+deactivate db
+
+visits -> visits: Calcular duración:\nexitTime - entryTime
+
+visits -> notif: create({\nrecipientId: host.id,\ntype: VISIT_CHECK_OUT,\ntitle: "Visita Finalizó"})
+activate notif
+notif -> db: INSERT INTO notifications
+activate db
+db --> notif: Notificación guardada
+deactivate db
+
+notif -> ws: sendToUser(hostId, 'notification')
+activate ws
+ws -> frontend: emit('notification', {data})
+frontend -> resident: 🔔 Notificación:\n"Juan Pérez ha salido\nDuración: 7h 30m"
+deactivate ws
+deactivate notif
+
+visits --> detections: Visita COMPLETADA
+deactivate visits
+
+detections -> detections: Calcular tiempo de respuesta\n(ms)
+
+detections -> db: INSERT INTO access_attempts\n{decision: 'Permitido',\nreason: "Salida registrada - Juan Pérez",\nmethod: "Patente - Salida",\nresponseTimeMs}
+activate db
+db --> detections: Intento de acceso guardado
+deactivate db
+
+detections --> detectionsCtrl: {detection, attempt,\nisExit: true}
+deactivate detections
+detectionsCtrl --> lpr: {decision: PERMITIDO,\nisExit: true}
+deactivate detectionsCtrl
+
+lpr -> gate: Abrir barrera salida
+gate --> gate: ✅ ABRE
+
+== 5. Visita Completada ==
+note over db: Visita.status = COMPLETED\nVisita.entryTime = 10:30:00\nVisita.exitTime = 18:00:00\nVisita.usedCount = 1
+
+note over detections, visits
+  **Lógica de Estado Automática:**
+  
+  1. **PENDING** → checkIn → **ACTIVE** (entrada)
+  2. **ACTIVE** → checkOut → **COMPLETED** o **READY_FOR_REENTRY**
+     • Si maxUses = null o usedCount < maxUses → READY_FOR_REENTRY
+     • Si usedCount >= maxUses → COMPLETED
+  3. **READY_FOR_REENTRY** → checkIn → **ACTIVE** (reingreso)
+  
+  **Métricas:**
+  • responseTimeMs: Tiempo entre detección LPR y decisión
+  • Umbral de alerta: 5000ms (5 segundos)
+end note
+
+@enduml

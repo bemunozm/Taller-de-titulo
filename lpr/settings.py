@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     LPR_FORCE_SAVE_ON_OCR: bool = True
     LPR_SAVE_ONLY_ON_PLATE: bool = True
     LPR_MIN_CHAR_CONF_RATIO: float = 0.6
-    LPR_DEDUP_SECONDS: float = 10.0
+    LPR_DEDUP_SECONDS: float = 120.0
     LPR_DET_CONF_THRESHOLD: float = 0.55
     LPR_OCR_CONF_THRESHOLD: float = 0.98
     LPR_CONFIRM_FRAMES: int = 3
@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     LPR_MIN_CHAR_CONF: float = Field(0.30, ge=0, le=1)
     LPR_INCLUDE_SNAPSHOT: bool = True
     LPR_WORKER_TOKEN: Optional[str] = None
+
+    # Logging
+    LOG_LEVEL: str = 'INFO'
 
     # Cloudinary
     CLOUDINARY_CLOUD_NAME: Optional[str] = None

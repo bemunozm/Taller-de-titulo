@@ -83,6 +83,7 @@ class LprWorker:
     def _process_frame(self, frame: np.ndarray):
         # Esta función implementa la lógica de detección/OCR/confirmación
         plates = self.detector(frame, self.cfg.min_det_conf)
+        logging.debug('Frame procesado - Detecciones: %d', len(plates) if plates else 0)
         if not plates:
             return
         for det in plates:
@@ -101,15 +102,16 @@ class LprWorker:
             plate_text = ocr_res.text if ocr_res else ''
             ocr_conf = ocr_res.confidence if ocr_res else 0.0
             char_conf = ocr_res.char_confidences if ocr_res else []
+            logging.info('Detección: conf=%.2f | OCR: "%s" conf=%.2f', conf, plate_text, ocr_conf)
 
             save_only_on_plate = bool(settings.LPR_SAVE_ONLY_ON_PLATE)
             if save_only_on_plate and (not plate_text or plate_text.strip() == ''):
-                logging.debug('OCR vacío — saltando')
+                logging.info('OCR vacío — saltando detección')
                 continue
 
             plate_clean = normalize_plate(plate_text)
             if not plausible_plate(plate_clean):
-                logging.debug('Placa %s no plausible', plate_text)
+                logging.info('Placa "%s" no plausible, descartando', plate_text)
                 if self.cfg.save_crops_dir:
                     try:
                         save_image_pil(self.cfg.save_crops_dir, f'{self.cfg.camera_id}_crop_bad_{int(time.time())}.jpg', pil_crop)
@@ -120,20 +122,21 @@ class LprWorker:
             char_stats = analyze_char_confidences(char_conf)
             min_char_ratio_required = float(settings.LPR_MIN_CHAR_CONF_RATIO)
             if char_stats['num_chars'] > 0 and char_stats['ratio_above'] < min_char_ratio_required:
-                logging.debug('Placa %s rechazada por calidad', plate_clean)
+                logging.info('Placa "%s" rechazada - calidad insuficiente (ratio: %.2f < %.2f)', 
+                           plate_clean, char_stats['ratio_above'], min_char_ratio_required)
                 if self.cfg.save_crops_dir:
                     try:
                         save_image_pil(self.cfg.save_crops_dir, f'{self.cfg.camera_id}_crop_lowq_{int(time.time())}.jpg', pil_crop)
                     except Exception:
                         logging.exception('No se pudo guardar crop lowq')
                 continue
-
             # dedupe
             dedup_seconds = float(settings.LPR_DEDUP_SECONDS)
             now_ts = time.time()
             last_emitted = self.emitted_cache.get(plate_clean)
             if plate_clean and last_emitted and (now_ts - last_emitted) < dedup_seconds:
-                logging.debug('Placa %s recientemente emitida', plate_clean)
+                logging.info('Placa "%s" duplicada - emitida hace %.1fs', plate_clean, now_ts - last_emitted)
+                continuedebug('Placa %s recientemente emitida', plate_clean)
                 continue
 
             # sightings
@@ -143,9 +146,9 @@ class LprWorker:
             entry['count'] = entry.get('count', 0) + 1
             entry['last_seen'] = now_ts
             self.plate_sightings[plate_clean] = entry
-
             confirmed, info = should_confirm(self.plate_sightings, plate_clean)
             if not confirmed:
+                logging.info('Esperando confirmación %s (visto %d veces)', plate_clean, entry.get('count', 0))
                 logging.debug('Esperando confirmacion %s', plate_clean)
                 if self.cfg.save_crops_dir:
                     try:
@@ -174,7 +177,7 @@ class LprWorker:
                 'ocr_confidence': ocr_conf,
                 'meta': meta,
                 'mountPath': self.cfg.rtsp_url,
-                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                'detectionTimestamp': int(now_ts * 1000),  # Timestamp en milisegundos desde epoch
             }
 
             # NOTE: saving full frames for debug was removed by request.

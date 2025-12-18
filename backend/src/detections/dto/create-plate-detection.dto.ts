@@ -28,10 +28,7 @@ class MetaPlateDto {
   @ApiPropertyOptional({ description: 'Media de confianza por caracter', example: 0.85 })
   char_conf_mean?: number | null;
 
-  @IsOptional()
-  @IsString()
-  @ApiPropertyOptional({ description: 'Timestamp de la detección', example: '2024-06-01T12:34:56Z' })
-  timestamp?: string;
+  // timestamp removido - se genera automáticamente en backend con @CreateDateColumn
 
   @IsOptional()
   @IsString()
@@ -68,6 +65,14 @@ export class CreatePlateDetectionDto {
   @IsString()
   @ApiPropertyOptional({ description: 'Ruta al frame anotado en disco', example: '/data/lpr/detecciones/cam-frame.jpg' })
   full_frame_path?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @ApiPropertyOptional({ 
+    description: 'Timestamp de detección desde el LPR en milisegundos desde epoch (para cálculo preciso de tiempo de respuesta)', 
+    example: 1733850000000 
+  })
+  detectionTimestamp?: number;
 
   @IsOptional()
   @ValidateNested()

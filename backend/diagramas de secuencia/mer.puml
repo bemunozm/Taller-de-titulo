@@ -1,0 +1,304 @@
+@startuml Sistema de Control de Acceso - Modelo ER
+
+' ====================================
+' CONFIGURACIÓN DE ESTILOS
+' ====================================
+hide circle
+hide empty methods
+skinparam linetype polyline
+skinparam nodesep 80
+skinparam ranksep 100
+
+' ====================================
+' ENTIDADES
+' ====================================
+
+entity "User" as user {
+  * **id**: UUID <<PK>>
+  --
+  * rut: VARCHAR(50) <<UK>>
+  * name: VARCHAR(100)
+  * email: VARCHAR <<UK>>
+  * phone: VARCHAR(15) <<UK>>
+  * password: VARCHAR
+  age: INT
+  profilePicture: VARCHAR(512)
+  confirmed: BOOLEAN
+  createdAt: TIMESTAMPTZ
+  updatedAt: TIMESTAMPTZ
+  deletedAt: TIMESTAMPTZ
+  --
+  familyId: UUID <<FK>>
+}
+
+entity "Token" as token {
+  * **id**: UUID <<PK>>
+  --
+  * token: VARCHAR(6)
+  createdAt: TIMESTAMPTZ
+  expiresAt: TIMESTAMPTZ
+  --
+  * userId: UUID <<FK>>
+}
+
+entity "Role" as role {
+  * **id**: UUID <<PK>>
+  --
+  * name: VARCHAR(100) <<UK>>
+  description: VARCHAR
+}
+
+entity "Permission" as permission {
+  * **id**: UUID <<PK>>
+  --
+  * name: VARCHAR(100) <<UK>>
+  description: VARCHAR(255)
+  module: VARCHAR(50)
+  action: VARCHAR(50)
+}
+
+entity "user_roles_role" as user_roles {
+  * userId: UUID <<PK,FK>>
+  * roleId: UUID <<PK,FK>>
+}
+
+entity "role_permissions_permission" as role_permissions {
+  * roleId: UUID <<PK,FK>>
+  * permissionId: UUID <<PK,FK>>
+}
+
+entity "Unit" as unit {
+  * **id**: UUID <<PK>>
+  --
+  block: VARCHAR(10)
+  * number: VARCHAR(10)
+  * identifier: VARCHAR(20) <<UK>>
+  floor: INT
+  type: VARCHAR(50)
+  active: BOOLEAN
+  createdAt: TIMESTAMPTZ
+  updatedAt: TIMESTAMPTZ
+}
+
+entity "Family" as family {
+  * **id**: UUID <<PK>>
+  --
+  * name: VARCHAR(128)
+  description: VARCHAR(256)
+  active: BOOLEAN
+  createdAt: TIMESTAMPTZ
+  updatedAt: TIMESTAMPTZ
+  --
+  unitId: UUID <<FK>>
+}
+
+entity "Vehicle" as vehicle {
+  * **id**: UUID <<PK>>
+  --
+  * plate: VARCHAR(16) <<UK>>
+  brand: VARCHAR(128)
+  model: VARCHAR(64)
+  color: VARCHAR(32)
+  year: INT
+  vehicleType: VARCHAR(32)
+  accessLevel: VARCHAR(64)
+  active: BOOLEAN
+  createdAt: TIMESTAMPTZ
+  updatedAt: TIMESTAMPTZ
+  --
+  ownerId: UUID <<FK>>
+}
+
+entity "Visit" as visit {
+  * **id**: UUID <<PK>>
+  --
+  type: ENUM
+  status: ENUM
+  * visitorName: VARCHAR(128)
+  visitorRut: VARCHAR(32)
+  visitorPhone: VARCHAR(15)
+  reason: VARCHAR(256)
+  qrCode: VARCHAR(64) <<UK>>
+  maxUses: INT
+  usedCount: INT
+  validFrom: TIMESTAMPTZ
+  validUntil: TIMESTAMPTZ
+  entryTime: TIMESTAMPTZ
+  exitTime: TIMESTAMPTZ
+  createdAt: TIMESTAMPTZ
+  updatedAt: TIMESTAMPTZ
+  --
+  * hostId: UUID <<FK>>
+  familyId: UUID <<FK>>
+  vehicleId: UUID <<FK>>
+}
+
+entity "PlateDetection" as detection {
+  * **id**: UUID <<PK>>
+  --
+  * cameraId: VARCHAR(128)
+  * plate: VARCHAR(64)
+  plate_raw: VARCHAR(64)
+  det_confidence: FLOAT
+  ocr_confidence: FLOAT
+  full_frame_path: VARCHAR(1024)
+  meta: JSONB
+  detectionTimestamp: BIGINT
+  createdAt: TIMESTAMPTZ
+}
+
+entity "AccessAttempt" as attempt {
+  * **id**: UUID <<PK>>
+  --
+  method: VARCHAR(128)
+  decision: VARCHAR(64)
+  reason: TEXT
+  createdAt: TIMESTAMPTZ
+  updatedAt: TIMESTAMPTZ
+  expiresAt: TIMESTAMPTZ
+  respondedAt: TIMESTAMPTZ
+  notificationId: UUID
+  responseTimeMs: INT
+  --
+  * detectionId: UUID <<FK>>
+  residenteId: UUID <<FK>>
+  respondedById: UUID <<FK>>
+}
+
+entity "Camera" as camera {
+  * **id**: UUID <<PK>>
+  --
+  * name: VARCHAR(150)
+  location: VARCHAR(200)
+  encryptedSourceUrl: TEXT
+  mountPath: VARCHAR(150) <<UK>>
+  registeredInMediamtx: BOOLEAN
+  enableLpr: BOOLEAN
+  active: BOOLEAN
+}
+
+entity "camera_roles" as camera_roles {
+  * cameraId: UUID <<PK,FK>>
+  * roleId: UUID <<PK,FK>>
+}
+
+entity "Notification" as notification {
+  * **id**: UUID <<PK>>
+  --
+  type: ENUM
+  * title: VARCHAR(255)
+  message: TEXT
+  priority: ENUM
+  read: BOOLEAN
+  readAt: TIMESTAMPTZ
+  data: JSONB
+  createdAt: TIMESTAMPTZ
+  deletedAt: TIMESTAMPTZ
+  expiresAt: TIMESTAMPTZ
+  requiresAction: BOOLEAN
+  actionTaken: BOOLEAN
+  actionData: JSONB
+  --
+  * recipientId: UUID <<FK>>
+}
+
+entity "AuditLog" as audit {
+  * **id**: UUID <<PK>>
+  --
+  module: ENUM
+  action: ENUM
+  entityId: VARCHAR
+  entityType: VARCHAR
+  oldValue: JSONB
+  newValue: JSONB
+  metadata: JSONB
+  description: TEXT
+  createdAt: TIMESTAMPTZ
+  --
+  userId: UUID <<FK>>
+}
+
+entity "ConciergeSession" as session {
+  * **id**: UUID <<PK>>
+  --
+  * sessionId: VARCHAR(64) <<UK>>
+  status: ENUM
+  visitorName: VARCHAR(128)
+  visitorRut: VARCHAR(32)
+  visitorPhone: VARCHAR(15)
+  vehiclePlate: VARCHAR(10)
+  visitReason: VARCHAR(256)
+  destinationHouse: VARCHAR(50)
+  residentsNotified: JSONB
+  residentResponse: VARCHAR(20)
+  visitorSocketId: VARCHAR(64)
+  transcript: JSONB
+  functionCalls: JSONB
+  startTime: TIMESTAMPTZ
+  endTime: TIMESTAMPTZ
+  createdAt: TIMESTAMPTZ
+  updatedAt: TIMESTAMPTZ
+  --
+  createdVisitId: UUID <<FK>>
+}
+
+entity "SystemLog" as log {
+  * **id**: UUID <<PK>>
+  --
+  level: ENUM
+  type: ENUM
+  service: ENUM
+  * message: VARCHAR(500)
+  method: VARCHAR(10)
+  url: TEXT
+  statusCode: INT
+  responseTime: INT
+  requestData: JSONB
+  responseData: JSONB
+  errorMessage: TEXT
+  stackTrace: TEXT
+  metadata: JSONB
+  correlationId: VARCHAR
+  ipAddress: VARCHAR
+  userAgent: TEXT
+  createdAt: TIMESTAMPTZ
+}
+
+' ====================================
+' RELACIONES
+' ====================================
+
+' User relationships
+user ||--o{ token
+user ||--o{ vehicle
+user ||--o{ notification
+user ||--o{ audit
+user }o--|| family
+
+' User-Role-Permission (N:M)
+user ||--o{ user_roles
+user_roles }o--|| role
+role ||--o{ role_permissions
+role_permissions }o--|| permission
+
+' Camera-Role (N:M)
+camera ||--o{ camera_roles
+camera_roles }o--|| role
+
+' Family-Unit
+family }o--|| unit
+
+' Visit relationships
+visit }o--|| user
+visit }o--|| family
+visit }o--|| vehicle
+
+' Detection-Attempt
+detection ||--o{ attempt
+attempt }o--|| user
+attempt }o--|| user
+
+' ConciergeSession
+session }o--|| visit
+
+@enduml

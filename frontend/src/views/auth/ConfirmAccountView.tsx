@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useForm } from 'react-hook-form'
 import { useMutation } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
@@ -15,8 +15,7 @@ export default function ConfirmAccountView() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const [pinValues, setPinValues] = useState<string[]>(['', '', '', '', '', ''])
-  const [autoSubmitted, setAutoSubmitted] = useState(false)
-  const [isSubmitting, setIsSubmitting] = useState(false)
+  const hasProcessedUrlToken = useRef(false)
   
   const {
     handleSubmit,
@@ -30,7 +29,6 @@ export default function ConfirmAccountView() {
     onSuccess: (data) => {
       toast.success(data)
       reset()
-      setIsSubmitting(false)
       navigate('/auth/login')
     },
     onError: (error) => {
@@ -38,15 +36,15 @@ export default function ConfirmAccountView() {
       toast.error(error.message || 'Código inválido o expirado')
       // Limpiar los campos al fallar
       setPinValues(['', '', '', '', '', ''])
-      setAutoSubmitted(false)
-      setIsSubmitting(false)
     }
   })
 
   // Efecto para auto-completar el token desde la URL
   useEffect(() => {
     const tokenFromUrl = searchParams.get('token')
-    if (tokenFromUrl && tokenFromUrl.length === 6 && !autoSubmitted && !isSubmitting && !isPending) {
+    if (tokenFromUrl && tokenFromUrl.length === 6 && !hasProcessedUrlToken.current && !isPending) {
+      hasProcessedUrlToken.current = true
+      console.log('Auto-submitting token from URL:', tokenFromUrl)
       // Convertir el token en array de dígitos
       const tokenArray = tokenFromUrl.split('')
       setPinValues(tokenArray)
@@ -54,14 +52,10 @@ export default function ConfirmAccountView() {
       
       // Auto-submit después de un pequeño delay para que el usuario vea el código
       setTimeout(() => {
-        if (!isSubmitting && !isPending) {
-          setAutoSubmitted(true)
-          setIsSubmitting(true)
-          mutate({ token: tokenFromUrl })
-        }
+        mutate({ token: tokenFromUrl })
       }, 1000)
     }
-  }, [searchParams, setValue, mutate, autoSubmitted, isSubmitting, isPending])
+  }, [searchParams, setValue, mutate, isPending])
 
   const handlePinChange = (values: string[], fullValue: string) => {
     setPinValues(values)
@@ -70,19 +64,17 @@ export default function ConfirmAccountView() {
 
   const handlePinComplete = (fullValue: string) => {
     // Solo auto-submit si NO vino desde URL y no se está procesando ya
-    if (fullValue.length === 6 && !isPending && !autoSubmitted && !isSubmitting) {
+    if (fullValue.length === 6 && !isPending && !hasProcessedUrlToken.current) {
       const tokenFromUrl = searchParams.get('token')
       // Si no hay token en URL o es diferente al completado manualmente
       if (!tokenFromUrl || tokenFromUrl !== fullValue) {
-        setIsSubmitting(true)
         handleSubmit(onSubmit)()
       }
     }
   }
 
   const onSubmit = (data: ConfirmToken) => {
-    if (data.token.length === 6 && !isPending && !isSubmitting) {
-      setIsSubmitting(true)
+    if (data.token.length === 6 && !isPending) {
       mutate(data)
     }
   }
@@ -115,10 +107,10 @@ export default function ConfirmAccountView() {
               value={pinValues}
               onChange={handlePinChange}
               onComplete={handlePinComplete}
-              disabled={isPending || isSubmitting}
-              loading={isPending || isSubmitting}
+              disabled={isPending}
+              loading={isPending}
               error={!!errors.token}
-              autoSubmit={!autoSubmitted} // Solo auto-submit si no vino de URL
+              autoSubmit={!hasProcessedUrlToken.current}
               autoSubmitDelay={1000}
               className="w-full"
             />
@@ -153,29 +145,16 @@ export default function ConfirmAccountView() {
         {/* Footer Links */}
         <Divider className="my-4 sm:my-6" />
         
-        <div className="text-center space-y-2">
-          <div>
-            <Text className="text-xs sm:text-sm text-zinc-600 dark:text-zinc-400">
-              ¿Ya confirmaste tu cuenta?{' '}
-              <TextLink 
-                to="/auth/login"
-                className="font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300 underline-offset-2"
-              >
-                Iniciar sesión
-              </TextLink>
-            </Text>
-          </div>
-          <div>
-            <Text className="text-xs sm:text-sm text-zinc-600 dark:text-zinc-400">
-              ¿No tienes una cuenta?{' '}
-              <TextLink 
-                to="/auth/register"
-                className="font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300 underline-offset-2"
-              >
-                Crear cuenta
-              </TextLink>
-            </Text>
-          </div>
+        <div className="text-center">
+          <Text className="text-xs sm:text-sm text-zinc-600 dark:text-zinc-400">
+            ¿Ya confirmaste tu cuenta?{' '}
+            <TextLink 
+              to="/auth/login"
+              className="font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300 underline-offset-2"
+            >
+              Iniciar sesión
+            </TextLink>
+          </Text>
         </div>
       </form>
     </div>

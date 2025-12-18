@@ -1,0 +1,529 @@
+@startuml Conserje Digital - Flujo Completo
+
+title Sistema de Conserje Digital con IA\nFlujo Completo de Interacción
+
+' ====================================
+' CONFIGURACIÓN DE ESTILOS
+' ====================================
+skinparam backgroundColor #FEFEFE
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+skinparam maxMessageSize 200
+
+' Colores por tipo de componente
+skinparam participant {
+  BackgroundColor<<Frontend>> #E3F2FD
+  BorderColor<<Frontend>> #1976D2
+  
+  BackgroundColor<<Backend>> #FFF3E0
+  BorderColor<<Backend>> #F57C00
+  
+  BackgroundColor<<IA>> #E8F5E9
+  BorderColor<<IA>> #388E3C
+  
+  BackgroundColor<<DB>> #FCE4EC
+  BorderColor<<DB>> #C2185B
+  
+  BackgroundColor<<External>> #F3E5F5
+  BorderColor<<External>> #7B1FA2
+}
+
+' ====================================
+' ACTORES Y SISTEMAS
+' ====================================
+actor "Visitante" as visitor
+actor "Residente" as resident
+
+participant "DigitalConciergeView\n(Frontend React)" as frontend <<Frontend>>
+participant "WebSocket\nService" as ws <<Frontend>>
+participant "OpenAI\nRealtime API" as openai <<IA>>
+
+box "Backend NestJS" #FFFACD
+  participant "ConciergeController" as controller <<Backend>>
+  participant "ConciergeService" as service <<Backend>>
+  participant "OpenAITokenService" as token_service <<Backend>>
+  participant "NotificationsGateway\n(Socket.IO)" as gateway <<Backend>>
+  participant "NotificationsService" as notif_service <<Backend>>
+  participant "FamiliesService" as families <<Backend>>
+  participant "VisitsService" as visits <<Backend>>
+  participant "SMSService" as sms <<Backend>>
+end box
+
+database "PostgreSQL" as db <<DB>>
+
+participant "App Móvil\nResidente" as mobile <<External>>
+
+' ====================================
+' FASE 1: INICIALIZACIÓN
+' ====================================
+== Fase 1: Inicialización de Sesión ==
+
+visitor -> frontend: Marca número de casa\nen DialPad
+activate frontend
+
+frontend -> frontend: Validar permisos\nde micrófono
+note right
+  navigator.mediaDevices
+  .getUserMedia({ audio: true })
+end note
+
+frontend -> ws: Obtener socketId
+activate ws
+ws --> frontend: socketId actual
+deactivate ws
+
+frontend -> controller: POST /concierge/session/start\n{socketId: "abc123"}
+activate controller
+
+controller -> service: startSession(socketId)
+activate service
+
+service -> token_service: generateEphemeralToken()
+activate token_service
+token_service -> openai: POST /ephemeral_token
+activate openai
+openai --> token_service: {token, expiresAt}
+deactivate openai
+token_service --> service: {token, expiresAt}
+deactivate token_service
+
+service -> service: sessionId = randomBytes(16)
+
+service -> db: INSERT INTO concierge_sessions\n(sessionId, status: ACTIVE,\nvisitorSocketId, startTime)
+activate db
+db --> service: ConciergeSession creado
+deactivate db
+
+service --> controller: {sessionId, ephemeralToken, expiresAt}
+deactivate service
+
+controller --> frontend: {sessionId, ephemeralToken, expiresAt}
+deactivate controller
+
+frontend -> frontend: Configurar herramientas:\n1. guardar_datos_visitante\n2. buscar_residente\n3. notificar_residente\n4. finalizar_llamada
+
+frontend -> openai: Conectar con token efímero\ny configurar agente
+activate openai
+
+openai --> frontend: Conexión establecida
+note right
+  RealtimeSession iniciada
+  con instrucciones del agente
+end note
+
+frontend -> ws: Suscribir a evento\nvisitor:response:{sessionId}
+activate ws
+ws --> frontend: Listener configurado
+deactivate ws
+
+' ====================================
+' FASE 2: CONVERSACIÓN CON VISITANTE
+' ====================================
+== Fase 2: Conversación con IA y Recolección de Datos ==
+
+openai -> openai: Agente saluda y\npide datos al visitante
+
+visitor -> openai: Conversación por voz\n(nombre, RUT, teléfono,\npatente, motivo)
+
+loop Cada dato recolectado
+  openai -> openai: Llamada de función:\nguardar_datos_visitante
+  
+  openai -> frontend: Llamada de herramienta:\nguardar_datos_visitante\n{nombre, rut, telefono...}
+  
+  frontend -> controller: POST /concierge/session/{id}/execute-tool\n{toolName: "guardar_datos_visitante"}
+  activate controller
+  
+  controller -> service: executeTool(sessionId, toolName, params)
+  activate service
+  
+  service -> service: Formatear datos:\n- RUT: XX.XXX.XXX-X\n- Teléfono: +569XXXXXXXX\n- Patente: UPPERCASE
+  
+  service -> db: UPDATE concierge_sessions\nSET visitorName, visitorRut,\nvisitorPhone, vehiclePlate...
+  activate db
+  db --> service: Datos actualizados
+  deactivate db
+  
+  service -> db: INSERT INTO function_calls log
+  db --> service: Log guardado
+  
+  service --> controller: {success: true, data: {...}}
+  deactivate service
+  
+  controller --> frontend: {success: true, data: {...}}
+  deactivate controller
+  
+  frontend --> openai: Resultado: datos guardados
+  
+  openai -> openai: Continuar conversación\ncon datos actualizados
+end
+
+' ====================================
+' FASE 3: BÚSQUEDA DE RESIDENTE
+' ====================================
+== Fase 3: Búsqueda de Residente ==
+
+openai -> openai: Llamada de función:\nbuscar_residente
+
+openai -> frontend: Llamada de herramienta:\nbuscar_residente\n{casa: "A-303"}
+
+frontend -> controller: POST /concierge/session/{id}/execute-tool\n{toolName: "buscar_residente"}
+activate controller
+
+controller -> service: executeTool(sessionId, "buscar_residente", {casa})
+activate service
+
+service -> families: findByDepartment("A-303")
+activate families
+
+families -> db: SELECT * FROM units\nWHERE identifier LIKE '%A-303%'\nOR number LIKE '%303%'
+activate db
+db --> families: Unidad encontrada
+deactivate db
+
+families -> db: SELECT * FROM families\nWHERE unitId = {unitId}\nAND active = true
+activate db
+db --> families: Familia encontrada
+deactivate db
+
+families -> db: SELECT * FROM users\nWHERE familyId = {familyId}
+activate db
+db --> families: Miembros de la familia
+deactivate db
+
+families --> service: Familia con miembros
+deactivate families
+
+alt Familia encontrada con miembros
+  service --> controller: {encontrado: true,\nresidentes: [{id, nombre, telefono}...],\ncantidad_residentes: N}
+else Familia no encontrada
+  service --> controller: {encontrado: false,\nmensaje: "No se encontró..."}
+end
+
+deactivate service
+controller --> frontend: Resultado de herramienta
+deactivate controller
+
+frontend --> openai: Resultado: residentes
+
+openai -> openai: Informar al visitante:\n"Encontré N residentes,\nvoy a notificarlos"
+
+' ====================================
+' FASE 4: NOTIFICACIÓN Y CREACIÓN DE VISITA
+' ====================================
+== Fase 4: Notificación a Residentes y Creación de Visita ==
+
+openai -> openai: Llamada de función:\nnotificar_residente
+
+openai -> frontend: Llamada de herramienta:\nnotificar_residente\n{residentes_ids: [id1, id2, id3]}
+
+frontend -> controller: POST /concierge/session/{id}/execute-tool\n{toolName: "notificar_residente"}
+activate controller
+
+controller -> service: executeTool(sessionId, "notificar_residente", {residentes_ids})
+activate service
+
+service -> service: Validar datos requeridos:\nvisitorName, destinationHouse
+
+service -> db: UPDATE concierge_sessions\nSET residentsNotified = [{...}],\nresidentResponse = 'pending'
+activate db
+db --> service: Sesión actualizada
+deactivate db
+
+' Crear visita en estado PENDING
+service -> visits: create({\nvisitorName, visitorRut, visitorPhone,\nvehiclePlate, type, status: PENDING,\nhostId: temporaryHost,\nvalidFrom: now, validUntil: +24h,\nmaxUses: 1})
+activate visits
+
+visits -> db: INSERT INTO vehicles\n(si es vehicular y no existe)
+activate db
+db --> visits: Vehículo creado/existente
+deactivate db
+
+visits -> visits: Generar QR único\nqrCode = crypto.randomBytes(8)
+
+visits -> db: INSERT INTO visits\n(status: PENDING, qrCode,\nhost: temporaryHost[0])
+activate db
+db --> visits: Visita creada
+deactivate db
+
+visits --> service: Visita {id, status: PENDING}
+deactivate visits
+
+service -> db: UPDATE concierge_sessions\nSET createdVisitId = {visitId}
+activate db
+db --> service: Visita asociada
+deactivate db
+
+note over service
+  La visita se crea en estado PENDING
+  con un host temporal (primer residente).
+  El host real se actualizará cuando
+  algún residente apruebe.
+end note
+
+' Enviar notificaciones push a TODOS los residentes
+loop Para cada residente de la familia
+  service -> notif_service: notifyVisitorArrival(residentId, sessionId, {...})
+  activate notif_service
+  
+  notif_service -> db: INSERT INTO notifications\n(type: VISITOR_ARRIVAL,\ntitle: "Visitante en portería",\nrequiresAction: true,\ndata: {sessionId, visitorData...})
+  activate db
+  db --> notif_service: Notificación creada
+  deactivate db
+  
+  notif_service -> gateway: sendToUser(residentId,\n"notification", payload)
+  activate gateway
+  
+  gateway -> gateway: Buscar socketIds\ndel usuario
+  
+  gateway -> mobile: emit("notification", {...})
+  activate mobile
+  note right
+    Notificación push
+    con botones:
+    Aprobar / Rechazar
+  end note
+  deactivate mobile
+  
+  gateway --> notif_service: Enviado
+  deactivate gateway
+  
+  notif_service --> service: Notificación creada
+  deactivate notif_service
+end
+
+service --> controller: {notificado: true,\nvisita_creada: true,\nvisita_id: {id},\ncantidad_notificados: N}
+deactivate service
+
+controller --> frontend: Resultado de herramienta
+deactivate controller
+
+frontend --> openai: Resultado:\nnotificaciones enviadas
+
+openai -> openai: Informar al visitante:\n"He notificado a los residentes,\npor favor espera..."
+
+' ====================================
+' FASE 5: ESPERA Y RESPUESTA DEL RESIDENTE
+' ====================================
+== Fase 5: Decisión del Residente ==
+
+mobile -> mobile: Residente ve notificación\ny decide (Aprobar/Rechazar)
+
+resident -> mobile: Tap en botón\nAprobar/Rechazar
+
+mobile -> controller: POST /concierge/session/{id}/respond\n{approved: true/false,\nresidentId: {id}}
+activate controller
+
+controller -> service: respondToVisitor(sessionId, approved, residentId)
+activate service
+
+' Validar que sesión esté activa
+service -> service: isSessionActive(sessionId)
+
+alt Sesión activa
+  service -> db: SELECT * FROM concierge_sessions\nWHERE sessionId = {id}
+  activate db
+  db --> service: Sesión encontrada
+  deactivate db
+  
+  service -> db: UPDATE concierge_sessions\nSET residentResponse = 'approved'/'denied'
+  activate db
+  db --> service: Respuesta guardada
+  deactivate db
+  
+  alt Aprobado
+    service -> visits: checkIn(visitId)
+    activate visits
+    
+    visits -> db: SELECT * FROM visits\nWHERE id = {visitId}
+    activate db
+    db --> visits: Visita (status: PENDING)
+    deactivate db
+    
+    visits -> visits: Validar estado:\nstatus = PENDING o READY
+    
+    visits -> db: UPDATE visits\nSET status = ACTIVE,\nentryTime = NOW(),\nusedCount = usedCount + 1
+    activate db
+    db --> visits: Visita actualizada
+    deactivate db
+    
+    visits -> notif_service: notifyCheckIn(host, visit)
+    notif_service -> db: INSERT INTO notifications
+    notif_service -> gateway: sendToUser(...)
+    
+    visits --> service: Visita {status: ACTIVE}
+    deactivate visits
+    
+    ' Actualizar host definitivo
+    service -> visits: update(visitId, {hostId: residentId})
+    activate visits
+    visits -> db: UPDATE visits\nSET hostId = {residentId}
+    activate db
+    db --> visits: Anfitrión actualizado
+    deactivate db
+    visits --> service: Visita con anfitrión definitivo
+    deactivate visits
+    
+    ' Enviar QR por SMS
+    service -> sms: sendQRCodeSMS({\nphone: visitorPhone,\nvisitorName,\nqrDataUrl,\nvisitId})
+    activate sms
+    
+    sms -> sms: Generar QR DataURL\n(base64)
+    
+    sms -> sms: Enviar SMS con enlace\nal QR para salida
+    note right
+      SMS: "Hola {name}, tu visita
+      fue aprobada. Usa este QR
+      para registrar tu salida:
+      [LINK]"
+    end note
+    
+    sms --> service: SMS enviado
+    deactivate sms
+    
+  else Rechazado
+    service -> visits: updateStatus(visitId, 'denied')
+    activate visits
+    visits -> db: UPDATE visits\nSET status = 'denied'
+    activate db
+    db --> visits: Estado actualizado
+    deactivate db
+    visits --> service: Visita {status: DENIED}
+    deactivate visits
+  end
+  
+  ' Marcar notificaciones como procesadas
+  loop Para cada residente notificado
+    service -> notif_service: findAll({recipientId, read: false})
+    activate notif_service
+    notif_service -> db: SELECT * FROM notifications
+    activate db
+    db --> notif_service: Notificaciones
+    deactivate db
+    
+    notif_service -> notif_service: Filtrar:\nn.data.sessionId == sessionId\n&& n.requiresAction\n&& !n.actionTaken
+    
+    notif_service --> service: notificaciónRelevante
+    deactivate notif_service
+    
+    service -> notif_service: markVisitorActionTaken(notifId, approved)
+    activate notif_service
+    notif_service -> db: UPDATE notifications\nSET actionTaken = true,\nactionData = {approved}
+    activate db
+    db --> notif_service: Notificación actualizada
+    deactivate db
+    notif_service --> service: OK
+    deactivate notif_service
+  end
+  
+  ' Enviar respuesta en tiempo real al frontend
+  service -> gateway: broadcast(\n"visitor:response:{sessionId}",\n{approved, visitId, sessionId})
+  activate gateway
+  
+  gateway -> ws: emit("visitor:response:{sessionId}", {...})
+  activate ws
+  
+  ws -> frontend: Evento recibido
+  activate frontend
+  
+  frontend -> frontend: handleResidentResponse()
+  
+  alt Aprobado
+    frontend -> frontend: Actualizar collectedData:\nvisitApproved = true
+    
+    frontend -> openai: Enviar mensaje al agente:\n"El residente aprobó la visita.\nDespide al visitante\ne indica que puede ingresar."
+    
+    openai -> openai: Agente se despide:\n"Tu visita fue aprobada,\npuedes ingresar.\n¡Que tengas un buen día!"
+    
+  else Rechazado
+    frontend -> openai: Enviar mensaje al agente:\n"El residente rechazó la visita.\nDespide amablemente al visitante."
+    
+    openai -> openai: Agente se despide:\n"Lo siento, el residente\nno puede recibirte\nen este momento."
+  end
+  
+  deactivate frontend
+  deactivate ws
+  deactivate gateway
+  
+  service --> controller: {success: true,\nmessage: "Visita aprobada/rechazada"}
+  deactivate service
+  
+  controller --> mobile: {success: true}
+  deactivate controller
+  
+else Sesión no activa
+  service --> controller: BadRequestException:\n"La sesión no está activa"
+  deactivate service
+  controller --> mobile: 400 Bad Request
+  deactivate controller
+end
+
+' ====================================
+' FASE 6: FINALIZACIÓN
+' ====================================
+== Fase 6: Finalización de Sesión ==
+
+openai -> openai: Llamada de función:\nfinalizar_llamada
+
+openai -> frontend: Llamada de herramienta:\nfinalizar_llamada {}
+
+frontend -> frontend: Agente debe despedirse\nantes de llamar a este tool
+
+frontend -> controller: POST /concierge/session/{id}/end\n{finalStatus: "completed"}
+activate controller
+
+controller -> service: endSession(sessionId, finalStatus)
+activate service
+
+service -> db: SELECT * FROM concierge_sessions
+activate db
+db --> service: Sesión encontrada
+deactivate db
+
+alt Sesión sin respuesta de residentes
+  service -> service: Verificar:\nresidentsNotified.length > 0\n&& residentResponse == 'pending'
+  
+  loop Para cada residente notificado
+    service -> notif_service: findAll({recipientId, read: false})
+    activate notif_service
+    notif_service -> db: SELECT * FROM notifications
+    db --> notif_service: Notificaciones
+    notif_service --> service: notificaciónRelevante
+    deactivate notif_service
+    
+    service -> notif_service: markVisitorActionTaken(\nnotifId, false, 'session_ended')
+    activate notif_service
+    notif_service -> db: UPDATE notifications\nSET actionTaken = true,\nactionData = {reason: 'session_ended'}
+    db --> notif_service: OK
+    notif_service --> service: Notificación expirada
+    deactivate notif_service
+  end
+end
+
+service -> db: UPDATE concierge_sessions\nSET status = 'completed',\nendTime = NOW()
+activate db
+db --> service: Sesión finalizada
+deactivate db
+
+service -> service: duration = endTime - startTime
+
+service --> controller: {sessionId, status,\nduration, visitCreated}
+deactivate service
+
+controller --> frontend: {sessionId, status, duration}
+deactivate controller
+
+frontend -> openai: Desconectar sesión\nde Realtime API
+deactivate openai
+
+frontend -> frontend: disconnectSession()
+
+frontend -> frontend: Limpiar estado:\nconversationState = 'idle'
+
+note over visitor
+  El visitante termina
+  la llamada y procede
+  según la respuesta
+  (ingresar o retirarse)
+end note
+
+@enduml

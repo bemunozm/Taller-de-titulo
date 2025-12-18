@@ -489,6 +489,51 @@ export class CamerasService {
     return !!camera.encryptedSourceUrl;
   }
 
+  /** Actualiza el estado de LPR (reconocimiento de placas) de una cámara */
+  async updateLprStatus(cameraId: string, enableLpr: boolean) {
+    try {
+      const camera = await this.resolveCameraByIdOrMount(cameraId);
+      if (!camera) {
+        throw new NotFoundException(`Cámara con ID '${cameraId}' no encontrada`);
+      }
+
+      camera.enableLpr = enableLpr;
+      const updated = await this.cameraRepository.save(camera);
+
+      this.logger.log(`LPR ${enableLpr ? 'habilitado' : 'deshabilitado'} para cámara ${camera.name} (${camera.id})`);
+
+      // Notificar a los workers siguiendo la misma lógica que el método update
+      try {
+        if (this.workerNotifier) {
+          if (enableLpr) {
+            // Si se habilita LPR, registrar la cámara en el worker manager
+            const decrypted = await this.getDecryptedSourceUrl(updated.id);
+            await this.workerNotifier.registerCamera(updated.id, decrypted || '', updated.mountPath);
+            this.logger.log(`Cámara ${updated.id} registrada en worker manager (LPR habilitado)`);
+          } else {
+            // Si se deshabilita LPR, desregistrar la cámara del worker manager
+            await this.workerNotifier.unregisterCamera(updated.id);
+            this.logger.log(`Cámara ${updated.id} desregistrada del worker manager (LPR deshabilitado)`);
+          }
+        }
+      } catch (err) {
+        this.logger.warn(`No se pudo notificar al worker manager sobre cambio de LPR: ${err?.message || err}`);
+      }
+
+      return {
+        id: updated.id,
+        name: updated.name,
+        enableLpr: updated.enableLpr
+      };
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      this.logger.error(`Error al actualizar estado LPR de cámara ${cameraId}:`, error);
+      throw new InternalServerErrorException('Error al actualizar estado de IA');
+    }
+  }
+
   /** Devuelve el mountPath a usar en MediaMTX. Si mountPath no está definido usa el id de la cámara */
   async getMountPath(cameraId: string): Promise<string> {
     const camera = await this.resolveCameraByIdOrMount(cameraId);

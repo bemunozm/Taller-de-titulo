@@ -79,7 +79,7 @@ export async function validateToken(formData: ConfirmToken) {
 export async function updatePasswordWithToken({formData, token}: {formData: NewPasswordForm, token: ConfirmToken['token']}) {
     try {
         
-        const url = `/auth/update-password`
+        const url = `/auth/reset-password`
         const { data } = await api.post<string>(url, { token: token, password: formData.password })
         return data
     } catch (error) {
@@ -96,10 +96,12 @@ export async function getUser() {
         if(response.success) {
             return response.data
         }
+        throw new Error('Error al validar los datos del usuario')
     } catch (error) {
         if(isAxiosError(error) && error.response) {
             throw new Error(error.response.data.message)
         }
+        throw error
     }
 }
 
@@ -112,5 +114,77 @@ export async function checkPassword(formData: CheckPasswordForm) {
         if(isAxiosError(error) && error.response) {
             throw new Error(error.response.data.message)
         }
+    }
+}
+
+export async function updateProfile(formData: { name: string; phone?: string; age?: number }) {
+    try {
+        const url = '/auth/profile'
+        const { data } = await api.post<string>(url, formData)
+        return data
+    } catch (error) {
+        if(isAxiosError(error) && error.response) {
+            throw new Error(error.response.data.message)
+        }
+        throw new Error('Error al actualizar el perfil')
+    }
+}
+
+export async function updateCurrentUserPassword(formData: { current_password: string; password: string }) {
+    try {
+        const url = '/auth/update-password'
+        const { data } = await api.post<string>(url, formData)
+        return data
+    } catch (error) {
+        if(isAxiosError(error) && error.response) {
+            throw new Error(error.response.data.message)
+        }
+        throw new Error('Error al actualizar la contraseña')
+    }
+}
+
+export async function uploadProfilePicture(file: File) {
+    try {
+        const formData = new FormData()
+        formData.append('file', file)
+        
+        const url = '/auth/upload-profile-picture'
+        const { data } = await api.post<{ url: string }>(url, formData, {
+            headers: {
+                'Content-Type': 'multipart/form-data'
+            }
+        })
+        return data
+    } catch (error) {
+        if(isAxiosError(error) && error.response) {
+            throw new Error(error.response.data.message)
+        }
+        throw new Error('Error al subir la imagen de perfil')
+    }
+}
+
+export async function deleteProfilePicture() {
+    try {
+        const url = '/auth/delete-profile-picture'
+        const { data } = await api.delete<string>(url)
+        return data
+    } catch (error) {
+        if(isAxiosError(error) && error.response) {
+            throw new Error(error.response.data.message)
+        }
+        throw new Error('Error al eliminar la imagen de perfil')
+    }
+}
+
+// Obtener todos los usuarios
+export async function getUsers() {
+    try {
+        const { data } = await api.get('/users')
+        return data
+    } catch (error) {
+        if(isAxiosError(error) && error.response) {
+            throw new Error(error.response.data.message)
+        }
+        throw new Error('Error al obtener los usuarios')
     }
 }
