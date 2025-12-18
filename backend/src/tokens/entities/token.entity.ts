@@ -12,10 +12,10 @@ export class Token {
     @Column({ type: "uuid" })
     userId: string;
 
-    @Column({ type: "timestamp" })
+    @Column({ type: "timestamptz" })
     createdAt: Date;
 
-    @Column({ type: "timestamp" })
+    @Column({ type: "timestamptz" })
     expiresAt: Date;
 
     @ManyToOne(() => User, (user) => user.tokens, { onDelete: 'CASCADE' })

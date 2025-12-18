@@ -36,6 +36,18 @@ export class CreateUserDto {
     email: string;
 
     @ApiProperty({
+        description: 'Número de teléfono del usuario',
+        example: '+56912345678',
+        maxLength: 15,
+        type: 'string',
+        required: false
+    })
+    @IsString({ message: 'El teléfono debe ser una cadena de texto' })
+    @MaxLength(15, { message: 'El teléfono no puede exceder los 15 caracteres' })
+    @IsOptional()
+    phone?: string;
+
+    @ApiProperty({
         description: 'Contraseña del usuario (será encriptada antes de almacenarse)',
         example: 'MiContraseñaSegura123!',
         minLength: 6,

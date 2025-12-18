@@ -37,6 +37,9 @@ export class Vehicle {
   @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt: Date;
 
-  @ManyToOne(() => User, { nullable: true })
+  @ManyToOne(() => User, { nullable: true, eager: true })
   owner: User | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  ownerId: string | null;
 }

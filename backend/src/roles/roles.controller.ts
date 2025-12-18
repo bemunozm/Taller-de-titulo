@@ -6,6 +6,8 @@ import { UpdateRoleDto } from './dto/update-role.dto';
 import { AuthGuard } from '../auth/auth.guard';
 import { AuthorizationGuard } from '../auth/guards/authorization.guard';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
+import { Auditable } from '../audit/decorators/auditable.decorator';
+import { AuditModule, AuditAction } from '../audit/entities/audit-log.entity';
 
 @ApiTags('Gestión de Roles')
 @Controller('roles')
@@ -18,9 +20,16 @@ export class RolesController {
 
   @Post()
   @RequirePermissions('roles.create')
+  @Auditable({
+    module: AuditModule.ROLES,
+    action: AuditAction.CREATE,
+    entityType: 'Role',
+    description: 'Rol creado en el sistema',
+    captureResponse: true
+  })
   @ApiOperation({
     summary: 'Crear nuevo rol',
-    description: 'Crea un nuevo rol en el sistema con los permisos especificados. Requiere permiso "roles.create".'
+    description: 'Crea un nuevo rol con permisos opcionales. Requiere permiso "roles.create".'
   })
   @ApiResponse({
     status: 201,
@@ -52,7 +61,7 @@ export class RolesController {
   }
 
   @Get()
-  // @RequirePermissions('roles.read')
+  @RequirePermissions('roles.read')
   @ApiOperation({
     summary: 'Obtener todos los roles',
     description: 'Retorna la lista completa de roles del sistema con sus permisos. Requiere permiso "roles.read".'
@@ -93,7 +102,7 @@ export class RolesController {
   @RequirePermissions('roles.read')
   @ApiOperation({
     summary: 'Obtener permisos disponibles',
-    description: 'Retorna todos los permisos disponibles en el sistema para asignar a roles.'
+    description: 'Retorna todos los permisos disponibles en el sistema para asignar a roles. Requiere permiso "roles.read".'
   })
   @ApiResponse({
     status: 200,
@@ -120,7 +129,7 @@ export class RolesController {
   @RequirePermissions('roles.read')
   @ApiOperation({
     summary: 'Obtener permisos agrupados por módulo',
-    description: 'Retorna los permisos organizados por módulos del sistema para facilitar la asignación.'
+    description: 'Retorna los permisos organizados por módulos del sistema para facilitar la asignación. Requiere permiso "roles.read".'
   })
   @ApiResponse({
     status: 200,
@@ -158,7 +167,7 @@ export class RolesController {
   @RequirePermissions('roles.read')
   @ApiOperation({
     summary: 'Obtener rol por ID',
-    description: 'Retorna la información detallada de un rol específico incluyendo sus permisos.'
+    description: 'Retorna la información detallada de un rol específico incluyendo sus permisos. Requiere permiso "roles.read".'
   })
   @ApiParam({
     name: 'id',
@@ -203,14 +212,14 @@ export class RolesController {
     }
   })
   findOne(@Param('id') id: string) {
-    return this.rolesService.findOne(+id);
+    return this.rolesService.findOne(id);
   }
 
   @Get(':id/permissions')
   @RequirePermissions('roles.read')
   @ApiOperation({
     summary: 'Obtener permisos de un rol',
-    description: 'Retorna únicamente los permisos asignados a un rol específico.'
+    description: 'Retorna únicamente los permisos asignados a un rol específico. Requiere permiso "roles.read".'
   })
   @ApiParam({
     name: 'id',
@@ -237,11 +246,19 @@ export class RolesController {
   })
   @ApiNotFoundResponse({ description: 'Rol no encontrado' })
   getRolePermissions(@Param('id') id: string) {
-    return this.rolesService.getRolePermissions(+id);
+    return this.rolesService.getRolePermissions(id);
   }
 
   @Patch(':id')
   @RequirePermissions('roles.update')
+  @Auditable({
+    module: AuditModule.ROLES,
+    action: AuditAction.UPDATE,
+    entityType: 'Role',
+    description: 'Información de rol actualizada',
+    captureOldValue: true,
+    captureResponse: true
+  })
   @ApiOperation({
     summary: 'Actualizar rol',
     description: 'Actualiza la información básica de un rol (nombre y descripción). Para actualizar permisos usar el endpoint PUT /:id/permissions.'
@@ -269,14 +286,22 @@ export class RolesController {
   @ApiBadRequestResponse({ description: 'Datos inválidos' })
   @ApiBody({ type: UpdateRoleDto })
   update(@Param('id') id: string, @Body() updateRoleDto: UpdateRoleDto) {
-    return this.rolesService.update(+id, updateRoleDto);
+    return this.rolesService.update(id, updateRoleDto);
   }
 
   @Put(':id/permissions')
-  @RequirePermissions('roles.update')
+  @RequirePermissions('roles.assign-permissions')
+  @Auditable({
+    module: AuditModule.ROLES,
+    action: AuditAction.PERMISSION_GRANT,
+    entityType: 'Role',
+    description: 'Permisos de rol actualizados',
+    captureOldValue: true,
+    captureResponse: true
+  })
   @ApiOperation({
     summary: 'Actualizar permisos de un rol',
-    description: 'Reemplaza completamente los permisos asignados a un rol con una nueva lista de permisos.'
+    description: 'Reemplaza completamente los permisos asignados a un rol con una nueva lista de permisos. Requiere permiso "roles.assign-permissions".'
   })
   @ApiParam({
     name: 'id',
@@ -327,11 +352,18 @@ export class RolesController {
     @Param('id') id: string,
     @Body('permissionIds') permissionIds: string[]
   ) {
-    return this.rolesService.updateRolePermissions(+id, permissionIds);
+    return this.rolesService.updateRolePermissions(id, permissionIds);
   }
 
   @Delete(':id')
   @RequirePermissions('roles.delete')
+  @Auditable({
+    module: AuditModule.ROLES,
+    action: AuditAction.DELETE,
+    entityType: 'Role',
+    description: 'Rol eliminado del sistema',
+    captureOldValue: true
+  })
   @ApiOperation({
     summary: 'Eliminar rol',
     description: 'Elimina un rol del sistema. No se puede eliminar un rol que esté asignado a usuarios activos.'
@@ -366,6 +398,6 @@ export class RolesController {
     }
   })
   remove(@Param('id') id: string) {
-    return this.rolesService.remove(+id);
+    return this.rolesService.remove(id);
   }
 }

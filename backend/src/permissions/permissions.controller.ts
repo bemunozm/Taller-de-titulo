@@ -6,6 +6,8 @@ import { UpdatePermissionDto } from './dto/update-permission.dto';
 import { AuthGuard } from '../auth/auth.guard';
 import { AuthorizationGuard } from '../auth/guards/authorization.guard';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
+import { Auditable } from '../audit/decorators/auditable.decorator';
+import { AuditModule, AuditAction } from '../audit/entities/audit-log.entity';
 
 @ApiTags('Gestión de Permisos')
 @Controller('permissions')
@@ -18,6 +20,13 @@ export class PermissionsController {
 
   @Post()
   @RequirePermissions('permissions.create')
+  @Auditable({
+    module: AuditModule.PERMISSIONS,
+    action: AuditAction.CREATE,
+    entityType: 'Permission',
+    description: 'Permiso creado en el sistema',
+    captureResponse: true
+  })
   @ApiOperation({
     summary: 'Crear nuevo permiso',
     description: 'Crea un nuevo permiso en el sistema especificando el módulo y la acción. Requiere permiso "permissions.create".'
@@ -184,6 +193,14 @@ export class PermissionsController {
 
   @Patch(':id')
   @RequirePermissions('permissions.update')
+  @Auditable({
+    module: AuditModule.PERMISSIONS,
+    action: AuditAction.UPDATE,
+    entityType: 'Permission',
+    description: 'Permiso actualizado',
+    captureOldValue: true,
+    captureResponse: true
+  })
   @ApiOperation({
     summary: 'Actualizar permiso',
     description: 'Actualiza la información de un permiso existente (nombre, descripción, módulo, acción).'
@@ -217,6 +234,13 @@ export class PermissionsController {
 
   @Delete(':id')
   @RequirePermissions('permissions.delete')
+  @Auditable({
+    module: AuditModule.PERMISSIONS,
+    action: AuditAction.DELETE,
+    entityType: 'Permission',
+    description: 'Permiso eliminado del sistema',
+    captureOldValue: true
+  })
   @ApiOperation({
     summary: 'Eliminar permiso',
     description: 'Elimina un permiso del sistema. No se puede eliminar un permiso que esté asignado a roles activos.'

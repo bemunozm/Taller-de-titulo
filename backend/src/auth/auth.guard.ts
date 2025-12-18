@@ -1,5 +1,8 @@
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { User } from '../users/entities/user.entity';
 import { Observable } from 'rxjs';
 
 @Injectable()
@@ -8,7 +11,11 @@ export class AuthGuard implements CanActivate {
   //Atributos
   private readonly jwtService: JwtService;
   //Constructor
-  constructor(jwtService: JwtService) {
+  constructor(
+    jwtService: JwtService,
+    @InjectRepository(User)
+    private userRepository: Repository<User>,
+  ) {
     this.jwtService = jwtService;
   }
 
@@ -30,7 +37,19 @@ export class AuthGuard implements CanActivate {
 
     try {
       const payload = await this.jwtService.verifyAsync(token);
-      request.user = payload;
+      
+      // Cargar usuario completo con roles, permisos y familia desde la BD
+      const user = await this.userRepository.findOne({
+        where: { id: payload.id },
+        relations: ['roles', 'roles.permissions', 'family']
+      });
+
+      if (!user) {
+        throw new UnauthorizedException('Usuario no encontrado');
+      }
+
+      // Guardar usuario completo en request (no solo payload)
+      request.user = user;
     } catch (error) {
       throw new UnauthorizedException('Error validando el token');
     }

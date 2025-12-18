@@ -121,3 +121,15 @@ export async function getMediamtxHealth(): Promise<{ ok: boolean; status: string
     throw error
   }
 }
+
+export async function enableCameraLpr(id: string, enableLpr: boolean): Promise<{ id: string; name: string; enableLpr: boolean }> {
+  try {
+    const { data } = await api.patch(`/cameras/${id}/enable-lpr`, { enableLpr })
+    return data
+  } catch (error) {
+    if (isAxiosError(error) && error.response) {
+      throw new Error(error.response.data.message)
+    }
+    throw error
+  }
+}

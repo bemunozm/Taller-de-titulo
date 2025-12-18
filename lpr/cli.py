@@ -1,6 +1,6 @@
 import logging
 import cv2
-from .settings import build_worker_config as load_from_env_or_args
+from .settings import build_worker_config as load_from_env_or_args, settings
 from .detector.yolo_detector import load_detector, detect
 from .ocr.fast_ocr_adapter import FastPlateOCR
 from .processor.worker import LprWorker
@@ -8,7 +8,10 @@ from . import __name__ as pkgname
 
 
 def main(rtsp_url=None, camera_id=None, backend_url=None, poll_interval=None):
-    logging.basicConfig(level='INFO')
+    logging.basicConfig(
+        level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
     cfg = load_from_env_or_args(rtsp_url, camera_id, backend_url, poll_interval)
     detector_inst = load_detector(cfg.detector_model)
     fast_ocr = FastPlateOCR()

@@ -38,10 +38,10 @@ export class RolesService {
     }
   }
 
-  async findOne(id: number) {
+  async findOne(id: string) {
     try {
       const role = await this.roleRepository.findOne({ 
-        where: { id: id.toString() },
+        where: { id },
         relations: ['permissions', 'users']
       });
       if (!role) {
@@ -56,9 +56,9 @@ export class RolesService {
     }
   }
 
-  async update(id: number, updateRoleDto: UpdateRoleDto) {
+  async update(id: string, updateRoleDto: UpdateRoleDto) {
     try {
-      const result = await this.roleRepository.update(id.toString(), updateRoleDto);
+      const result = await this.roleRepository.update(id, updateRoleDto);
       if (result.affected === 0) {
         throw new NotFoundException(`Rol con ID ${id} no encontrado`);
       }
@@ -74,9 +74,9 @@ export class RolesService {
     }
   }
 
-  async remove(id: number) {
+  async remove(id: string) {
     try {
-      const result = await this.roleRepository.delete(id.toString());
+      const result = await this.roleRepository.delete(id);
       if (result.affected === 0) {
         throw new NotFoundException(`Rol con ID ${id} no encontrado`);
       }
@@ -116,10 +116,10 @@ export class RolesService {
     }
   }
 
-  async updateRolePermissions(roleId: number, permissionIds: string[]) {
+  async updateRolePermissions(roleId: string, permissionIds: string[]) {
     try {
       const role = await this.roleRepository.findOne({
-        where: { id: roleId.toString() },
+        where: { id: roleId },
         relations: ['permissions']
       });
 
@@ -150,7 +150,7 @@ export class RolesService {
     }
   }
 
-  async getRolePermissions(roleId: number) {
+  async getRolePermissions(roleId: string) {
     try {
       return await this.findOne(roleId);
     } catch (error) {

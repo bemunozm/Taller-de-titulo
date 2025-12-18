@@ -38,10 +38,12 @@ def post_event(backend_url: str, payload: dict, dry_run: bool = True) -> int:
     # optional fields
     if 'full_frame_path' in payload:
         dto['full_frame_path'] = payload.get('full_frame_path')
+    if 'detectionTimestamp' in payload:
+        dto['detectionTimestamp'] = payload.get('detectionTimestamp')
 
     # Collect meta but only include keys declared in backend DTO MetaPlateDto
     meta = {}
-    allowed_meta_keys = ['bbox', 'snapshot_jpeg_b64', 'char_confidences', 'char_conf_min', 'char_conf_mean', 'timestamp', 'confirmed_by']
+    allowed_meta_keys = ['bbox', 'snapshot_jpeg_b64', 'char_confidences', 'char_conf_min', 'char_conf_mean', 'confirmed_by']
     for k in allowed_meta_keys:
         if k in payload:
             meta[k] = payload.get(k)

@@ -1,13 +1,14 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
-import RegisterView from "@/views/auth/RegisterView";
 import LoginView from "@/views/auth/LoginView";
 import ForgotPasswordView from "@/views/auth/ForgotPasswordView";
 import ConfirmAccountView from "@/views/auth/ConfirmAccountView";
 import NewPasswordView from "@/views/auth/NewPasswordView";
 import { AuthLayout } from "@/layouts/AuthLayout";
 import RequestCodeView from "./views/auth/RequestCodeView";
-import ConserjeView from "./views/ConserjeView";
-import ResidenteView from "./views/ResidenteView";
+import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
+import { Protected } from "@/components/auth/Protected";
+import { ForbiddenView } from "@/views/errors/ForbiddenView";
+import { NotFoundView } from "@/views/errors/NotFoundView";
 import TraceabilityView from "./views/TraceabilityView";
 import TraceabilityDetailView from "./views/TraceabilityDetailView";
 import { StackedLayout } from "./layouts/StackedLayout";
@@ -22,16 +23,36 @@ import {
 } from "@/components/ui/Dropdown";
 import {
   ArrowRightStartOnRectangleIcon,
-  ChevronDownIcon,
   Cog8ToothIcon,
-  LightBulbIcon,
-  PlusIcon,
   ShieldCheckIcon,
   UserIcon,
+  LightBulbIcon,
 } from "@heroicons/react/16/solid";
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'react-toastify'
 import { useAuth } from './hooks/useAuth'
+import { NotificationBell } from './components/NotificationBell'
+import { VisitorApprovalDialog } from './components/VisitorApprovalDialog'
+import { UnknownVehicleApprovalDialog } from './components/UnknownVehicleApprovalDialog'
+
+function UserAvatar() {
+  const { data: user } = useAuth()
+  
+  if (!user) {
+    return <Avatar src="/profile-photo.jpg" />
+  }
+  
+  if (user.profilePicture) {
+    return <Avatar src={user.profilePicture} alt={user.name} />
+  }
+  
+  return (
+    <Avatar 
+      initials={user.name.charAt(0).toUpperCase()} 
+      alt={user.name}
+    />
+  )
+}
 
 function LogoutItem() {
   const navigate = useNavigate()
@@ -52,12 +73,9 @@ function LogoutItem() {
     </DropdownItem>
   )
 }
-import { InboxIcon, MagnifyingGlassIcon } from "@heroicons/react/20/solid";
 import {
   Navbar,
-  NavbarDivider,
   NavbarItem,
-  NavbarLabel,
   NavbarSection,
   NavbarSpacer,
 } from "@/components/ui/Navbar";
@@ -66,11 +84,30 @@ import {
   SidebarBody,
   SidebarHeader,
   SidebarItem,
-  SidebarLabel,
   SidebarSection,
 } from "@/components/ui/Sidebar";
 import DashboardView from "./views/DashboardView";
+import ResidentDashboardView from "./views/ResidentDashboardView";
 import SettingsView from "./views/SettingsView";
+import NotificationTestView from "./views/NotificationTestView";
+import FamiliesView from "./views/FamiliesView";
+import { VehiclesView } from "./views/VehiclesView";
+import { VisitsView } from "./views/VisitsView";
+import { QRScannerView } from "./views/QRScannerView";
+import { DigitalConciergeView } from "./views/DigitalConciergeView";
+import { UsersView } from "./views/UsersView";
+import { RolesView } from "./views/RolesView";
+import { CreateRoleView } from "./views/CreateRoleView";
+import MetricsView from "./views/MetricsView";
+import { EditRoleView } from "./views/EditRoleView";
+import CamerasSettingsView from "./views/CamerasSettingsView";
+import AuditLogsView from "./views/AuditLogsView";
+import SystemLogsView from "./views/SystemLogsView";
+import ProfileView from "./views/ProfileView";
+import UnitsView from "./views/UnitsView";
+import CamerasView from "./views/CamerasView";
+import PrivacyPolicyView from "./views/PrivacyPolicyView";
+import ShareFeedbackView from "./views/ShareFeedbackView";
 
 export default function Router() {
   return (
@@ -81,75 +118,55 @@ export default function Router() {
             <StackedLayout
               navbar={
                 <Navbar>
-                  <Dropdown>
-                    <DropdownButton as={NavbarItem} className="max-lg:hidden">
-                      <Avatar src="/tailwind-logo.svg" />
-                      <NavbarLabel>Condominio San Lorenzo</NavbarLabel>
-                      <ChevronDownIcon />
-                    </DropdownButton>
-                    <DropdownMenu
-                      className="min-w-80 lg:min-w-64"
-                      anchor="bottom start"
-                    >
-                      <DropdownItem href="#">
-                        <Cog8ToothIcon />
-                        <DropdownLabel>Configuraciones</DropdownLabel>
-                      </DropdownItem>
-                      <DropdownDivider />
-                      <DropdownItem href="#">
-                        <Avatar slot="icon" src="/tailwind-logo.svg" />
-                        <DropdownLabel>Condominio San Lorenzo</DropdownLabel>
-                      </DropdownItem>
-                      <DropdownItem href="#">
-                        <Avatar
-                          slot="icon"
-                          initials="WC"
-                          className="bg-purple-500 text-white"
-                        />
-                        <DropdownLabel>Condominio La Tirana</DropdownLabel>
-                      </DropdownItem>
-                      <DropdownDivider />
-                      <DropdownItem href="/teams/create">
-                        <PlusIcon />
-                        <DropdownLabel>Nuevo condominio</DropdownLabel>
-                      </DropdownItem>
-                    </DropdownMenu>
-                  </Dropdown>
-                  <NavbarDivider className="max-lg:hidden" />
+                  <div className="max-lg:hidden px-4 py-2.5">
+                    <img 
+                      src="/logo-fondo-oscuro.png" 
+                      alt="Logo" 
+                      className="h-24 w-auto"
+                    />
+                  </div>
                   <NavbarSection className="max-lg:hidden">
-                    {[
-                      { label: "Inicio", url: "/" },
-                      { label: "Camaras - Conserje", url: "/conserje" },
-                      { label: "Camaras - Residentes", url: "/residente" },
-                      { label: "Trazabilidad", url: "/traceability" },
-                      { label: "Configuraciones", url: "/settings" },
-                    ].map(({ label, url }) => (
-                      <NavbarItem key={label} href={url}>
-                        {label}
-                      </NavbarItem>
-                    ))}
+                    <NavbarItem href="/">Inicio</NavbarItem>
+                  
+                    
+                    <Protected permission="vehicles.read">
+                      <NavbarItem href="/vehicles">Mis Vehículos</NavbarItem>
+                    </Protected>
+                    
+                    <Protected permission="visits.read">
+                      <NavbarItem href="/visits">Mis Visitas</NavbarItem>
+                    </Protected>
+                    
+                    <Protected permission="visits.validate-qr">
+                      <NavbarItem href="/qr-scanner">Escanear QR</NavbarItem>
+                    </Protected>
+                    
+                    <Protected anyPermission={['cameras.read', 'cameras.view-stream', 'streams.read']}>
+                      <NavbarItem href="/cameras">Cámaras</NavbarItem>
+                    </Protected>
+                    
+                    <Protected anyRole={['Administrador', 'Super Administrador']}>
+                      <NavbarItem href="/settings">Configuraciones</NavbarItem>
+                    </Protected>
                   </NavbarSection>
                   <NavbarSpacer />
                   <NavbarSection>
-                    <NavbarItem href="/search" aria-label="Search">
-                      <MagnifyingGlassIcon />
-                    </NavbarItem>
-                    <NavbarItem href="/inbox" aria-label="Inbox">
-                      <InboxIcon />
-                    </NavbarItem>
+                    <NotificationBell />
                     <Dropdown>
                       <DropdownButton as={NavbarItem}>
-                        <Avatar src="/profile-photo.jpg" square />
+                        <UserAvatar />
                       </DropdownButton>
                       <DropdownMenu className="min-w-64" anchor="bottom end">
                         <DropdownItem href="/my-profile">
                           <UserIcon />
                           <DropdownLabel>Mi perfil</DropdownLabel>
                         </DropdownItem>
-                        <DropdownItem href="/settings">
-                          <Cog8ToothIcon />
-                          <DropdownLabel>Configuraciones</DropdownLabel>
-                        </DropdownItem>
+                        <Protected anyRole={['Administrador', 'Super Administrador']}>
+                          <DropdownItem href="/settings">
+                            <Cog8ToothIcon />
+                            <DropdownLabel>Configuraciones</DropdownLabel>
+                          </DropdownItem>
+                        </Protected>
                         <DropdownDivider />
                         <DropdownItem href="/privacy-policy">
                           <ShieldCheckIcon />
@@ -169,54 +186,47 @@ export default function Router() {
               sidebar={
                 <Sidebar>
                   <SidebarHeader>
-                    <Dropdown>
-                      <DropdownButton as={SidebarItem} className="lg:mb-2.5">
-                        <Avatar src="/tailwind-logo.svg" />
-                        <SidebarLabel>Condominio San Lorenzo</SidebarLabel>
-                        <ChevronDownIcon />
-                      </DropdownButton>
-                      <DropdownMenu
-                        className="min-w-80 lg:min-w-64"
-                        anchor="bottom start"
-                      >
-                        <DropdownItem href="#">
-                          <Cog8ToothIcon />
-                          <DropdownLabel>Configuraciones</DropdownLabel>
-                        </DropdownItem>
-                        <DropdownDivider />
-                        <DropdownItem href="#">
-                          <Avatar slot="icon" src="/tailwind-logo.svg" />
-                          <DropdownLabel>Condominio San Lorenzo</DropdownLabel>
-                        </DropdownItem>
-                        <DropdownItem href="#">
-                          <Avatar
-                            slot="icon"
-                            initials="WC"
-                            className="bg-purple-500 text-white"
-                          />
-                          <DropdownLabel>Condominio La Tirana</DropdownLabel>
-                        </DropdownItem>
-                        <DropdownDivider />
-                        <DropdownItem href="/teams/create">
-                          <PlusIcon />
-                          <DropdownLabel>Nuevo condominio</DropdownLabel>
-                        </DropdownItem>
-                      </DropdownMenu>
-                    </Dropdown>
+                    <div className="flex justify-center lg:justify-start">
+                      <SidebarItem href="/" className="lg:mb-2.5">
+                        <img 
+                          src="/logo-fondo-oscuro.png" 
+                          alt="Logo" 
+                          className="h-32 w-auto"
+                        />
+                      </SidebarItem>
+                    </div>
                   </SidebarHeader>
                   <SidebarBody>
                     <SidebarSection>
-                      {[
-                        { label: "Inicio", url: "/" },
-                        { label: "Camaras - Conserje", url: "/conserje" },
-                        { label: "Camaras - Residentes", url: "/residente" },
-                        { label: "Trazabilidad", url: "/traceability" },
-                        { label: "Configuraciones", url: "/settings" },
-                      ].map(({ label, url }) => (
-                        <SidebarItem key={label} href={url}>
-                          {label}
-                        </SidebarItem>
-                      ))}
+                      <SidebarItem href="/">Inicio</SidebarItem>
+                      
+                      <Protected permission="admin.dashboard">
+                        <SidebarItem href="/dashboard">Dashboard Admin</SidebarItem>
+                      </Protected>
+                      
+                      <Protected permission="admin.dashboard" anyRole={['Administrador', 'Super Administrador']}>
+                        <SidebarItem href="/metrics">Métricas</SidebarItem>
+                      </Protected>
+                      
+                      <Protected permission="vehicles.read">
+                        <SidebarItem href="/vehicles">Mis Vehículos</SidebarItem>
+                      </Protected>
+                      
+                      <Protected permission="visits.read">
+                        <SidebarItem href="/visits">Mis Visitas</SidebarItem>
+                      </Protected>
+                      
+                      <Protected permission="visits.validate-qr">
+                        <SidebarItem href="/qr-scanner">Escanear QR</SidebarItem>
+                      </Protected>
+                      
+                      <Protected anyPermission={['cameras.read', 'cameras.view-stream', 'streams.read']}>
+                        <SidebarItem href="/cameras">Cámaras</SidebarItem>
+                      </Protected>
+                      
+                      <Protected anyRole={['Administrador', 'Super Administrador']}>
+                        <SidebarItem href="/settings">Configuraciones</SidebarItem>
+                      </Protected>
                     </SidebarSection>
                   </SidebarBody>
                 </Sidebar>
@@ -224,28 +234,246 @@ export default function Router() {
             />
           }
         >
-          {" "}
-          {/* Se envuelven todas las rutas anidadas en un layout*/}
-          {/* 
-                        -Se definen las rutas de la aplicación que comparten el layout
-                        -En este caso, la ruta raíz renderiza el DashboardView
-                        -index = define la ruta raíz
-                        -element = componente a renderizar
-                        -path = ruta de la aplicación
-                    */}
-          <Route path="/" element={<DashboardView />} index />
-          <Route path="/conserje" element={<ConserjeView />} />
-          <Route path="/settings" element={<SettingsView />} />
-          <Route path="/residente" element={<ResidenteView />} />
-          <Route path="/traceability" element={<TraceabilityView />} />
-          <Route path="/traceability/:id" element={<TraceabilityDetailView />} />
+          {/* Rutas protegidas por permisos */}
+          
+          {/* Dashboard Administrativo - Solo Admin y Conserje */}
+          <Route 
+            path="/dashboard" 
+            element={
+              <ProtectedRoute permission="admin.dashboard" >
+                <DashboardView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Home / Dashboard Residente - Ruta por defecto */}
+          <Route 
+            path="/" 
+            element={<ResidentDashboardView />} 
+            index 
+          />
+          
+          {/* Gestión de Familias */}
+          <Route 
+            path="/families" 
+            element={
+              <ProtectedRoute permission="families.read" anyRole={['Administrador', 'Super Administrador', 'Conserje']}>
+                <FamiliesView />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/settings/families" 
+            element={
+              <ProtectedRoute permission="families.read">
+                <FamiliesView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Gestión de Vehículos */}
+          <Route 
+            path="/vehicles" 
+            element={
+              <ProtectedRoute permission="vehicles.read">
+                <VehiclesView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Gestión de Visitas */}
+          <Route 
+            path="/visits" 
+            element={
+              <ProtectedRoute permission="visits.read">
+                <VisitsView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Gestión de Usuarios */}
+          <Route 
+            path="/settings/users" 
+            element={
+              <ProtectedRoute permission="users.read">
+                <UsersView />
+              </ProtectedRoute>
+            } 
+          />
+          {/* Redirect antigua ruta de usuarios */}
+          <Route path="/users" element={<UsersView />} />
+          
+          {/* Gestión de Roles */}
+          <Route 
+            path="/settings/roles" 
+            element={
+              <ProtectedRoute permission="roles.read">
+                <RolesView />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/settings/roles/create" 
+            element={
+              <ProtectedRoute permission="roles.create">
+                <CreateRoleView />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/settings/roles/edit/:id" 
+            element={
+              <ProtectedRoute permission="roles.update">
+                <EditRoleView />
+              </ProtectedRoute>
+            } 
+          />
+          {/* Redirects antiguas rutas de roles */}
+          <Route path="/roles" element={<RolesView />} />
+          <Route path="/roles/create" element={<CreateRoleView />} />
+          <Route path="/roles/edit/:id" element={<EditRoleView />} />
+          
+          {/* Gestión de Unidades */}
+          <Route 
+            path="/settings/units" 
+            element={
+              <ProtectedRoute permission="units.read">
+                <UnitsView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Escaneo de QR */}
+          <Route 
+            path="/qr-scanner" 
+            element={
+              <ProtectedRoute permission="visits.validate-qr">
+                <QRScannerView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Cámaras - Vista unificada */}
+          <Route 
+            path="/cameras" 
+            element={
+              <ProtectedRoute anyPermission={['cameras.read', 'cameras.view-stream', 'streams.read']}>
+                <CamerasView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Redirects de rutas antiguas de cámaras */}
+          <Route path="/conserje" element={<CamerasView />} />
+          <Route path="/residente" element={<CamerasView />} />
+          
+          {/* Configuraciones - Solo Administradores */}
+          <Route 
+            path="/settings" 
+            element={
+              <ProtectedRoute anyRole={['Administrador', 'Super Administrador']}>
+                <SettingsView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Configuración de Cámaras */}
+          <Route 
+            path="/settings/cameras" 
+            element={
+              <ProtectedRoute permission="cameras.read">
+                <CamerasSettingsView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Auditoría */}
+          <Route 
+            path="/settings/audit" 
+            element={
+              <ProtectedRoute permission="audit.read">
+                <AuditLogsView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Logs del Sistema */}
+          <Route 
+            path="/settings/logs" 
+            element={
+              <ProtectedRoute permission="logs.read">
+                <SystemLogsView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Mi Perfil - Accesible para todos los usuarios autenticados */}
+          <Route 
+            path="/my-profile" 
+            element={
+              <ProtectedRoute>
+                <ProfileView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Trazabilidad */}
+          <Route 
+            path="/traceability" 
+            element={
+              <ProtectedRoute permission="detections.read" anyRole={['Administrador', 'Super Administrador', 'Conserje']}>
+                <TraceabilityView />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/traceability/:id" 
+            element={
+              <ProtectedRoute permission="detections.read" anyRole={['Administrador', 'Super Administrador', 'Conserje']}>
+                <TraceabilityDetailView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Métricas de Rendimiento */}
+          <Route 
+            path="/metrics" 
+            element={
+              <ProtectedRoute permission="admin.dashboard" anyRole={['Administrador', 'Super Administrador']}>
+                <MetricsView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Testing (sin protección) */}
+          <Route path="/notifications-test" element={<NotificationTestView />} />
+          
+          {/* Política de Privacidad - Accesible para todos */}
+          <Route 
+            path="/privacy-policy" 
+            element={
+              <ProtectedRoute>
+                <PrivacyPolicyView />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Enviar Comentarios - Accesible para todos */}
+          <Route 
+            path="/share-feedback" 
+            element={
+              <ProtectedRoute>
+                <ShareFeedbackView />
+              </ProtectedRoute>
+            } 
+          />
+          
         </Route>
 
         {/* Rutas de autenticación sin layout principal */}
         <Route element={<AuthLayout />}>
           {" "}
           {/* Se envuelven todas las rutas anidadas en un layout*/}
-          <Route path="/auth/register" element={<RegisterView />} />
           <Route path="/auth/login" element={<LoginView />} />
           <Route
             path="/auth/forgot-password"
@@ -258,7 +486,23 @@ export default function Router() {
           <Route path="/auth/request-code" element={<RequestCodeView />} />
           <Route path="/auth/new-password" element={<NewPasswordView />} />
         </Route>
+
+        {/* Conserje Digital */}
+          <Route 
+            path="/digital-concierge" 
+            element={
+                <DigitalConciergeView />
+            } 
+          />
+
+        {/* Páginas de Error - Sin layout */}
+        <Route path="/403" element={<ForbiddenView />} />
+        <Route path="*" element={<NotFoundView />} />
       </Routes>
+
+      {/* Componentes globales para aprobaciones */}
+      <VisitorApprovalDialog />
+      <UnknownVehicleApprovalDialog />
     </BrowserRouter>
   );
 }

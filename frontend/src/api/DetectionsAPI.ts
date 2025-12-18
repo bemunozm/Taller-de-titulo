@@ -13,13 +13,26 @@ export type PlateDetection = {
   createdAt: string
 }
 
+export type User = {
+  id: string
+  name: string
+  email: string
+  family?: Family | null
+}
+
+export type Family = {
+  id: string
+  name: string
+  address?: string | null
+}
+
 export type AccessAttempt = {
   id: string
   method?: string | null
   decision: string
   reason?: string | null
   createdAt: string
-  residente?: any | null
+  residente?: User | null
   detection: PlateDetection
 }
 
