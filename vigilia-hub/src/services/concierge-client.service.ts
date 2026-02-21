@@ -17,10 +17,15 @@ export class ConciergeClientService {
   private conversationActive = false;
   private backendUrl: string;
   private audioHandlers: ((audioBuffer: Buffer) => void)[] = [];
+  private audioDoneHandlers: (() => void)[] = [];
+  private speechStartedHandlers: (() => void)[] = [];
+  private conversationEndedHandlers: (() => void)[] = []; // <-- NUEVO
   private targetHouse: string | null = null;
+  private isInterrupted = false;
+  private isResponseActive = false; // <-- NUEVO: Para saber si vale la pena cancelar
   
-  // Configuración del modelo Realtime
-  private readonly REALTIME_MODEL = 'gpt-realtime-mini';
+  // Configuración del modelo Realtime (versión GA estable)
+  private readonly REALTIME_MODEL = 'gpt-realtime-mini-2025-12-15';
   private readonly REALTIME_WS_URL = 'wss://api.openai.com/v1/realtime';
 
   constructor(
@@ -43,17 +48,28 @@ export class ConciergeClientService {
    */
   async connect(): Promise<void> {
     try {
-      this.logger.log('🎫 Solicitando token efímero al backend...');
-      
-      // Obtener token efímero y sessionId del backend
-      const response = await axios.post(`${this.backendUrl}/api/v1/concierge/session/start`, {
-        socketId: this.websocketClient.getSocketId(),
-      });
+      let ephemeralToken: string;
+      let sessionId: string;
 
-      const { sessionId, ephemeralToken } = response.data;
-      this.currentSessionId = sessionId;
+      // 🔍 DEBUG: Permitir uso directo de API Key para descartar problemas de tokens efímeros
+      if (process.env.DEBUG_OPENAI_KEY) {
+        this.logger.warn('⚠️ MODO DEBUG ACTIVADO: Usando API Key directa (Bypassing Backend) ⚠️');
+        ephemeralToken = process.env.DEBUG_OPENAI_KEY;
+        sessionId = `debug_${Date.now()}`;
+        this.currentSessionId = sessionId;
+      } else {
+        this.logger.log('🎫 Solicitando token efímero al backend...');
+        
+        // Obtener token efímero y sessionId del backend
+        const response = await axios.post(`${this.backendUrl}/api/v1/concierge/session/start`, {
+          socketId: this.websocketClient.getSocketId(),
+        });
 
-      this.logger.log(`✅ Token efímero obtenido. SessionId: ${sessionId}`);
+        ephemeralToken = response.data.ephemeralToken;
+        sessionId = response.data.sessionId;
+        this.currentSessionId = sessionId;
+        this.logger.log(`✅ Token efímero obtenido. SessionId: ${sessionId}`);
+      }
       
       this.logger.log('🤖 Conectando a OpenAI Realtime API via WebSocket...');
 
@@ -64,7 +80,6 @@ export class ConciergeClientService {
       this.ws = new WebSocket(wsUrl, {
         headers: {
           'Authorization': `Bearer ${ephemeralToken}`,
-          'OpenAI-Beta': 'realtime=v1'
         }
       });
 
@@ -91,6 +106,9 @@ export class ConciergeClientService {
         });
       });
 
+      // === NUEVO: Suscribirse a los eventos del WebSocket del Backend ===
+      this.subscribeToBackendEvents(sessionId);
+
     } catch (error) {
       this.logger.error('❌ Error conectando a OpenAI:', error);
       if (axios.isAxiosError(error)) {
@@ -98,6 +116,40 @@ export class ConciergeClientService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Suscribe a los eventos del backend para la sesión actual
+   */
+  private subscribeToBackendEvents(sessionId: string): void {
+      const eventName = `visitor:response:${sessionId}`;
+      
+      this.websocketClient.onEvent(eventName, (data: any) => {
+          this.logger.log(`🔔 Evento de residente recibido! Decisión: ${data.approved ? 'APROBADA' : 'RECHAZADA'}`);
+          
+          if (!this.conversationActive) {
+             this.logger.warn('Se recibió la decisión, pero la conversación ya había terminado.');
+             return;
+          }
+
+          // Inyectar el mensaje del sistema notificando la decisión
+          this.sendEvent({
+              type: 'conversation.item.create',
+              item: {
+                  type: 'message',
+                  role: 'system',
+                  content: [
+                      {
+                          type: 'input_text',
+                          text: `ATENCIÓN: EL SISTEMA HA RECIBIDO LA RESPUESTA DEL RESIDENTE. La visita ha sido ${data.approved ? 'APROBADA (Debe ingresar)' : 'RECHAZADA (No debe ingresar)'}. Procede INMEDIATAMENTE al paso 5 del flujo y dáselo a conocer al visitante basado en esta respuesta oficial.`
+                      }
+                  ]
+              }
+          });
+
+          // Forzar la generación de la respuesta
+          this.sendEvent({ type: 'response.create' });
+      });
   }
 
   /**
@@ -111,48 +163,62 @@ export class ConciergeClientService {
     }
 
     // Configuración de sesión según documentación oficial
-    // https://platform.openai.com/docs/api-reference/realtime
+    // ESTRATEGIA DEBUG: Agregar type='realtime' aunque no debiera ser necesario para update, por si acaso es el param faltante.
     const sessionConfig = {
       type: 'session.update',
       session: {
-        // Modalidades de salida (solo audio)
-        output_modalities: ['audio'],
+        // CORRECCION CRITICA: El API rechaza "modalities", usa "modalities" en Beta pero "output_modalities" en GA WebSocket object?
+        // El log del backend muestra "output_modalities": ["audio"].
+        // Intentaremos usar "modalities" -> "output_modalities" (como estaba al inicio) ya que "modalities" falló.
+        // Ademas mantenemos type='realtime' que solucionó el error de parametro requerido.
+        type: 'realtime', 
         
-        // Instrucciones del sistema
+        // modalities: ['audio', 'text'], // ESTO FALLÓ ("Unknown parameter")
+        // Probamos sin modalities explícito para ver si toma default, o usamos output_modalities si queremos cambiarlo.
+        // Vamos a comentar modalities para que no falle el update. Las tools deberían funcionar igual.
+        // Si no hay texto, tal vez no pueda emitir function calls? 
+        // Pero "output_modalities": ["audio"] es el default y function calling funciona con audio inputs.
+        // Vamos a probar SIN este campo para asegurar que session.update pase sin error.
+        
+        // NOTA: Eliminamos 'voice' temporalmente porque lanza "Unknown parameter".
+        // Usaremos la voz por defecto ('alloy') por ahora para asegurar conexión.
+        
         instructions: this.getSystemInstructions(),
         
-        // Configuración de audio (estructura anidada según RealtimeAudioConfig)
+        // Estructura anidada 'audio' siguiendo RealtimeAudioConfig
         audio: {
-          // Input: audio del usuario
           input: {
-            // Formato PCM16 (24kHz es el único samplerate soportado)
-            format: 'pcm16',
-            
-            // Transcripción opcional
+            // El formato debe ser un objeto con type 'audio/pcm' y rate 24000
+            format: { 
+              type: 'audio/pcm',
+              rate: 24000
+            },
             transcription: {
-              model: 'whisper-1',
+              // Usamos el modelo de transcripción optimizado para la versión Mini (whisper-1 puede tener rate limits estrictos)
+              model: 'gpt-4o-mini-transcribe-2025-12-15', 
               language: 'es'
             },
-            
-            // Server VAD para detección automática de turnos
             turn_detection: {
               type: 'server_vad',
-              threshold: 0.5,
+              threshold: 0.8, // (Antes 0.5). Más alto => Menos sensible al ruido de calle/bocinas
               prefix_padding_ms: 300,
-              silence_duration_ms: 500
+              silence_duration_ms: 350, 
+              create_response: true,
+              interrupt_response: true // Que el servidor cancele automáticamente
             }
           },
-          
-          // Output: audio del asistente
           output: {
-            format: 'pcm16',
+            // El formato de salida también debe ser objeto
+            format: { 
+              type: 'audio/pcm',
+              rate: 24000
+            },
             voice: 'sage'
           }
         },
         
-        // Herramientas disponibles
         tools: this.getToolDefinitions(),
-        tool_choice: 'auto'
+        tool_choice: 'auto',
       }
     };
 
@@ -167,27 +233,7 @@ export class ConciergeClientService {
    * Instrucciones base - el contexto específico se agrega después
    */
   private getSystemInstructions(): string {
-    return `Eres Sofía, la conserje del Condominio San Lorenzo. Eres amable, cálida y conversacional.
-
-PERSONALIDAD:
-- Habla de manera natural y amigable, como si conversaras con un vecino
-- Usa expresiones chilenas cotidianas: "¿Cómo estás?", "Perfecto", "Genial", "Súper"
-- Sé paciente y empática, especialmente si el visitante parece confundido
-- Haz que la conversación fluya naturalmente, no como un formulario robótico
-
-HERRAMIENTAS DISPONIBLES:
-Tienes acceso a herramientas para:
-1. guardar_datos_visitante - Guarda información del visitante (nombre, RUT, teléfono, patente, motivo)
-2. buscar_residente - Busca residentes por número de casa/departamento
-3. notificar_residente - Envía notificación push a los residentes
-4. finalizar_llamada - Termina la conversación
-
-IMPORTANTE: 
-- Recopila datos UNO POR UNO
-- Espera la respuesta antes de continuar
-- Guarda cada dato INMEDIATAMENTE después de recibirlo
-- Después de notificar, espera EN SILENCIO la respuesta del residente
-- NO inventes respuestas del residente`;
+    return 'Actúa como la interfaz de voz del sistema de control de acceso Vigilia. Espera instrucciones específicas del contexto.';
   }
 
   /**
@@ -341,11 +387,14 @@ IMPORTANTE:
       // Respuestas
       case 'response.created':
         this.logger.log(`🎬 Respuesta iniciada: ${event.response?.id}`);
+        this.isInterrupted = false; // Nueva respuesta, resetear flag
+        this.isResponseActive = true; // <-- NUEVO
         break;
 
       case 'response.done':
         this.logger.log(`✅ Respuesta completa: ${event.response?.id}`);
         this.logger.log('Detalles:', JSON.stringify(event.response, null, 2));
+        this.isResponseActive = false; // <-- NUEVO
         break;
 
       case 'response.content_part.added':
@@ -363,6 +412,10 @@ IMPORTANTE:
       // Audio
       case 'response.audio.delta':
       case 'response.output_audio.delta':
+        if (this.isInterrupted) {
+          // Ignorar audio si el usuario interrumpió
+          return;
+        }
         this.logger.debug('🔊 Audio delta recibido');
         if (event.delta) {
           const audioBuffer = Buffer.from(event.delta, 'base64');
@@ -373,6 +426,7 @@ IMPORTANTE:
       case 'response.audio.done':
       case 'response.output_audio.done':
         this.logger.log('✅ Audio completo recibido');
+        this.audioDoneHandlers.forEach(handler => handler());
         break;
 
       // Transcripción
@@ -381,12 +435,27 @@ IMPORTANTE:
         break;
 
       case 'conversation.item.input_audio_transcription.failed':
-        this.logger.warn('⚠️ Transcripción fallida:', event.error);
+        // FIX: Concatenar error al mensaje para que el logger personalizado lo muestre
+        this.logger.warn(`⚠️ Transcripción fallida: ${JSON.stringify(event.error, null, 2)}`);
         break;
 
       // VAD
       case 'input_audio_buffer.speech_started':
-        this.logger.log('🎙️ Detectado inicio de habla del usuario');
+        this.logger.log('🎙️ Detectado inicio de habla del usuario (Interrupción)');
+        
+        // Barge-in: 
+        // 1. Marcamos interrupción para ignorar paquetes "en vuelo" localmente
+        // 2. Notificamos handlers para limpiar el buffer de audio local (aplay)
+        // 3. Forzamos la cancelación INMEDIATA en el servidor para evitar que 
+        //    OpenAI siga procesando (y tardando) en generar la respuesta anterior.
+        
+        this.isInterrupted = true;
+        
+        if (this.isResponseActive) {
+            this.sendEvent({ type: 'response.cancel' }); // Solo cancelar si hay algo que cancelar
+        }
+        
+        this.speechStartedHandlers.forEach(handler => handler());
         break;
 
       case 'input_audio_buffer.speech_stopped':
@@ -408,7 +477,11 @@ IMPORTANTE:
 
       // Errores
       case 'error':
-        this.logger.error('❌ Error de OpenAI:', event.error);
+        // Log detallado de CUALQUIER error
+        this.logger.error('❌ Error de OpenAI (Detalle Completo):', JSON.stringify(event, null, 2));
+        if (event.error?.code) {
+             this.logger.error(`Error Code: ${event.error.code} - Message: ${event.error.message}`);
+        }
         break;
 
       default:
@@ -436,11 +509,31 @@ IMPORTANTE:
     this.logger.log(`🔧 Tool call: ${name}(${JSON.stringify(args)})`);
 
     try {
-      const result = await this.websocketClient.executeTool(
-        name,
-        args,
-        this.currentSessionId || 'unknown'
-      );
+      let result: any;
+
+      if (name === 'finalizar_llamada') {
+        // Manejo local para finalizar_llamada
+        this.logger.log('📞 Ejecutando tool local: finalizar_llamada');
+        
+        // Simular delay y desconexión
+        setTimeout(() => {
+          this.endConversation();
+          // Opcional: desconectar completamente
+          // this.disconnect(); 
+        }, 12000); // 12 segundos para permitir despedida (aumentado desde 4s)
+
+        result = {
+          finalizada: true,
+          mensaje: 'OK. La llamada se cerrará automáticamente.'
+        };
+      } else {
+        // Ejecutar tool en backend
+        result = await this.websocketClient.executeTool(
+          name,
+          args,
+          this.currentSessionId || 'unknown'
+        );
+      }
 
       // Enviar resultado de la herramienta
       this.sendEvent({
@@ -452,10 +545,14 @@ IMPORTANTE:
         }
       });
 
-      // Solicitar que el modelo procese el resultado
-      this.sendEvent({
-        type: 'response.create'
-      });
+      // Solicitar que el modelo procese el resultado, SOLO si no estamos finalizando
+      if (name !== 'finalizar_llamada') {
+         this.sendEvent({
+           type: 'response.create'
+         });
+      } else {
+         this.logger.log(`⏳ Tool finalizar_llamada completada. Esperando cierre...`);
+      }
 
       this.logger.log(`✅ Tool ${name} completada`);
     } catch (error) {
@@ -483,41 +580,102 @@ IMPORTANTE:
 
   /**
    * Genera instrucciones detalladas para una casa específica
+   * Mismo prompt que en DigitalConciergeView.tsx
    */
   private getDetailedInstructions(houseNumber: string): string {
-    return `CONTEXTO ACTUALIZADO - Casa ${houseNumber}:
+    return `Eres Sofía, la conserje del Condominio San Lorenzo. Eres amable, cálida y conversacional. Tu trabajo es ayudar a los visitantes a ingresar al condominio de manera eficiente pero siempre con una sonrisa en la voz.
 
-El visitante ya marcó la casa ${houseNumber}. Esta es la casa de destino CONFIRMADA.
+INFORMACIÓN INICIAL:
+- El visitante ya marcó la casa de destino: ${houseNumber}
+- YA conoces a dónde va, NO preguntes por la casa/departamento nuevamente
 
-FLUJO COMPLETO:
+PERSONALIDAD:
+- Habla de manera natural y amigable, como si conversaras con un vecino
+- Usa expresiones chilenas cotidianas: "¿Cómo estás?", "Perfecto", "Genial", "Súper"
+- Sé paciente y empática, especialmente si el visitante parece confundido
+- Haz que la conversación fluya naturalmente, no como un formulario robótico
 
-1. SALUDO INICIAL:
-   "¡Hola! Bienvenido al Condominio San Lorenzo. Soy Sofía. Veo que vienes a la casa ${houseNumber}. ¿Cómo te llamas?"
+FLUJO DE CONVERSACIÓN (SIGUE ESTE ORDEN ESTRICTAMENTE):
 
-2. RECOPILAR DATOS (uno por uno):
-   a) Nombre → guardar_datos_visitante(nombre, casa: "${houseNumber}")
-   b) RUT → guardar_datos_visitante(rut, casa: "${houseNumber}")
-   c) Teléfono → guardar_datos_visitante(telefono, casa: "${houseNumber}")
-   d) ¿Vehículo? → Si SÍ: guardar_datos_visitante(patente, casa: "${houseNumber}")
-   e) Motivo → guardar_datos_visitante(motivo, casa: "${houseNumber}")
+1. SALUDO INICIAL (di esto EXACTAMENTE una sola vez):
+   "¡Hola! Bienvenido al Condominio San Lorenzo. Mi nombre es Sofía y soy la conserje. Veo que deseas visitar la casa ${houseNumber}. ¿Cómo te llamas?"
 
-3. BUSCAR RESIDENTE:
-   - buscar_residente(casa: "${houseNumber}")
-   - Extraer IDs de TODOS los residentes
-   - notificar_residente(residentes_ids: [...])
-   - Decir: "Notificación enviada, esperando respuesta"
-   - SILENCIO (esperar mensaje del sistema)
+2. RECOPILACIÓN DE DATOS (UNO POR UNO, en este orden):
+   
+   a) Nombre:
+      - Espera la respuesta
+      - Guarda con guardar_datos_visitante(nombre: "...")
+      - Di: "Encantada [nombre]. ¿Me podrías dar tu RUT o pasaporte por favor?"
+   
+   b) RUT/Pasaporte:
+      - Espera la respuesta
+      - Guarda con guardar_datos_visitante(rut: "...")
+      - Si el sistema responde con error (RUT inválido):
+        * Di amablemente: "Disculpa, el RUT que escuché no parece ser válido. ¿Me lo podrías repetir por favor? Dilo dígito por dígito si es necesario."
+        * Vuelve a intentar guardar el RUT
+      - Si se guarda correctamente, di: "Perfecto. ¿Y un número de teléfono de contacto?"
+   
+   c) Teléfono:
+      - Espera la respuesta
+      - Guarda con guardar_datos_visitante(telefono: "...")
+      - Di: "Genial. ¿Vienes en vehículo?"
+   
+   d) Vehículo (PREGUNTA PRIMERO):
+      - Si dice SÍ: "¿Me podrías decir la patente del vehículo?"
+        * Espera la respuesta
+        * Guarda con guardar_datos_visitante(patente: "...")
+      - Si dice NO: "Vale, sin problema."
+        * NO preguntes por patente
+        * NO llames a guardar_datos_visitante con el campo patente
+        * Simplemente omite este dato y continúa
+      - Luego di: "¿Cuál es el motivo de tu visita?"
+   
+   e) Motivo:
+      - Espera la respuesta
+      - Guarda con guardar_datos_visitante(motivo: "...")
+      - Di: "Excelente, déjame buscar al residente."
 
-4. RESPUESTA:
-   - APROBÓ: "¡Aprobado! Puedes ingresar. ¡Buen día!" → finalizar_llamada()
-   - RECHAZÓ: "Lo siento, no puede recibirte ahora." → finalizar_llamada()
+3. BÚSQUEDA Y NOTIFICACIÓN:
+   - Llama buscar_residente(casa: "${houseNumber}")
+   - Si encuentra residentes:
+     * El sistema devuelve un array "residentes" con TODOS los miembros de la familia
+     * Extrae los IDs de TODOS los residentes del array
+     * Llama notificar_residente(residentes_ids: ["id1", "id2", ...]) con TODOS los IDs
+     * IMPORTANTE: Al llamar notificar_residente, la visita se crea AUTOMÁTICAMENTE en estado pendiente
+     * Si hay múltiples residentes, di: "Perfecto, le he enviado una notificación a todos los residentes de la casa. Estoy esperando su respuesta."
+     * Si hay un solo residente, di: "Perfecto, le he enviado una notificación a [nombre del residente]. Estoy esperando su respuesta."
+   - Si NO encuentra:
+     * Di: "Lo siento, no encuentro registrado a ningún residente en la casa ${houseNumber}. ¿Estás seguro del número?"
 
-REGLAS:
-- NO saltes pasos
-- Guarda CADA dato inmediatamente
-- SIEMPRE incluye casa: "${houseNumber}"
-- Espera respuesta del visitante
-- Después de notificar: SILENCIO ABSOLUTO`;
+4. ESPERA DE RESPUESTA:
+   - Después de decir que estás esperando, NO digas NADA más
+   - NO menciones palabras como "silencio", "espera en silencio", etc.
+   - Simplemente DETENTE y espera
+   - El SISTEMA te enviará automáticamente un mensaje cuando el residente responda
+
+5. RESPUESTA DEL RESIDENTE (cuando recibas la notificación del sistema):
+   - Si APROBÓ:
+     * La visita YA FUE CREADA y ahora está ACTIVA automáticamente
+     * NO necesitas llamar ninguna herramienta adicional
+     * Di con entusiasmo: "¡Buenas noticias [nombre]! El residente ha aprobado tu visita. Puedes ingresar al condominio. ¡Que tengas un excelente día!"
+     * INMEDIATAMENTE después de este mensaje, llama finalizar_llamada()
+   - Si RECHAZÓ:
+     * La visita fue automáticamente marcada como RECHAZADA
+     * NO necesitas llamar ninguna herramienta adicional
+     * Di con empatía: "Lo lamento [nombre], pero el residente no puede recibirte en este momento. Te sugiero contactarlo directamente. Que tengas buen día."
+     * INMEDIATAMENTE después de este mensaje, llama finalizar_llamada()
+
+IMPORTANTE: Después de dar el mensaje de aprobación o rechazo, DEBES llamar a finalizar_llamada() sin decir nada más. No esperes respuesta del visitante.
+
+REGLAS IMPORTANTES:
+- NO te saltes pasos del flujo
+- NO repitas preguntas que ya hiciste
+- Espera la respuesta del visitante antes de continuar
+- Guarda cada dato INMEDIATAMENTE después de recibirlo
+- SIEMPRE incluye casa: "${houseNumber}" al guardar datos
+- NO inventes respuestas del residente
+- Después de notificar, espera EN SILENCIO (no digas que estás en silencio)
+- Acepta datos en cualquier formato (el sistema los formatea automáticamente)`;
   }
 
   /**
@@ -591,10 +749,11 @@ REGLAS:
     this.conversationActive = false;
     this.targetHouse = null;
     
-    // Crear respuesta para procesar el audio pendiente
-    this.sendEvent({
-      type: 'response.create'
-    });
+    // Notificar a los suscriptores (ej. AudioRouter) para que apaguen sus flujos y relés
+    this.conversationEndedHandlers.forEach(handler => handler());
+    
+    // NOTA: Eliminamos la creación forzada de respuesta ('response.create')
+    // para evitar que el agente se despida múltiples veces o intente "rellenar" el silencio.
   }
 
   /**
@@ -602,6 +761,27 @@ REGLAS:
    */
   onAudioReceived(handler: (audioBuffer: Buffer) => void): void {
     this.audioHandlers.push(handler);
+  }
+
+  /**
+   * Registra un handler para cuando finaliza la reproducción de audio
+   */
+  onAudioResponseDone(handler: () => void): void {
+    this.audioDoneHandlers.push(handler);
+  }
+
+  /**
+   * Registra un handler para cuando el usuario empieza a hablar (interrupción)
+   */
+  onSpeechStarted(handler: () => void): void {
+    this.speechStartedHandlers.push(handler);
+  }
+
+  /**
+   * Registra un handler para cuando la conversación finaliza (ej. por tool call)
+   */
+  onConversationEnded(handler: () => void): void {
+    this.conversationEndedHandlers.push(handler);
   }
 
   /**
@@ -626,6 +806,9 @@ REGLAS:
 
     // Notificar al backend que finalizó la sesión
     if (this.currentSessionId) {
+      // Limpiar listener de Socket.IO
+      this.websocketClient.offEvent(`visitor:response:${this.currentSessionId}`);
+
       try {
         await axios.post(`${this.backendUrl}/api/v1/concierge/session/${this.currentSessionId}/end`, {
           finalStatus: 'completed',
