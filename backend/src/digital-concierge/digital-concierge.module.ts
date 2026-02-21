@@ -11,6 +11,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { SmsService } from '../common/services/sms.service';
 import { QRCodeService } from '../common/services/qrcode.service';
 import { MailerModule } from '@nestjs-modules/mailer';
+import { HubModule } from '../hub/hub.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { MailerModule } from '@nestjs-modules/mailer';
     VisitsModule,
     NotificationsModule,
     MailerModule, // Necesario para SmsService
+    HubModule,    // Añadido HubModule
   ],
   controllers: [DigitalConciergeController],
   providers: [

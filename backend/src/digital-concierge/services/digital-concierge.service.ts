@@ -12,6 +12,7 @@ import { VisitType, VisitStatus } from '../../visits/entities/visit.entity';
 import { randomBytes } from 'crypto';
 import { SmsService } from '../../common/services/sms.service';
 import { QRCodeService } from '../../common/services/qrcode.service';
+import { HubGateway } from '../../hub/hub.gateway';
 
 @Injectable()
 export class DigitalConciergeService {
@@ -26,6 +27,7 @@ export class DigitalConciergeService {
     private readonly visitsService: VisitsService,
     private readonly notificationsService: NotificationsService,
     private readonly notificationsGateway: NotificationsGateway,
+    private readonly hubGateway: HubGateway, // Para comunicarse con la Raspberry Pi
     private readonly smsService: SmsService,
     private readonly qrcodeService: QRCodeService,
   ) {}
@@ -374,21 +376,24 @@ export class DigitalConciergeService {
     this.logger.log(`📡 Enviando evento: ${eventName}`);
     this.logger.log(`📦 Payload:`, JSON.stringify(payload));
     
-    // Si tenemos el socketId del visitante, enviar directamente a ese socket
-    if (session.visitorSocketId) {
-      this.logger.log(`🎯 Enviando a socket específico: ${session.visitorSocketId}`);
-      const sent = this.notificationsGateway.sendToSocket(session.visitorSocketId, eventName, payload);
-      if (!sent) {
-        this.logger.warn(`⚠️ No se pudo enviar al socket ${session.visitorSocketId}, haciendo broadcast...`);
-        this.notificationsGateway.broadcast(eventName, payload);
-      }
-    } else {
-      // Fallback: broadcast si no tenemos socketId guardado
-      this.logger.warn(`⚠️ No hay socketId guardado para la sesión, haciendo broadcast...`);
-      this.notificationsGateway.broadcast(eventName, payload);
-    }
+    // El frontend web tiene su propio NotificationsGateway (app movil/web de residentes),
+    // pero el vigilIA-hub de la Raspberry Pi escucha en HubGateway (namespace /hub).
+    // Notificamos al hub directamente porque es el agente activo que está esperando la respuesta.
+    this.logger.log(`🎯 Enviando a todos los Hubs conectados vía HubGateway...`);
+    this.hubGateway.broadcastToAllHubs(eventName, payload);
 
     this.logger.log(`✅ Notificación en tiempo real enviada para sesión ${sessionId}`);
+
+    // NUEVO: Si la visita es aprobada, ordenar la apertura física de la puerta/portón al Hub
+    if (approved && session.createdVisit) {
+      const doorPayload = {
+        type: session.createdVisit.type === VisitType.VEHICULAR ? 'vehicular' : 'pedestrian',
+        visitId: session.createdVisit.id
+      };
+      
+      this.logger.log(`🔑 Emitiendo comando de apertura de accesos al Hub (${doorPayload.type})`);
+      this.hubGateway.broadcastToAllHubs('hub:door_open', doorPayload);
+    }
 
     return {
       success: true,
@@ -493,16 +498,21 @@ export class DigitalConciergeService {
         throw new BadRequestException('No se proporcionaron IDs de residentes');
       }
 
-      // Obtener todos los residentes
-      const residents = await Promise.all(
-        params.residentes_ids.map(id => this.usersService.findOne(id))
-      );
-
-      // Filtrar residentes no encontrados
-      const validResidents = residents.filter(r => r !== null);
+      // Obtener todos los residentes, ignorando los que no se encuentren (ej. usuarios eliminados)
+      const validResidents = [];
+      for (const id of params.residentes_ids) {
+        try {
+          const user = await this.usersService.findOne(id);
+          if (user) {
+            validResidents.push(user);
+          }
+        } catch (error) {
+          this.logger.warn(`No se pudo cargar el residente con ID ${id}: ${error.message}`);
+        }
+      }
 
       if (validResidents.length === 0) {
-        throw new NotFoundException('No se encontraron residentes válidos');
+        throw new NotFoundException('No se encontraron residentes válidos para notificar');
       }
 
       // Guardar residentes notificados en la sesión

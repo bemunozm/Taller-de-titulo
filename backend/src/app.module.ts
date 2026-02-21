@@ -27,6 +27,7 @@ import { DigitalConciergeModule } from './digital-concierge/digital-concierge.mo
 import { AuditModule } from './audit/audit.module';
 import { LogsModule } from './logs/logs.module';
 import { DashboardModule } from './dashboard/dashboard.module';
+import { HubModule } from './hub/hub.module';
 
 @Module({
   imports: [
@@ -61,6 +62,7 @@ import { DashboardModule } from './dashboard/dashboard.module';
   AuditModule,
   LogsModule,
   DashboardModule,
+  HubModule,
   ],
   controllers: [],
   providers: [DataInitializationService, ExpirationService],
