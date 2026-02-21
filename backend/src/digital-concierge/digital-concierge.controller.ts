@@ -27,6 +27,18 @@ export class DigitalConciergeController {
   }
 
   /**
+   * GET /concierge/context/:houseNumber
+   * Obtiene el contexto de historial de visitas para una casa
+   */
+  @Post('context/:houseNumber')
+  async getHouseContext(
+    @Param('houseNumber') houseNumber: string,
+  ): Promise<{ context: string }> {
+    const contextStr = await this.conciergeService.getHouseContext(houseNumber);
+    return { context: contextStr };
+  }
+
+  /**
    * POST /concierge/session/:id/execute-tool
    * Ejecuta una función/herramienta solicitada por OpenAI
    * OpenAI envía la llamada a función, este endpoint la ejecuta y retorna el resultado
