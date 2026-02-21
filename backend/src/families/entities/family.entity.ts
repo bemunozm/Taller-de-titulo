@@ -20,6 +20,10 @@ export class Family {
   @Column({ type: 'boolean', default: true })
   active: boolean;
 
+  // Conserje Digital habilitado para esta familia
+  @Column({ type: 'boolean', default: false })
+  digitalConciergeEnabled: boolean;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 

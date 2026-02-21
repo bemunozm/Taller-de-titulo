@@ -8,21 +8,28 @@ import {
   Delete,
   Query,
   UseGuards,
+  Headers,
+  UnauthorizedException,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiQuery, ApiHeader } from '@nestjs/swagger';
 import { UnitsService } from './units.service';
 import { CreateUnitDto } from './dto/create-unit.dto';
 import { UpdateUnitDto } from './dto/update-unit.dto';
 import { CreateBulkUnitsDto } from './dto/create-bulk-units.dto';
 import { AuthGuard } from '../auth/auth.guard';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
+import { Public } from '../auth/decorators/public.decorator';
+import { ConfigService } from '@nestjs/config';
 
 @ApiTags('Units')
 @ApiBearerAuth()
 @UseGuards(AuthGuard)
 @Controller('units')
 export class UnitsController {
-  constructor(private readonly unitsService: UnitsService) {}
+  constructor(
+    private readonly unitsService: UnitsService,
+    private readonly configService: ConfigService,
+  ) {}
 
   @Post()
   @RequirePermissions('manage_units')
@@ -75,6 +82,38 @@ export class UnitsController {
   @ApiResponse({ status: 200, description: 'Estadísticas de ocupación' })
   getStats() {
     return this.unitsService.getStats();
+  }
+
+  /**
+   * Endpoint para sincronización de cache del Hub (Raspberry Pi)
+   * Autenticación mediante X-Hub-Secret header
+   */
+  @Public()
+  @Get('ai-enabled')
+  @ApiOperation({ summary: 'Obtener unidades con Conserje Digital habilitado (para Hub)' })
+  @ApiHeader({ 
+    name: 'X-Hub-Secret', 
+    description: 'Secret del Hub para autenticación',
+    required: true 
+  })
+  @ApiResponse({ 
+    status: 200, 
+    description: 'Lista de unidades con IA habilitada',
+    schema: {
+      example: [
+        { houseNumber: 'A-504', hasAI: true, familyId: 'uuid-123' }
+      ]
+    }
+  })
+  @ApiResponse({ status: 401, description: 'Hub secret inválido o faltante' })
+  async getAIEnabledUnits(@Headers('x-hub-secret') hubSecret: string) {
+    const validSecret = this.configService.get<string>('HUB_SECRET');
+    
+    if (!hubSecret || hubSecret !== validSecret) {
+      throw new UnauthorizedException('Invalid hub secret');
+    }
+
+    return this.unitsService.findWithAIEnabled();
   }
 
   @Get('search')

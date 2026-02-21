@@ -50,6 +50,14 @@ export class ConciergeSession {
   @Column({ type: 'varchar', length: 64, nullable: true })
   visitorSocketId: string | null;
 
+  // Hub físico que inició la sesión (si aplica)
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  hubId: string | null;
+
+  // Origen de la sesión: 'web' (frontend) o 'hub' (Raspberry Pi)
+  @Column({ type: 'varchar', length: 16, default: 'web' })
+  source: 'web' | 'hub';
+
   // Visita creada (si fue aprobada)
   @ManyToOne(() => Visit, { nullable: true })
   createdVisit: Visit | null;

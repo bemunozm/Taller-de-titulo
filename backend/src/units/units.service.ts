@@ -303,4 +303,33 @@ export class UnitsService {
       inactive,
     };
   }
+
+  /**
+   * Obtener unidades con Conserje Digital habilitado
+   * Usado por el Hub (Raspberry Pi) para cache local
+   */
+  async findWithAIEnabled(): Promise<Array<{
+    houseNumber: string;
+    hasAI: boolean;
+    familyId: string;
+  }>> {
+    const units = await this.unitRepo.find({
+      where: { active: true },
+      relations: ['families'],
+    });
+
+    const aiEnabledUnits = units.filter(unit => 
+      unit.families && unit.families.some(f => f.active && f.digitalConciergeEnabled)
+    );
+
+    return aiEnabledUnits.map(unit => {
+      const activeAIFamily = unit.families.find(f => f.active && f.digitalConciergeEnabled);
+      
+      return {
+        houseNumber: unit.identifier,
+        hasAI: true,
+        familyId: activeAIFamily?.id || '',
+      };
+    });
+  }
 }

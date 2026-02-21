@@ -1,9 +1,11 @@
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User } from '../users/entities/user.entity';
 import { Observable } from 'rxjs';
+import { IS_PUBLIC_KEY } from './decorators/public.decorator';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -15,11 +17,21 @@ export class AuthGuard implements CanActivate {
     jwtService: JwtService,
     @InjectRepository(User)
     private userRepository: Repository<User>,
+    private reflector: Reflector,
   ) {
     this.jwtService = jwtService;
   }
 
   async canActivate(context: ExecutionContext,): Promise<boolean> {
+    // Verificar si el endpoint está marcado como público
+    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    
+    if (isPublic) {
+      return true;
+    }
 
     // El objeto context proporciona información
     // sobre la solicitud entrante y el entorno de ejecución.

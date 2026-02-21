@@ -28,26 +28,16 @@ export class OpenAITokenService {
     try {
       this.logger.debug(`Generating ephemeral token for OpenAI Realtime API... [${correlationId}]`);
 
-      // IMPORTANTE: Usar el endpoint GA /v1/realtime/client_secrets
-      // NO usar openai.beta.realtime.sessions.create() que es para la API Beta
+      // CRITICO: Usar endpoint específico para generar tokens de WebSocket (GA)
+      // Reference: "If you want to use the Realtime GA API, please create a client secret using the /v1/realtime/client_secrets endpoint."
+      // NOTA: Este endpoint es sensible con los parámetros. Volvemos a body vacío para asegurar token.
       const response = await fetch('https://api.openai.com/v1/realtime/client_secrets', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          session: {
-            type: 'realtime',
-            model: 'gpt-realtime-mini', // Modelo GA mini - más económico
-            audio: {
-              output: {
-                voice: 'sage', // Voz femenina clara
-              },
-            },
-            // No especificar modalities aquí - el frontend lo configura
-          },
-        }),
+        body: JSON.stringify({}), // Restauramos body vacío para recuperar la conexión
       });
 
       const responseTime = Date.now() - startTime;
@@ -70,12 +60,21 @@ export class OpenAITokenService {
       }
 
       const data = await response.json();
+      this.logger.debug(`Core data received from OpenAI: ${JSON.stringify(data, null, 2)}`);
 
-      // El token expira en 15 minutos
-      const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+      // Extraer token de la respuesta estándar (client_secret wrapper) o simplificada
+      const token = data.client_secret?.value || data.value;
+
+      if (!token) {
+        throw new Error(`No client_secret received from OpenAI. Got: ${JSON.stringify(data)}`);
+      }
+
+      // El token expira en 60 segundos (para conectar) pero la sesión dura más
+      const expirySeconds = data.client_secret?.expires_at || data.expires_at || (Date.now() / 1000 + 60);
+      const expiresAt = new Date(expirySeconds * 1000);
 
       this.logger.debug(`Ephemeral token generated. Expires at: ${expiresAt.toISOString()} [${correlationId}]`);
-      this.logger.debug(`Token prefix: ${data.value.substring(0, 10)}...`);
+      this.logger.debug(`Token prefix: ${token.substring(0, 10)}...`);
 
       // Log de éxito
       await this.logsService.log({
@@ -84,7 +83,7 @@ export class OpenAITokenService {
         type: LogType.OPENAI_API,
         service: ServiceName.OPENAI,
         metadata: { 
-          model: 'gpt-realtime-mini',
+          model: 'gpt-realtime-mini-2025-12-15',
           expiresAt: expiresAt.toISOString(),
           responseTime,
         },
@@ -92,7 +91,7 @@ export class OpenAITokenService {
       });
 
       return {
-        token: data.value, // El token viene en el campo "value"
+        token,
         expiresAt,
       };
     } catch (error) {
