@@ -8,6 +8,7 @@ import { VehiclesModule } from '../vehicles/vehicles.module';
 import { VisitsModule } from '../visits/visits.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { UsersModule } from '../users/users.module';
+import { HubModule } from '../hub/hub.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { UsersModule } from '../users/users.module';
     VehiclesModule,
     NotificationsModule,
     UsersModule,
+    HubModule,
     forwardRef(() => VisitsModule),
   ],
   providers: [

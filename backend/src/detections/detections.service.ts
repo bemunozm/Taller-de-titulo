@@ -12,6 +12,7 @@ import { User } from '../users/entities/user.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { UsersService } from '../users/users.service';
 import { NotificationType, NotificationPriority } from '../notifications/entities/notification.entity';
+import { HubGateway } from '../hub/hub.gateway';
 
 @Injectable()
 export class DetectionsService {
@@ -25,6 +26,7 @@ export class DetectionsService {
     private readonly vehiclesService: VehiclesService,
     private readonly notificationsService: NotificationsService,
     private readonly usersService: UsersService,
+    private readonly hubGateway: HubGateway,
     @Inject(forwardRef(() => VisitsService))
     private readonly visitsService: VisitsService,
   ) {}
@@ -169,6 +171,16 @@ export class DetectionsService {
 
     // Enviar notificaciones según el tipo de detección
     await this.sendDetectionNotifications(dto.plate, decision, reason, isExit, residente, vehicle);
+
+    // AUTO-APERTURA INTEGRADADA AL HUB:
+    // Si la placa está autorizada, mandamos evento directo a la Raspberry Pi saltándonos a Sofía
+    if (decision === 'Permitido') {
+      this.logger.log(`🚗 Placa autorizada (${dto.plate}) detectada. Enviando comando de apertura al Portón Vehicular...`);
+      this.hubGateway.broadcastToAllHubs('hub:door_open', { 
+        type: 'vehicular', 
+        plate: dto.plate 
+      });
+    }
 
     return { detection: saved, attempt: savedAtt, isExit };
   }
