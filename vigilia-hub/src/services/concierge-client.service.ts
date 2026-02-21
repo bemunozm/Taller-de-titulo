@@ -516,11 +516,13 @@ export class ConciergeClientService {
         this.logger.log('📞 Ejecutando tool local: finalizar_llamada');
         
         // Simular delay y desconexión
+        this.logger.log('⏳ Iniciando cuenta regresiva para cortar la comunicación (16s)...');
         setTimeout(() => {
+          this.logger.log('📞 Tiempo de gracia expirado. Cortando canal de audio.');
           this.endConversation();
           // Opcional: desconectar completamente
           // this.disconnect(); 
-        }, 12000); // 12 segundos para permitir despedida (aumentado desde 4s)
+        }, 16000); // 16 segundos para permitir despedida y apertura de puerta
 
         result = {
           finalizada: true,
@@ -751,6 +753,12 @@ REGLAS IMPORTANTES:
     
     // Notificar a los suscriptores (ej. AudioRouter) para que apaguen sus flujos y relés
     this.conversationEndedHandlers.forEach(handler => handler());
+
+    // Limpiar handlers para evitar ejecución duplicada en la siguiente llamada
+    this.audioHandlers = [];
+    this.audioDoneHandlers = [];
+    this.speechStartedHandlers = [];
+    this.conversationEndedHandlers = [];
     
     // NOTA: Eliminamos la creación forzada de respuesta ('response.create')
     // para evitar que el agente se despida múltiples veces o intente "rellenar" el silencio.
