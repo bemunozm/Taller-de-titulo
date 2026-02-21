@@ -499,7 +499,7 @@ export class DigitalConciergeService {
       }
 
       // Obtener todos los residentes, ignorando los que no se encuentren (ej. usuarios eliminados)
-      const validResidents = [];
+      const validResidents: any[] = [];
       for (const id of params.residentes_ids) {
         try {
           const user = await this.usersService.findOne(id);
