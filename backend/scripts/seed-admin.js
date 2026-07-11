@@ -4,7 +4,7 @@
  * Uso:
  *   node scripts/seed-admin.js <email> <password> [nombre] [rut] [phone]
  *
- * Idempotente: si el email ya existe, actualiza password + confirmed y
+ * Idempotente: si el email ya existe, actualiza password + emailVerified y
  * asegura el rol Super Administrador. Lee la config de DB desde backend/.env.
  * Usa el mismo hashing que el backend (bcrypt, 10 rounds).
  */
@@ -59,13 +59,13 @@ async function main() {
     if (existing.rowCount > 0) {
       userId = existing.rows[0].id;
       await client.query(
-        `UPDATE "user" SET password = $1, confirmed = true, name = $2, "updatedAt" = now() WHERE id = $3`,
+        `UPDATE "user" SET password = $1, "emailVerified" = true, name = $2, "updatedAt" = now() WHERE id = $3`,
         [hash, name, userId],
       );
       console.log(`Usuario existente actualizado: ${emailLc} (${userId})`);
     } else {
       const ins = await client.query(
-        `INSERT INTO "user" (rut, name, email, phone, password, confirmed, age)
+        `INSERT INTO "user" (rut, name, email, phone, password, "emailVerified", age)
          VALUES ($1, $2, $3, $4, $5, true, $6) RETURNING id`,
         [rut, name, emailLc, phone, hash, age],
       );

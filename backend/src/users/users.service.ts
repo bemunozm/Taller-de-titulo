@@ -59,7 +59,7 @@ export class UsersService {
       const newUser = this.userRepository.create({
         ...createAccountByAdminDto,
         password: await hashPassword(randomPassword),
-        confirmed: false, // El usuario debe confirmar su cuenta
+        emailVerified: false, // El usuario debe confirmar su cuenta
       });
 
       // Asignar roles si se proporcionaron
@@ -159,9 +159,9 @@ export class UsersService {
 
   async findByEmailWithPassword(email: string) {
     try {
-      const user = await this.userRepository.findOne({ 
+      const user = await this.userRepository.findOne({
         where: { email: email.toLowerCase() },
-        select: ['id', 'email', 'password', 'name', 'confirmed'],
+        select: ['id', 'email', 'password', 'name', 'emailVerified'],
         relations: ['roles', 'roles.permissions']
       });
       

@@ -71,13 +71,13 @@ export class CreateUserDto {
     age?: number;
 
     @ApiProperty({
-        description: 'Estado de confirmación del usuario (true si ha verificado su email)',
+        description: 'Estado de verificación del email del usuario (campo nativo de better-auth)',
         example: false,
         default: false,
         type: 'boolean',
         required: false
     })
     @IsOptional()
-    @IsBoolean({ message: 'El estado de confirmación debe ser un booleano' })
-    confirmed?: boolean;
+    @IsBoolean({ message: 'El estado de verificación debe ser un booleano' })
+    emailVerified?: boolean;
 }

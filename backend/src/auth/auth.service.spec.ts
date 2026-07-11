@@ -33,7 +33,7 @@ describe('AuthService', () => {
     email: 'test@example.com',
     name: 'Test User',
     password: 'hashedPassword',
-    confirmed: false,
+    emailVerified: false,
     rut: '12345678-9',
     phone: '123456789',
     age: 25,
@@ -204,7 +204,7 @@ describe('AuthService', () => {
 
     it('should login successfully with valid credentials', async () => {
       // Arrange
-      const confirmedUser = { ...mockUser, confirmed: true };
+      const confirmedUser = { ...mockUser, emailVerified: true };
       usersService.findByEmailWithPassword.mockResolvedValue(confirmedUser as User);
       (authUtil.checkPassword as jest.Mock).mockResolvedValue(true);
       jwtService.sign.mockReturnValue('jwt-token');
@@ -229,7 +229,7 @@ describe('AuthService', () => {
       );
     });
 
-    it('should throw UnauthorizedException when user is not confirmed', async () => {
+    it('should throw UnauthorizedException when user is not emailVerified', async () => {
       // Arrange
       usersService.findByEmailWithPassword.mockResolvedValue(mockUser as User);
       (tokenUtil.generateToken as jest.Mock).mockReturnValue('123456');
@@ -254,7 +254,7 @@ describe('AuthService', () => {
 
     it('should throw UnauthorizedException when password is incorrect', async () => {
       // Arrange
-      const confirmedUser = { ...mockUser, confirmed: true };
+      const confirmedUser = { ...mockUser, emailVerified: true };
       usersService.findByEmailWithPassword.mockResolvedValue(confirmedUser as User);
       (authUtil.checkPassword as jest.Mock).mockResolvedValue(false);
 
@@ -294,7 +294,7 @@ describe('AuthService', () => {
       // Assert
       expect(tokensService.findByTokenWithUser).toHaveBeenCalledWith('123456');
       expect(usersService.save).toHaveBeenCalledWith(
-        expect.objectContaining({ confirmed: true })
+        expect.objectContaining({ emailVerified: true })
       );
       expect(tokensService.remove).toHaveBeenCalledWith('1');
       expect(authEmailService.sendWelcomeEmail).toHaveBeenCalledWith({
@@ -333,7 +333,7 @@ describe('AuthService', () => {
 
     it('should request confirmation code successfully', async () => {
       // Arrange
-      const unconfirmedUser = { ...mockUser, confirmed: false };
+      const unconfirmedUser = { ...mockUser, emailVerified: false };
       usersService.findByEmail.mockResolvedValue(unconfirmedUser as User);
       (tokenUtil.generateToken as jest.Mock).mockReturnValue('123456');
       tokensService.create.mockResolvedValue(mockToken as Token);
@@ -367,9 +367,9 @@ describe('AuthService', () => {
       );
     });
 
-    it('should throw BadRequestException when user is already confirmed', async () => {
+    it('should throw BadRequestException when user is already emailVerified', async () => {
       // Arrange
-      const confirmedUser = { ...mockUser, confirmed: true };
+      const confirmedUser = { ...mockUser, emailVerified: true };
       usersService.findByEmail.mockResolvedValue(confirmedUser as User);
 
       // Act & Assert

@@ -81,7 +81,7 @@ export class AuthService {
             }
 
             const user = tokenExists.user;
-            user.confirmed = true;
+            user.emailVerified = true;
 
             await this.usersService.save(user);
             await this.tokensService.remove(tokenExists.id);
@@ -110,7 +110,7 @@ export class AuthService {
                 throw new UnauthorizedException('Usuario No Encontrado');
             }
 
-            if (!user.confirmed) {
+            if (!user.emailVerified) {
                 // Generar token de establecer contraseña (no solo de confirmación)
                 const tokenValue = generateToken();
                 await this.tokensService.create({ token: tokenValue, userId: user.id });
@@ -151,7 +151,7 @@ export class AuthService {
                 throw new NotFoundException('El Usuario no existe');
             }
 
-            if (user.confirmed) {
+            if (user.emailVerified) {
                 throw new BadRequestException('El Usuario ya está confirmado');
             }
 
@@ -245,8 +245,8 @@ export class AuthService {
             user.password = await hashPassword(password);
             
             // Si la cuenta no está confirmada, confirmarla automáticamente
-            if (!user.confirmed) {
-                user.confirmed = true;
+            if (!user.emailVerified) {
+                user.emailVerified = true;
                 console.log('Cuenta confirmada automáticamente al restablecer contraseña');
             }
 

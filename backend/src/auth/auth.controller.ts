@@ -289,7 +289,7 @@ export class AuthController {
         email: { type: 'string', example: 'juan@example.com' },
         phone: { type: 'string', example: '+56912345678' },
         age: { type: 'number', example: 25 },
-        confirmed: { type: 'boolean', example: true },
+        emailVerified: { type: 'boolean', example: true },
         roles: { type: 'array', items: { type: 'object' } }
       }
     }

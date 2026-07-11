@@ -146,7 +146,7 @@ export const AuthApiResponses = {
         email: { type: 'string', format: 'email', example: 'juan.perez@example.com' },
         phone: { type: 'string', example: '+56912345678' },
         age: { type: 'number', example: 25 },
-        confirmed: { type: 'boolean', example: true },
+        emailVerified: { type: 'boolean', example: true },
         createdAt: { type: 'string', format: 'date-time', example: '2024-01-01T12:00:00Z' },
         updatedAt: { type: 'string', format: 'date-time', example: '2024-01-01T12:00:00Z' },
         roles: {
