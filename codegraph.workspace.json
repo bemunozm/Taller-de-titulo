@@ -1,0 +1,19 @@
+{
+  "$schema": "https://codegraph.dev/workspace.schema.json",
+  "name": "taller-de-titulo",
+  "description": "Sistema de vigilancia con reconocimiento de patentes (LPR). Monorepo poliglota indexado por CodeGraph a nivel de subproyecto.",
+  "note": "CodeGraph v1.4.1 indexa por-proyecto (usa el .codegraph/ mas cercano) y auto-sincroniza via file-watching nativo del MCP server (debounce 2s). Ademas de los 4 sub-indices, hay un INDICE RAIZ unificado (.codegraph/ + codegraph.json en la raiz) que abarca los 4 subproyectos como un solo grafo para consultas cross-subsistema. Cada proyecto (y la raiz) tiene su codegraph.json con excludes. Los git hooks + codegraph-sync-all son respaldo del watcher nativo para operaciones git fuera de sesion.",
+  "rootIndex": { "dir": ".", "config": "codegraph.json", "spans": ["backend", "frontend", "lpr", "vigilia-hub"] },
+  "projects": [
+    { "path": "backend", "stack": "nestjs-typescript", "role": "API principal (auth, vehiculos, visitas, notificaciones, QR)" },
+    { "path": "frontend", "stack": "vite-react-typescript", "role": "UI web" },
+    { "path": "lpr", "stack": "python", "role": "IA de reconocimiento de patentes (YOLO + OCR)" },
+    { "path": "vigilia-hub", "stack": "node-typescript", "role": "Hub/agente edge de camaras y streaming" }
+  ],
+  "excludedFromIndex": [
+    "lpr legacy backup",
+    "vigilia-hub-temp",
+    "mediamtx",
+    "rtsp-simple-server"
+  ]
+}

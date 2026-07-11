@@ -33,3 +33,6 @@ data/*.json
 # Temp files
 tmp/
 temp/
+
+# CodeGraph (indice local; codegraph.json se versiona)
+.codegraph/

@@ -1,0 +1,24 @@
+{
+  "exclude": [
+    "lpr legacy backup/",
+    "vigilia-hub-temp/",
+    "mediamtx/",
+    "rtsp-simple-server/",
+    "**/dist/",
+    "**/.codegraph/",
+    "**/__pycache__/",
+    "lpr/detecciones/",
+    "lpr/logs/",
+    "lpr/test_video/",
+    "lpr/storage/",
+    "lpr/lpr.egg-info/",
+    "backend/diagramas de secuencia/",
+    "backend/test/",
+    "frontend/public/",
+    ".agent/",
+    ".agents/",
+    ".vscode/",
+    "*.pt",
+    "repomix-output.xml"
+  ]
+}

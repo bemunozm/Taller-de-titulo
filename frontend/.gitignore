@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# CodeGraph (indice local; codegraph.json se versiona)
+.codegraph/

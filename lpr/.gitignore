@@ -1,0 +1,19 @@
+# CodeGraph (indice local; codegraph.json se versiona)
+.codegraph/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# LPR runtime data (no versionar detecciones/logs/modelos)
+detecciones/
+logs/
+storage/
+*.pt
+
+# Env
+.env
