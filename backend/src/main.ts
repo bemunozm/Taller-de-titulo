@@ -1,15 +1,36 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
-import { json, urlencoded } from 'express';
+import { json, urlencoded, Request, Response, NextFunction } from 'express';
 import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
-async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+// Debe coincidir con el `basePath` configurado en src/auth/better-auth.ts.
+const BETTER_AUTH_BASE_PATH = '/api/auth';
 
-  // Aumentar el límite de carga para permitir snapshots Full-Frame (Base64)
-  app.use(json({ limit: '10mb' }));
-  app.use(urlencoded({ extended: true, limit: '10mb' }));
+async function bootstrap() {
+  // better-auth necesita leer el body/raw-stream de la request por su cuenta
+  // (@thallesp/nestjs-better-auth se encarga de eso vía toNodeHandler). Por
+  // eso desactivamos el body parser propio de Nest (igual que pide el README
+  // de la librería) y lo re-agregamos nosotros mismos más abajo, saltándonos
+  // SOLO las rutas de better-auth para no consumirle el stream.
+  const app = await NestFactory.create(AppModule, { bodyParser: false });
+
+  // Body parser propio: mismo límite de 10mb que antes (snapshots Full-Frame
+  // en Base64), aplicado a todo EXCEPTO /api/auth/* (better-auth parsea su
+  // propio body — si lo consumimos acá antes, sign-up/sign-in se rompen).
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.originalUrl.startsWith(BETTER_AUTH_BASE_PATH)) {
+      next();
+      return;
+    }
+    json({ limit: '10mb' })(req, res, (err: unknown) => {
+      if (err) {
+        next(err);
+        return;
+      }
+      urlencoded({ extended: true, limit: '10mb' })(req, res, next);
+    });
+  });
 
   // Configuración de CORS
   app.enableCors({

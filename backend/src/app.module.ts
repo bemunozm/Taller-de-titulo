@@ -2,10 +2,12 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
+import { AuthModule as BetterAuthModule } from '@thallesp/nestjs-better-auth';
 import { UsersModule } from './users/users.module';
 import { RolesModule } from './roles/roles.module';
 import { TokensModule } from './tokens/tokens.module';
 import { AuthModule } from './auth/auth.module';
+import { auth } from './auth/better-auth';
 import { PermissionsModule } from './permissions/permissions.module';
 import { StreamsModule } from './streams/streams.module';
 import { DataInitializationService } from './common/services/data-initialization.service';
@@ -45,6 +47,14 @@ import { AnomaliesModule } from './anomalies/anomalies.module';
       synchronize: true, // no usar en produccion
     }),
     TypeOrmModule.forFeature([Role, Permission, AccessAttempt, Notification, Visit]),
+    // POC Fase 0 (docs/modulos/auth-multitenant.md): better-auth montado EN
+    // PARALELO al AuthModule propio (JWT+RBAC, sigue intacto más abajo).
+    // `disableGlobalAuthGuard: true` es CRÍTICO: sin esto la librería registra
+    // su AuthGuard como guard global (APP_GUARD) y protegería/rompería TODAS
+    // las rutas existentes, que hoy usan su propio guard. Con el guard global
+    // deshabilitado, better-auth solo expone sus endpoints (/api/auth/*) y no
+    // interfiere con el resto de la API.
+    BetterAuthModule.forRoot({ auth, disableGlobalAuthGuard: true }),
     UsersModule,
     RolesModule,
     TokensModule,
