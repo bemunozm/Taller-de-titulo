@@ -76,11 +76,13 @@ better-auth default = **cookies httpOnly + server session** (lookup en DB). Es m
 - **Express vs Fastify:** el backend debe correr sobre **Express** (el soporte Fastify de la lib es beta, issue `#147`). Confirmar (NestJS default es Express — OK).
 - **Bus-factor** de la lib community → mantener la opción de caer al handler vanilla si se abandonara.
 
-## 10. Decisiones abiertas (necesitan tu OK)
-1. **Modelo User:** ¿opción C (canónica better-auth + extendida, recomendada) o A (identidad separada)?
-2. **Sesión:** ¿cookies httpOnly (recomendado) o stateless JWT?
-3. **Service token del worker LPR:** ¿plugin `apiKey` de better-auth o emisor propio acotado?
-4. ¿Modelamos **torres/edificios** como `team` desde ya, o solo `organization`=condominio por ahora?
+## 10. Decisiones (cerradas — Benjamin, 2026-07-11)
+1. **Modelo User:** ✅ **Opción C** — `user` de better-auth canónica + campos de dominio extendidos (rut/phone/age/family/roles). Un solo modelo de usuario.
+2. **Sesión:** ✅ **Cookies httpOnly** (default de better-auth). El frontend migra de `localStorage.AUTH_TOKEN` a cookies (`withCredentials`).
+3. **Service token (worker LPR):** ✅ **Plugin `apiKey`** de better-auth para credenciales de máquina.
+4. **Tenant:** ✅ **Solo `organization` = condominio** por ahora; `teams` (torres/edificios) se agregan después si el piloto lo pide.
+
+Con esto el diseño queda **cerrado** y listo para implementar en la Fase 0.
 
 ## Fuentes
 Ver informe completo en la bitácora / memoria del research (`agent-memory/deep-web-researcher/better-auth-nestjs-migration-2026.md`). Docs oficiales: better-auth.com (NestJS integration, Organization, Admin, Database, Auth0 migration, Security update June 2026), repo `ThallesP/nestjs-better-auth`, skills.sh/better-auth.
