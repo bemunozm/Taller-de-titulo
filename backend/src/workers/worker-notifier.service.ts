@@ -12,7 +12,7 @@ export class WorkerNotifierService {
 
   constructor(private readonly logsService: LogsService) {}
 
-  async registerCamera(cameraId: string, rtspUrl: string, mountPath?: string) {
+  async registerCamera(cameraId: string, rtspUrl: string, mountPath?: string, mode?: string) {
     if (!this.baseUrl) return;
     
     const correlationId = uuidv4();
@@ -22,11 +22,16 @@ export class WorkerNotifierService {
       const headers: Record<string,string> = { 'Content-Type': 'application/json' };
       if (this.secret) headers['Authorization'] = `Bearer ${this.secret}`;
       
-      await axios.post(`${this.baseUrl.replace(/\/$/, '')}/register-camera`, {
+      const payload: any = {
         cameraId,
         rtspUrl,
         mountPath,
-      }, { timeout: this.timeout, headers });
+      };
+      if (mode) {
+        payload.mode = mode;
+      }
+
+      await axios.post(`${this.baseUrl.replace(/\/$/, '')}/register-camera`, payload, { timeout: this.timeout, headers });
       
       const responseTime = Date.now() - startTime;
       

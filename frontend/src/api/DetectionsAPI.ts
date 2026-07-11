@@ -36,6 +36,19 @@ export type AccessAttempt = {
   detection: PlateDetection
 }
 
+export type AnomalyEvent = {
+  id: string
+  cameraId: string
+  anomalyType: string
+  confidence: number
+  snapshotJpegB64?: string
+  durationSeconds?: number
+  trackId?: number
+  suspicionLevel: string
+  aiReasoning?: string
+  timestamp: string
+}
+
 export async function listPlateDetections(): Promise<PlateDetection[]> {
   try {
     const { data } = await api.get<PlateDetection[]>('/detections/plates')
@@ -51,6 +64,18 @@ export async function listPlateDetections(): Promise<PlateDetection[]> {
 export async function listAccessAttempts(): Promise<AccessAttempt[]> {
   try {
     const { data } = await api.get<AccessAttempt[]>('/detections/plates/attempts')
+    return data || []
+  } catch (error) {
+    if (isAxiosError(error) && error.response) {
+      throw new Error(error.response.data.message)
+    }
+    throw error
+  }
+}
+
+export async function listAnomalies(): Promise<AnomalyEvent[]> {
+  try {
+    const { data } = await api.get<AnomalyEvent[]>('/anomalies')
     return data || []
   } catch (error) {
     if (isAxiosError(error) && error.response) {

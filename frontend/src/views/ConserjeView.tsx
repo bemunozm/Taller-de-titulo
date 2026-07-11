@@ -2,6 +2,14 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import CameraPlayer from '@/components/CameraPlayer'
 import { listCameras } from '@/api/CameraAPI'
+import { io, Socket } from 'socket.io-client'
+
+type ActiveAlert = {
+  suspicionLevel: string
+  type: string
+  timestamp: number
+  reasoning?: string
+}
 
 export default function ConserjeView() {
   const { data: cameras = [] } = useQuery({ queryKey: ['cameras'], queryFn: () => listCameras() })
@@ -26,6 +34,83 @@ export default function ConserjeView() {
     return () => clearTimeout(t)
   }, [query])
 
+  // WebSocket silencioso para Sala de Conserjería
+  const [activeAlerts, setActiveAlerts] = useState<Record<string, ActiveAlert>>({})
+  const [isSocketConnected, setIsSocketConnected] = useState(false)
+  const [socketError, setSocketError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const backendUrl = import.meta.env.VITE_API_URL || 'http://localhost:3000/api/v1'
+    const socketUrl = backendUrl.replace('/api/v1', '')
+    
+    const socket: Socket = io(socketUrl, {
+      path: '/socket.io/',
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 10,
+      reconnectionDelay: 2000,
+    })
+
+    socket.on('connect', () => {
+      // Unirse a la sala para recibir detecciones filtradas
+      console.log('✅ Conserjería conectada al WebSocket')
+      setIsSocketConnected(true)
+      setSocketError(null)
+      socket.emit('join_room', { room: 'conserje_room' })
+    })
+
+    socket.on('disconnect', (reason) => {
+      console.warn('❌ Conserjería desconectada:', reason)
+      setIsSocketConnected(false)
+    })
+
+    socket.on('connect_error', (error) => {
+      console.error('⚠️ Error de conexión Conserjería:', error)
+      setIsSocketConnected(false)
+      setSocketError('Fallo conectando al servidor de Alertas')
+    })
+
+    socket.on('security:anomaly_highlight', (data: any) => {
+      console.log('👀 AVISO AL CONSERJE (IA Vision):', data)
+      setActiveAlerts((prev) => ({
+        ...prev,
+        [data.cameraId]: {
+          suspicionLevel: data.suspicionLevel || 'MEDIUM',
+          type: data.anomalyType,
+          timestamp: Date.now(),
+          reasoning: data.reasoning
+        }
+      }))
+    })
+
+    return () => {
+      socket.emit('leave_room', { room: 'conserje_room' })
+      socket.off('connect')
+      socket.off('disconnect')
+      socket.off('connect_error')
+      socket.off('security:anomaly_highlight')
+      socket.disconnect()
+    }
+  }, [])
+
+  // Auto-limpiar alertas viejas (ej: después de 15 segundos)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now()
+      setActiveAlerts(prev => {
+        let changed = false
+        const next = { ...prev }
+        for (const camId in next) {
+          if (now - next[camId].timestamp > 15000) {
+            delete next[camId]
+            changed = true
+          }
+        }
+        return changed ? next : prev
+      })
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [])
+
   const filtered = useMemo(() => {
     if (!debouncedQuery) return cameras
     return cameras.filter((c: any) => {
@@ -37,7 +122,31 @@ export default function ConserjeView() {
   // Show all cameras; render live player only for those active and registered, otherwise show placeholder with reason
   return (
     <div className="space-y-4">
-      <h1 className="text-2xl font-semibold dark:text-white">Conserje — Mosaico de cámaras</h1>
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+        <h1 className="text-2xl font-semibold dark:text-white flex items-center gap-3">
+          Conserje — Mosaico de cámaras
+          
+          {/* Status Badge */}
+          <div className="flex items-center gap-2 px-3 py-1 bg-zinc-100 dark:bg-zinc-800 rounded-full border border-zinc-200 dark:border-zinc-700">
+            {isSocketConnected ? (
+              <>
+                <span className="relative flex h-2.5 w-2.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                </span>
+                <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">Inteligencia Activa</span>
+              </>
+            ) : (
+              <>
+                <span className="h-2.5 w-2.5 rounded-full bg-red-500"></span>
+                <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+                  {socketError ? 'Reconectando...' : 'Sin conexión IA'}
+                </span>
+              </>
+            )}
+          </div>
+        </h1>
+      </div>
 
       {/* Search row aligned to the right inside the container */}
       <div className="flex justify-end mb-2">
@@ -71,19 +180,66 @@ export default function ConserjeView() {
                 <div className="font-medium truncate">{displayName}</div>
                 {displayLocation ? <div className="text-xs text-zinc-500 truncate">{displayLocation}</div> : null}
               </div>
-              <div className="h-48 bg-black relative">
-                {isActive && registered ? (
-                  <CameraPlayer cameraId={mountOrId} />
-                ) : (
-                  <div className="h-full w-full flex flex-col items-center justify-center text-zinc-400 p-4 space-y-2 text-center">
-                    <div className="text-base font-medium">Cámara no disponible</div>
-                    <div className="text-sm text-zinc-500">
-                      {!registered ? 'No registrada en el gateway de medios' : 'Marcada como inactiva'}
-                    </div>
-                    <div className="mt-1 text-[10px] px-2 py-1 rounded-full bg-zinc-800 text-zinc-300">{!registered ? 'No registrada' : 'Inactiva'}</div>
+              
+              {(() => {
+                const alert = activeAlerts[cam.id]
+                let borderClass = 'border-transparent'
+                let badgeColor = ''
+                let badgeText = ''
+                let shadowClass = ''
+
+                if (alert) {
+                  const isHigh = alert.suspicionLevel === 'HIGH'
+                  const isLow = alert.suspicionLevel === 'LOW'
+                  
+                  if (isHigh) {
+                    borderClass = 'border-red-500 border-2 animate-pulse'
+                    badgeColor = 'bg-red-600 text-white'
+                    shadowClass = 'shadow-[0_0_15px_rgba(239,68,68,0.5)]'
+                  } else if (isLow) {
+                    borderClass = 'border-yellow-500 border'
+                    badgeColor = 'bg-yellow-500 text-black'
+                    shadowClass = 'shadow-[0_0_10px_rgba(234,179,8,0.3)]'
+                  } else {
+                    borderClass = alert.type === 'intrusion' ? 'border-orange-500 border-2 border-dashed' : 'border-orange-500 border-2'
+                    badgeColor = 'bg-orange-500 text-white'
+                    shadowClass = 'shadow-[0_0_15px_rgba(249,115,22,0.5)]'
+                  }
+                  
+                  badgeText = alert.type === 'intrusion' ? 'INTRUSIÓN' : 'MERODEO'
+                }
+
+                return (
+                  <div className={`relative h-48 bg-black transition-all duration-300 ${borderClass} ${shadowClass}`}>
+                    {isActive && registered ? (
+                      <CameraPlayer cameraId={mountOrId} />
+                    ) : (
+                      <div className="h-full w-full flex flex-col items-center justify-center text-zinc-400 p-4 space-y-2 text-center">
+                        <div className="text-base font-medium">Cámara no disponible</div>
+                        <div className="text-sm text-zinc-500">
+                          {!registered ? 'No registrada en el gateway de medios' : 'Marcada como inactiva'}
+                        </div>
+                        <div className="mt-1 text-[10px] px-2 py-1 rounded-full bg-zinc-800 text-zinc-300">{!registered ? 'No registrada' : 'Inactiva'}</div>
+                      </div>
+                    )}
+                    
+                    {/* Badge UI if alert exists */}
+                    {alert && (
+                      <div className="absolute top-2 right-2">
+                        <div className="group relative">
+                          <span className={`px-2 py-1 text-[10px] font-bold uppercase rounded shadow-md ${badgeColor}`}>
+                            {badgeText} ({alert.suspicionLevel})
+                          </span>
+                          {/* Tooltip con el reasoning de la IA */}
+                          <div className="absolute top-full right-0 mt-2 w-48 p-2 bg-black/90 text-white text-[10px] rounded shadow-xl border border-zinc-700 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
+                            {alert.reasoning}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
+                )
+              })()}
             </div>
           )
         })}

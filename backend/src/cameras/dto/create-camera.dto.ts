@@ -41,4 +41,9 @@ export class CreateCameraDto {
 	@ArrayUnique({ message: 'Los IDs de roles deben ser únicos' })
 	@IsOptional()
 	roleIds?: string[];
+
+	@ApiProperty({ description: 'Habilitar Guardián Visual (Intrusión) para esta cámara', required: false, example: false })
+	@IsBoolean({ message: 'enableGuardian debe ser booleano' })
+	@IsOptional()
+	enableGuardian?: boolean;
 }

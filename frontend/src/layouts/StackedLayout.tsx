@@ -7,6 +7,7 @@ import { useAuth } from '@/hooks/useAuth'
 import { NavbarItem } from '@/components/ui/Navbar'
 import { SidebarItem } from '@/components/ui/Sidebar'
 import { Outlet, useLocation } from 'react-router-dom'
+import GlobalSecurityNotifications from '@/components/GlobalSecurityNotifications'
 
 function OpenMenuIcon() {
   return (
@@ -125,6 +126,9 @@ export function StackedLayout({
           <div className="mx-auto max-w-6xl"><Outlet /></div>
         </div>
       </main>
+
+      {/* Security Listener */}
+      <GlobalSecurityNotifications />
     </div>
   )
 }

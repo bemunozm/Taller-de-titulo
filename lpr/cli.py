@@ -4,20 +4,28 @@ from .settings import build_worker_config as load_from_env_or_args, settings
 from .detector.yolo_detector import load_detector, detect
 from .ocr.fast_ocr_adapter import FastPlateOCR
 from .processor.worker import LprWorker
+from .processor.guardian_worker import GuardianWorker
 from . import __name__ as pkgname
 
 
-def main(rtsp_url=None, camera_id=None, backend_url=None, poll_interval=None):
+def main(rtsp_url=None, camera_id=None, backend_url=None, poll_interval=None, mode=None):
     logging.basicConfig(
         level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-    cfg = load_from_env_or_args(rtsp_url, camera_id, backend_url, poll_interval)
-    detector_inst = load_detector(cfg.detector_model)
-    fast_ocr = FastPlateOCR()
-    # detector_callable(frame, min_conf) -> List[Detection]
-    detector_callable = lambda frame, min_conf=cfg.min_det_conf: detect(detector_inst, frame, min_conf)
-    worker = LprWorker(cfg=cfg, detector=detector_callable, fast_ocr=fast_ocr)
+    # Por defecto 'patente', si mode viene por parámetro, usarlo.
+    cfg_mode = mode if mode else 'patente'
+    cfg = load_from_env_or_args(rtsp_url, camera_id, backend_url, poll_interval, mode=cfg_mode)
+    
+    if cfg.mode == 'guardia':
+        worker = GuardianWorker(cfg=cfg)
+    else:
+        detector_inst = load_detector(cfg.detector_model)
+        fast_ocr = FastPlateOCR()
+        # detector_callable(frame, min_conf) -> List[Detection]
+        detector_callable = lambda frame, min_conf=cfg.min_det_conf: detect(detector_inst, frame, min_conf)
+        worker = LprWorker(cfg=cfg, detector=detector_callable, fast_ocr=fast_ocr)
+        
     cap = cv2.VideoCapture(cfg.rtsp_url, cv2.CAP_FFMPEG)
     try:
         worker.start_capture_loop(cap)

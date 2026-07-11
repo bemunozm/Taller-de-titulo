@@ -26,6 +26,12 @@ export class Camera {
 	@Column({ type: 'boolean', default: false })
 	enableLpr: boolean;
 
+	@Column({ type: 'boolean', default: false })
+	enableGuardian: boolean;
+
+	@Column({ type: 'jsonb', nullable: true, default: [] })
+	guardianZones: any[];
+
 	@Column({ type: 'boolean', default: true })
 	active: boolean;
 

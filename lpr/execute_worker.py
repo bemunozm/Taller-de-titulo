@@ -50,8 +50,10 @@ def _run_from_args_or_env():
             poll_interval = float(args[3])
         except Exception:
             poll_interval = None
+            
+    mode = args[4] if len(args) > 4 else 'patente'
 
-    main(rtsp, camera_id, backend, poll_interval)
+    main(rtsp, camera_id, backend, poll_interval, mode=mode)
 
 
 if __name__ == '__main__':

@@ -28,6 +28,7 @@ class RegisterPayload(BaseModel):
     cameraId: str
     rtspUrl: str
     mountPath: Optional[str] = None
+    mode: str = 'patente'
 
 
 class UnregisterPayload(BaseModel):
@@ -86,7 +87,7 @@ def register_camera(payload: RegisterPayload, auth: bool = Depends(_check_secret
         # build command: use same python executable
         py = sys.executable or 'python'
         backend_arg = BACKEND_URL or ''
-        cmd = [py, '-m', 'lpr.execute_worker', payload.rtspUrl, camera_id, backend_arg]
+        cmd = [py, '-m', 'lpr.execute_worker', payload.rtspUrl, camera_id, backend_arg, '1.0', payload.mode]
 
         fname = f"worker_{_sanitize_fname(camera_id)}.log"
         log_path = LOG_DIR / fname
@@ -116,6 +117,8 @@ def register_camera(payload: RegisterPayload, auth: bool = Depends(_check_secret
                 env['PYTHONPATH'] = proj_str + (os.pathsep + old_pp if old_pp else '')
 
             proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT, env=env, cwd=proj_str)
+            logger.info(f"--- [STARTED] Worker for {camera_id} (PID {proc.pid}) ---")
+            logger.info(f"--- [LOGS] {log_path} ---")
         except Exception as e:
             try:
                 log_file.close()
@@ -135,6 +138,7 @@ def unregister_camera(payload: UnregisterPayload, auth: bool = Depends(_check_se
             return {'status': 'not_found'}
         info = _PROCS[camera_id]
         proc = info['proc']
+        logger.info(f"--- [STOPPING] Worker for {camera_id} (PID {proc.pid}) ---")
         # try graceful termination
         try:
             proc.terminate()
@@ -204,25 +208,49 @@ def reconcile_with_backend():
             return
         for cam in cams:
             try:
-                if not cam.get('enableLpr'):
-                    continue
                 cam_id = cam.get('id') or cam.get('mountPath')
                 if not cam_id:
                     continue
-                # attempt to get decrypted source
+
+                # Decidir qué modos arrancar
+                enable_lpr = cam.get('enableLpr', False)
+                enable_guardian = cam.get('enableGuardian', False)
+
+                if not (enable_lpr or enable_guardian):
+                    continue
+
+                # Intentar obtener source desencriptada
                 sresp = requests.get(f"{url_base}/cameras/{cam_id}/source", timeout=5, headers=headers)
                 if sresp.status_code != 200:
                     continue
                 src = sresp.json().get('sourceUrl')
                 if not src:
                     continue
-                # call internal register function to spawn worker
-                try:
-                    payload = RegisterPayload(cameraId=cam_id, rtspUrl=src, mountPath=cam.get('mountPath'))
-                    register_camera(payload, True)
-                except Exception:
-                    continue
-            except Exception:
+
+                # Arrancar LPR si aplica
+                if enable_lpr:
+                    try:
+                        payload = RegisterPayload(cameraId=cam_id, rtspUrl=src, mountPath=cam.get('mountPath'))
+                        register_camera(payload, True)
+                    except Exception as e:
+                        logger.error(f"Error arrancando LPR para {cam_id} en startup: {e}")
+
+                # Arrancar Guardián si aplica
+                if enable_guardian:
+                    try:
+                        # Usar ID con sufijo para no colisionar con LPR en el manager
+                        payload = RegisterPayload(
+                            cameraId=f"{cam_id}_guardia", 
+                            rtspUrl=src, 
+                            mountPath=cam.get('mountPath'),
+                            mode='guardia'
+                        )
+                        register_camera(payload, True)
+                    except Exception as e:
+                        logger.error(f"Error arrancando Guardián para {cam_id} en startup: {e}")
+
+            except Exception as e:
+                logger.error(f"Error procesando cámara {cam.get('id')} en startup: {e}")
                 continue
     except Exception:
         return

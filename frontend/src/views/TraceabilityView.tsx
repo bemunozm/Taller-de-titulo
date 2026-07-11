@@ -8,12 +8,14 @@ import {
   MapIcon,
   CheckCircleIcon,
   XCircleIcon,
-  ClockIcon,
   ChevronLeftIcon
 } from '@heroicons/react/24/outline'
 import { listAccessAttempts } from '@/api/DetectionsAPI'
 import { useNavigate } from 'react-router-dom'
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
+import AnomalyTable from '@/components/traceability/AnomalyTable'
+import { listAnomalies } from '@/api/DetectionsAPI'
+import { ShieldExclamationIcon } from '@heroicons/react/24/outline'
 
 export default function TraceabilityView() {
   const navigate = useNavigate()
@@ -22,6 +24,12 @@ export default function TraceabilityView() {
     queryKey: ['detections', 'attempts'], 
     queryFn: () => listAccessAttempts() 
   })
+  const { data: anomalies = [] } = useQuery({ 
+    queryKey: ['anomalies'], 
+    queryFn: () => listAnomalies() 
+  })
+
+  const [activeTab, setActiveTab] = useState<'access' | 'anomalies'>('access')
 
   const handleRefresh = () => {
     queryClient.invalidateQueries({ queryKey: ['detections', 'attempts'] })
@@ -117,25 +125,49 @@ export default function TraceabilityView() {
           </div>
         </div>
 
-        {/* Hoy */}
+        {/* Anomalías IA */}
         <div className="bg-white dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700">
           <div className="flex items-center gap-3 mb-2">
-            <ClockIcon className="w-6 h-6 text-sky-600 dark:text-sky-400" />
+            <ShieldExclamationIcon className="w-6 h-6 text-red-600 dark:text-red-400" />
             <div className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
-              Intentos Hoy
+              Anomalías IA
             </div>
           </div>
-          <div className="text-3xl font-bold text-sky-600 dark:text-sky-400">
-            {stats.todayAttempts.toLocaleString()}
+          <div className="text-3xl font-bold text-red-600 dark:text-red-400">
+            {anomalies.length.toLocaleString()}
           </div>
           <div className="text-xs text-zinc-500 mt-1">
-            {new Date().toLocaleDateString('es-CL')}
+            Eventos críticos detectados
           </div>
         </div>
       </div>
 
-      {/* Table */}
-      <TraceabilityTable />
+      {/* Tabs */}
+      <div className="flex border-b border-zinc-200 dark:border-zinc-800 mb-6">
+        <button
+          onClick={() => setActiveTab('access')}
+          className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 ${
+            activeTab === 'access' 
+              ? 'border-teal-500 text-teal-600 dark:text-teal-400' 
+              : 'border-transparent text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
+          }`}
+        >
+          Trazabilidad de Accesos (LPR)
+        </button>
+        <button
+          onClick={() => setActiveTab('anomalies')}
+          className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 ${
+            activeTab === 'anomalies' 
+              ? 'border-teal-500 text-teal-600 dark:text-teal-400' 
+              : 'border-transparent text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
+          }`}
+        >
+          Anomalías de Seguridad (IA)
+        </button>
+      </div>
+
+      {/* Table Selection */}
+      {activeTab === 'access' ? <TraceabilityTable /> : <AnomalyTable />}
     </div>
   )
 }

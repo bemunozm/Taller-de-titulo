@@ -242,4 +242,64 @@ export class CamerasController {
   ) {
     return this.camerasService.updateLprStatus(id, enableLpr);
   }
+
+  @Patch(':id/enable-guardian')
+  @RequirePermissions('cameras.enable-ia')
+  @Auditable({
+    module: AuditModule.CAMERAS,
+    action: AuditAction.UPDATE,
+    entityType: 'Camera',
+    description: 'Estado de Guardián actualizado en cámara',
+    captureResponse: true
+  })
+  @ApiOperation({ 
+    summary: 'Habilitar/deshabilitar Guardián Visual en cámara', 
+    description: 'Activa o desactiva la analítica de visión (YOLO Intrusión) en la cámara.'
+  })
+  @ApiParam({ name: 'id', description: 'ID único de la cámara' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        enableGuardian: { type: 'boolean', description: 'true para habilitar' }
+      },
+      required: ['enableGuardian']
+    }
+  })
+  async enableGuardian(
+    @Param('id') id: string, 
+    @Body('enableGuardian') enableGuardian: boolean
+  ) {
+    return this.camerasService.updateGuardianStatus(id, enableGuardian);
+  }
+
+  @Patch(':id/zones')
+  @RequirePermissions('cameras.update')
+  @Auditable({
+    module: AuditModule.CAMERAS,
+    action: AuditAction.UPDATE,
+    entityType: 'Camera',
+    description: 'Zonas del guardián visual actualizadas',
+    captureResponse: true
+  })
+  @ApiOperation({ 
+    summary: 'Actualizar polígonos del Guardián Visual', 
+    description: 'Sobrescribe las coordenadas de los polígonos de alarma.'
+  })
+  @ApiParam({ name: 'id', description: 'ID único de la cámara' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        zones: { type: 'array', description: 'Arreglo JSON con polígonos' }
+      },
+      required: ['zones']
+    }
+  })
+  async updateZones(
+    @Param('id') id: string, 
+    @Body('zones') zones: any[]
+  ) {
+    return this.camerasService.updateGuardianZones(id, zones);
+  }
 }
