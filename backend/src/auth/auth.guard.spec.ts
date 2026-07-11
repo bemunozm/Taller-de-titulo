@@ -1,211 +1,163 @@
-import { Test, TestingModule } from '@nestjs/testing';
-import { JwtService } from '@nestjs/jwt';
 import { ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { Reflector } from '@nestjs/core';
+import { Repository } from 'typeorm';
 import { AuthGuard } from './auth.guard';
+import { User } from '../users/entities/user.entity';
+import { fromNodeHeaders } from 'better-auth/node';
+
+jest.mock('better-auth/node', () => ({
+  fromNodeHeaders: jest.fn().mockReturnValue('mock-headers'),
+}));
 
 describe('AuthGuard', () => {
   let guard: AuthGuard;
   let jwtService: jest.Mocked<JwtService>;
+  let userRepository: jest.Mocked<Repository<User>>;
+  let reflector: jest.Mocked<Reflector>;
+  let betterAuthService: { api: { getSession: jest.Mock } };
+
+  const appUser = {
+    id: 'user-1',
+    email: 'test@example.com',
+    roles: [{ name: 'Admin', permissions: [{ name: 'users.read' }] }],
+  } as unknown as User;
 
   const mockExecutionContext = {
     switchToHttp: jest.fn().mockReturnValue({
       getRequest: jest.fn(),
     }),
+    getHandler: jest.fn(),
+    getClass: jest.fn(),
   } as unknown as ExecutionContext;
 
-  beforeEach(async () => {
-    const mockJwtService = {
-      verifyAsync: jest.fn(),
-    };
+  beforeEach(() => {
+    jwtService = { verifyAsync: jest.fn() } as unknown as jest.Mocked<JwtService>;
+    userRepository = { findOne: jest.fn() } as unknown as jest.Mocked<Repository<User>>;
+    reflector = { getAllAndOverride: jest.fn().mockReturnValue(false) } as unknown as jest.Mocked<Reflector>;
+    betterAuthService = { api: { getSession: jest.fn() } };
 
-    const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        {
-          provide: JwtService,
-          useValue: mockJwtService,
-        },
-      ],
-    }).compile();
+    guard = new AuthGuard(
+      jwtService,
+      userRepository,
+      reflector,
+      betterAuthService as any,
+    );
 
-    jwtService = module.get(JwtService);
-    guard = new AuthGuard(jwtService);
-
-    // Reset mocks
     jest.clearAllMocks();
+    reflector.getAllAndOverride.mockReturnValue(false);
   });
 
-  it('should be defined', () => {
-    expect(guard).toBeDefined();
-  });
+  const mockRequest = (overrides: any = {}) => {
+    const request = { headers: {}, ...overrides };
+    (mockExecutionContext.switchToHttp().getRequest as jest.Mock).mockReturnValue(request);
+    return request;
+  };
 
-  describe('canActivate', () => {
-    let mockRequest: any;
+  describe('rutas públicas', () => {
+    it('permite el acceso sin validar sesión ni token', async () => {
+      reflector.getAllAndOverride.mockReturnValue(true);
+      mockRequest();
 
-    beforeEach(() => {
-      mockRequest = {
-        headers: {},
-      };
-      
-      (mockExecutionContext.switchToHttp().getRequest as jest.Mock).mockReturnValue(mockRequest);
-    });
-
-    it('should return true when valid token is provided', async () => {
-      // Arrange
-      const validToken = 'valid.jwt.token';
-      const payload = { id: '1', email: 'test@example.com' };
-      
-      mockRequest.headers.authorization = `Bearer ${validToken}`;
-      jwtService.verifyAsync.mockResolvedValue(payload);
-
-      // Act
       const result = await guard.canActivate(mockExecutionContext);
 
-      // Assert
       expect(result).toBe(true);
-      expect(jwtService.verifyAsync).toHaveBeenCalledWith(validToken);
-      expect(mockRequest.user).toEqual(payload);
-    });
-
-    it('should throw UnauthorizedException when no authorization header is provided', async () => {
-      // Arrange
-      mockRequest.headers = {}; // No authorization header
-
-      // Act & Assert
-      await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(UnauthorizedException);
+      expect(betterAuthService.api.getSession).not.toHaveBeenCalled();
       expect(jwtService.verifyAsync).not.toHaveBeenCalled();
     });
+  });
 
-    it('should throw UnauthorizedException when authorization header is malformed', async () => {
-      // Arrange
-      mockRequest.headers.authorization = 'InvalidFormat token';
+  describe('camino primario: sesión de better-auth', () => {
+    it('autentica con la cookie de sesión y carga el User de la app', async () => {
+      const request = mockRequest({ headers: { cookie: 'better-auth.session=abc' } });
+      betterAuthService.api.getSession.mockResolvedValue({ user: { id: 'user-1' } });
+      userRepository.findOne.mockResolvedValue(appUser);
 
-      // Act & Assert
-      await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(UnauthorizedException);
-      expect(jwtService.verifyAsync).not.toHaveBeenCalled();
-    });
-
-    it('should throw UnauthorizedException when only "Bearer" is provided without token', async () => {
-      // Arrange
-      mockRequest.headers.authorization = 'Bearer';
-
-      // Act & Assert
-      await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(UnauthorizedException);
-      expect(jwtService.verifyAsync).not.toHaveBeenCalled();
-    });
-
-    it('should throw UnauthorizedException when authorization header is empty', async () => {
-      // Arrange
-      mockRequest.headers.authorization = '';
-
-      // Act & Assert
-      await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(UnauthorizedException);
-      expect(jwtService.verifyAsync).not.toHaveBeenCalled();
-    });
-
-    it('should throw UnauthorizedException when token verification fails', async () => {
-      // Arrange
-      const invalidToken = 'invalid.jwt.token';
-      mockRequest.headers.authorization = `Bearer ${invalidToken}`;
-      jwtService.verifyAsync.mockRejectedValue(new Error('Token verification failed'));
-
-      // Act & Assert
-      await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(
-        new UnauthorizedException('Error validando el token')
-      );
-      expect(jwtService.verifyAsync).toHaveBeenCalledWith(invalidToken);
-      expect(mockRequest.user).toBeUndefined();
-    });
-
-    it('should throw UnauthorizedException when token is expired', async () => {
-      // Arrange
-      const expiredToken = 'expired.jwt.token';
-      mockRequest.headers.authorization = `Bearer ${expiredToken}`;
-      jwtService.verifyAsync.mockRejectedValue(new Error('Token expired'));
-
-      // Act & Assert
-      await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(
-        new UnauthorizedException('Error validando el token')
-      );
-      expect(jwtService.verifyAsync).toHaveBeenCalledWith(expiredToken);
-    });
-
-    it('should handle different token formats correctly', async () => {
-      // Arrange - Test with multiple spaces
-      const validToken = 'valid.jwt.token';
-      const payload = { id: '1' };
-      
-      mockRequest.headers.authorization = `Bearer  ${validToken}`; // Extra space
-      jwtService.verifyAsync.mockResolvedValue(payload);
-
-      // Act
       const result = await guard.canActivate(mockExecutionContext);
 
-      // Assert
       expect(result).toBe(true);
-      expect(jwtService.verifyAsync).toHaveBeenCalledWith(validToken);
+      expect(fromNodeHeaders).toHaveBeenCalledWith(request.headers);
+      expect(userRepository.findOne).toHaveBeenCalledWith({
+        where: { id: 'user-1' },
+        relations: ['roles', 'roles.permissions', 'family'],
+      });
+      expect(request.user).toEqual(appUser);
+      expect(jwtService.verifyAsync).not.toHaveBeenCalled();
     });
 
-    it('should not accept tokens with different scheme', async () => {
-      // Arrange
-      mockRequest.headers.authorization = 'Basic sometoken';
+    it('no usa el fallback JWT si la sesión de better-auth ya resolvió un usuario', async () => {
+      mockRequest({
+        headers: { cookie: 'better-auth.session=abc', authorization: 'Bearer some.jwt' },
+      });
+      betterAuthService.api.getSession.mockResolvedValue({ user: { id: 'user-1' } });
+      userRepository.findOne.mockResolvedValue(appUser);
 
-      // Act & Assert
+      await guard.canActivate(mockExecutionContext);
+
+      expect(jwtService.verifyAsync).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('camino fallback: JWT Bearer legacy', () => {
+    it('autentica con el JWT cuando no hay sesión de better-auth', async () => {
+      const request = mockRequest({ headers: { authorization: 'Bearer valid.jwt.token' } });
+      betterAuthService.api.getSession.mockResolvedValue(null);
+      jwtService.verifyAsync.mockResolvedValue({ id: 'user-1' });
+      userRepository.findOne.mockResolvedValue(appUser);
+
+      const result = await guard.canActivate(mockExecutionContext);
+
+      expect(result).toBe(true);
+      expect(jwtService.verifyAsync).toHaveBeenCalledWith('valid.jwt.token');
+      expect(request.user).toEqual(appUser);
+    });
+
+    it('también cae al JWT si consultar la sesión de better-auth lanza', async () => {
+      const request = mockRequest({ headers: { authorization: 'Bearer valid.jwt.token' } });
+      betterAuthService.api.getSession.mockRejectedValue(new Error('boom'));
+      jwtService.verifyAsync.mockResolvedValue({ id: 'user-1' });
+      userRepository.findOne.mockResolvedValue(appUser);
+
+      const result = await guard.canActivate(mockExecutionContext);
+
+      expect(result).toBe(true);
+      expect(request.user).toEqual(appUser);
+    });
+
+    it('lanza UnauthorizedException si el JWT es inválido', async () => {
+      mockRequest({ headers: { authorization: 'Bearer invalid.jwt.token' } });
+      betterAuthService.api.getSession.mockResolvedValue(null);
+      jwtService.verifyAsync.mockRejectedValue(new Error('invalid'));
+
+      await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(UnauthorizedException);
+    });
+  });
+
+  describe('sin credenciales', () => {
+    it('lanza UnauthorizedException cuando no hay sesión ni token', async () => {
+      mockRequest();
+      betterAuthService.api.getSession.mockResolvedValue(null);
+
       await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(UnauthorizedException);
       expect(jwtService.verifyAsync).not.toHaveBeenCalled();
     });
 
-    it('should handle case-sensitive Bearer scheme', async () => {
-      // Arrange
-      mockRequest.headers.authorization = 'bearer valid.token'; // lowercase
+    it('lanza UnauthorizedException si el authorization header está malformado', async () => {
+      mockRequest({ headers: { authorization: 'InvalidFormat token' } });
+      betterAuthService.api.getSession.mockResolvedValue(null);
 
-      // Act & Assert
       await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(UnauthorizedException);
       expect(jwtService.verifyAsync).not.toHaveBeenCalled();
     });
   });
 
-  describe('extractTokenFromHeader', () => {
-    it('should extract token correctly from valid Bearer authorization header', () => {
-      // Arrange
-      const request = {
-        headers: {
-          authorization: 'Bearer valid.jwt.token'
-        }
-      };
+  describe('usuario no encontrado tras resolver identidad', () => {
+    it('lanza UnauthorizedException si el userId resuelto no existe en la BD', async () => {
+      mockRequest({ headers: { cookie: 'better-auth.session=abc' } });
+      betterAuthService.api.getSession.mockResolvedValue({ user: { id: 'user-1' } });
+      userRepository.findOne.mockResolvedValue(null);
 
-      // Act
-      const token = (guard as any).extractTokenFromHeader(request);
-
-      // Assert
-      expect(token).toBe('valid.jwt.token');
-    });
-
-    it('should return undefined when no authorization header exists', () => {
-      // Arrange
-      const request = {
-        headers: {}
-      };
-
-      // Act
-      const token = (guard as any).extractTokenFromHeader(request);
-
-      // Assert
-      expect(token).toBeUndefined();
-    });
-
-    it('should return undefined when authorization header format is incorrect', () => {
-      // Arrange
-      const request = {
-        headers: {
-          authorization: 'InvalidFormat token'
-        }
-      };
-
-      // Act
-      const token = (guard as any).extractTokenFromHeader(request);
-
-      // Assert
-      expect(token).toBeUndefined();
+      await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(UnauthorizedException);
     });
   });
 });
