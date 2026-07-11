@@ -4,6 +4,15 @@ Registro cronológico de conversaciones, decisiones y avances. Lo más reciente 
 
 ---
 
+## 2026-07-11 (cont. 5) — Fase 0 #16: modelo User unificado ✅
+- Delegado a senior-backend-engineer (con skills), revisado y verificado por Nova.
+- `user` de better-auth = fuente de verdad (opción C). Una sola tabla `user` en `public` (TypeORM la crea con nativos + additionalFields); better-auth crea el resto vía CLI. `confirmed`→`emailVerified`; `customSession` inyecta roles/permisos.
+- Verificado: build limpio, login legacy + 5 módulos dependientes 200, sign-up + get-session con user unificado (roles/permisos). RBAC fino intacto.
+- Aristas transitorias (dual password store, disableSignUp abierto, rut/phone requeridos) documentadas en [modulos/auth-multitenant.md §12](modulos/auth-multitenant.md#12-tarea-16--modelo-user-unificado--2026-07-11-verificado). Onboarding (org+invitaciones) en §7b.
+- Documentado el modelo de onboarding: plataforma → admin de condominio → usuarios (sign-up cerrado, invitaciones del organization plugin).
+
+---
+
 ## 2026-07-11 (cont. 4) — Fase 0 arrancada: POC better-auth verificado
 - Rama `feature/fase-0-auth-multitenant`. Instaladas skills de skills.sh (`.agents/skills`, symlink a `.claude/skills`) y deps (better-auth 1.6.23 + nestjs-better-auth 2.4.0 + @better-auth/api-key).
 - **POC (delegado a senior-backend-engineer, revisado por Nova contra las skills):** better-auth montado en paralelo, no destructivo. Verificado end-to-end (build ok, sign-in con cookie httpOnly, get-session ok, auth propio intacto 401). Detalle y aristas en [modulos/auth-multitenant.md](modulos/auth-multitenant.md#11-estado-del-poc-2026-07-11--verificado).

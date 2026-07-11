@@ -114,5 +114,13 @@ better-auth quedó montado **en paralelo** al auth propio, sin romper nada. Veri
 - 🟠 **Prod:** `baseURL` con HTTPS + `useSecureCookies`; auditar `npm audit` (vulns detectadas al instalar) con cybersecurity-engineer antes de mergear.
 - 🟡 **Audit logging** vía `databaseHooks` (sesión creada/revocada) — refuerza la narrativa de seguridad de la tesis.
 
+## 12. Tarea #16 — Modelo User unificado ✅ (2026-07-11, verificado)
+El `user` de better-auth es la fuente de verdad (opción C). **Una sola tabla `user` en `public`**: TypeORM la crea (declara columnas nativas de better-auth + additionalFields `rut/phone/age/profilePicture`); better-auth crea `session/account/verification/organization/...` vía su CLI. `confirmed`→`emailVerified` nativo. `generateId: uuid` calza con las FK existentes. Plugin `customSession` inyecta `roles`+`permissions` (SQL parametrizado) en `get-session`. Verificado por Nova: build limpio, login legacy + módulos dependientes (`/users`,`/vehicles`) 200, sign-up + get-session devuelven el user unificado con roles/permisos. El RBAC fino quedó intacto.
+
+**Aristas transitorias (para #17/#18/#19):**
+- 🟠 **Dos stores de credenciales** conviven: `user.password` (legacy, AuthService JWT) y tabla `account` (better-auth). Un usuario existe en un path de login o el otro hasta que #17/#18 unifiquen. `user.password` quedó `nullable`.
+- 🔴 **`disableSignUp` sigue sin setear** — `/api/auth/sign-up/email` alcanzable. Cerrar en #18/onboarding.
+- 🟠 **`rut`/`phone` son additionalFields requeridos** → los flujos de invitación/creación por admin (#19, onboarding §7b) DEBEN proveerlos o el INSERT falla por NOT NULL. `phone` es `varchar(15)` (formato chileno `+569XXXXXXXX` = 12, cabe).
+
 ## Fuentes
 Ver informe completo en la bitácora / memoria del research (`agent-memory/deep-web-researcher/better-auth-nestjs-migration-2026.md`). Docs oficiales: better-auth.com (NestJS integration, Organization, Admin, Database, Auth0 migration, Security update June 2026), repo `ThallesP/nestjs-better-auth`, skills.sh/better-auth.
