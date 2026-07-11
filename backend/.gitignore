@@ -3,8 +3,8 @@
 /node_modules
 /build
 
-# Logs
-logs
+# Logs (solo runtime en la raiz del backend, NO src/logs que es codigo)
+/logs
 *.log
 npm-debug.log*
 pnpm-debug.log*

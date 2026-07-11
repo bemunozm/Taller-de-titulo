@@ -10,8 +10,8 @@ build/
 .env.local
 .env.*.local
 
-# Logs
-logs/
+# Logs (solo runtime en la raiz)
+/logs/
 *.log
 npm-debug.log*
 
