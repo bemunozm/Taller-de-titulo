@@ -4,6 +4,14 @@ Registro cronológico de conversaciones, decisiones y avances. Lo más reciente 
 
 ---
 
+## 2026-07-11 (cont. 6) — Fase 0 #17: AuthGuard dual-mode ✅
+- Delegado a senior-backend-engineer, revisado y verificado por Nova.
+- `AuthGuard` autentica con sesión de better-auth (cookie) primario + JWT Bearer legacy fallback; ambos cargan el User con roles/permisos. RBAC fino intacto.
+- Verificado: legacy 200/401/401, cookie better-auth 403(sin rol)/200(con rol Super Admin). Build limpio.
+- Deuda para #21: Jest roto por imports ESM-only de la lib (baseline ya estaba rojo). Ver [modulos/auth-multitenant.md §13](modulos/auth-multitenant.md#13-tarea-17--authguard-dual-mode--2026-07-11-verificado).
+
+---
+
 ## 2026-07-11 (cont. 5) — Fase 0 #16: modelo User unificado ✅
 - Delegado a senior-backend-engineer (con skills), revisado y verificado por Nova.
 - `user` de better-auth = fuente de verdad (opción C). Una sola tabla `user` en `public` (TypeORM la crea con nativos + additionalFields); better-auth crea el resto vía CLI. `confirmed`→`emailVerified`; `customSession` inyecta roles/permisos.

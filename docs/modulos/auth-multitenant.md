@@ -122,5 +122,10 @@ El `user` de better-auth es la fuente de verdad (opción C). **Una sola tabla `u
 - 🔴 **`disableSignUp` sigue sin setear** — `/api/auth/sign-up/email` alcanzable. Cerrar en #18/onboarding.
 - 🟠 **`rut`/`phone` son additionalFields requeridos** → los flujos de invitación/creación por admin (#19, onboarding §7b) DEBEN proveerlos o el INSERT falla por NOT NULL. `phone` es `varchar(15)` (formato chileno `+569XXXXXXXX` = 12, cabe).
 
+## 13. Tarea #17 — AuthGuard dual-mode ✅ (2026-07-11, verificado)
+`src/auth/auth.guard.ts` reescrito: autentica vía **sesión de better-auth (cookie)** como primario y **JWT Bearer legacy** como fallback (`??`); en ambos caminos carga el User completo (roles.permissions.family) → `request.user`. `AuthorizationGuard` + los 114 `@RequirePermissions` + `@Public` intactos. Verificado por Nova: legacy 200/401/401, cookie better-auth 403(sin rol)/200(con rol). Build limpio.
+- **Modo dual = transitorio:** #20 migra el frontend a cookies; #21 retira el fallback JWT.
+- 🔴 **Deuda Jest/ESM (para #21):** `@thallesp/nestjs-better-auth` importa subpaths ESM-only de better-auth → Jest no puede parsear specs que importen `auth.guard.ts` (Node 22 sí, la app y el build funcionan). El suite ya estaba 100% rojo en baseline por otras razones. Arreglar la config de Jest (transform/ESM) antes de escribir tests de auth.
+
 ## Fuentes
 Ver informe completo en la bitácora / memoria del research (`agent-memory/deep-web-researcher/better-auth-nestjs-migration-2026.md`). Docs oficiales: better-auth.com (NestJS integration, Organization, Admin, Database, Auth0 migration, Security update June 2026), repo `ThallesP/nestjs-better-auth`, skills.sh/better-auth.
