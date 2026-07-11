@@ -1,9 +1,11 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Request, UseGuards, UseInterceptors, UploadedFile } from "@nestjs/common";
-import { ApiTags, ApiOperation, ApiResponse, ApiBody, ApiBearerAuth, ApiUnauthorizedResponse, ApiBadRequestResponse, ApiNotFoundResponse, ApiConsumes } from "@nestjs/swagger";
+import { ApiTags, ApiOperation, ApiResponse, ApiBody, ApiBearerAuth, ApiUnauthorizedResponse, ApiBadRequestResponse, ApiNotFoundResponse, ApiForbiddenResponse, ApiConsumes } from "@nestjs/swagger";
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { AuthService } from "./auth.service";
 import { AuthGuard } from "./auth.guard";
+import { AuthorizationGuard } from "./guards/authorization.guard";
+import { RequirePermissions } from "./decorators/permissions.decorator";
 import { LoginDto } from "./dto/login.dto";
 import { RegisterDto } from "./dto/register.dto";
 import { ConfirmAccountDto } from "./dto/confirm-account.dto";
@@ -15,6 +17,7 @@ import { UpdateProfileDto } from "./dto/update-profile.dto";
 import { UpdateCurrentUserPasswordDto } from "./dto/update-current-user-password.dto";
 import { CheckPasswordDto } from "./dto/check-password.dto";
 import { CreateServiceTokenDto } from "./dto/create-service-token.dto";
+import { CreateServiceApiKeyDto } from "./dto/create-service-api-key.dto";
 import { AuthEmailService } from "./services/auth-email.service";
 import { Auditable } from "../audit/decorators/auditable.decorator";
 import { AuditModule, AuditAction } from "../audit/entities/audit-log.entity";
@@ -178,25 +181,15 @@ export class AuthController {
   @Post("forgot-password")
   @ApiOperation({
     summary: 'Solicitar recuperación de contraseña',
-    description: 'Inicia el proceso de recuperación de contraseña enviando un token por email.'
+    description: 'Inicia el proceso de recuperación de contraseña vía better-auth (tarea #18). ' +
+      'Por diseño (anti-enumeración) SIEMPRE responde 200 con un mensaje genérico, exista o no el email.'
   })
   @ApiResponse({
     status: 200,
-    description: 'Email de recuperación enviado',
+    description: 'Respuesta genérica (no revela si el email existe)',
     schema: {
       type: 'string',
-      example: 'Instrucciones de recuperación enviadas. Revisa tu email para restablecer tu contraseña de forma segura.'
-    }
-  })
-  @ApiNotFoundResponse({
-    description: 'Usuario no encontrado',
-    schema: {
-      type: 'object',
-      properties: {
-        message: { type: 'string', example: 'El Usuario no existe' },
-        error: { type: 'string', example: 'Not Found' },
-        statusCode: { type: 'number', example: 404 }
-      }
+      example: 'Si el correo existe en nuestro sistema, revisa tu email para restablecer tu contraseña de forma segura.'
     }
   })
   @ApiBody({ type: ForgotPasswordDto })
@@ -474,6 +467,12 @@ export class AuthController {
     return this.authService.deleteProfilePicture(req.user.id);
   }
 
+  /**
+   * @deprecated Tarea #18: reemplazado por `service-api-keys` (plugin
+   * `apiKey` de better-auth) más abajo. Se mantiene funcionando por
+   * compatibilidad mínima — candidato a retiro completo en #21 (hoy no lo
+   * consume ni el frontend ni el worker LPR).
+   */
   @Post("create-service-token")
   @UseGuards(AuthGuard)
   @ApiBearerAuth()
@@ -486,8 +485,9 @@ export class AuthController {
     captureRequest: true
   })
   @ApiOperation({
-    summary: 'Crear token de servicio de larga duración (Solo Admin)',
-    description: 'Genera un JWT con mayor duración para servicios automatizados. Solo disponible para administradores.'
+    summary: '[DEPRECADO] Crear token de servicio JWT de larga duración (Solo Admin)',
+    description: 'DEPRECADO (tarea #18) — usar POST /auth/service-api-keys en su lugar. ' +
+      'Genera un JWT con mayor duración para servicios automatizados. Solo disponible para administradores.'
   })
   @ApiResponse({
     status: 200,
@@ -509,5 +509,51 @@ export class AuthController {
   createServiceToken(@Request() req, @Body() createServiceTokenDto: CreateServiceTokenDto) {
     const { duration, description } = createServiceTokenDto;
     return this.authService.createServiceToken(req.user.id, duration, description);
+  }
+
+  @Post("service-api-keys")
+  @UseGuards(AuthGuard, AuthorizationGuard)
+  @RequirePermissions('auth.manage-service-tokens')
+  @ApiBearerAuth()
+  @Auditable({
+    module: AuditModule.AUTH,
+    action: AuditAction.CREATE,
+    entityType: 'ApiKey',
+    description: 'API key de servicio creada (better-auth apiKey plugin)',
+    captureResponse: false,
+    captureRequest: true
+  })
+  @ApiOperation({
+    summary: 'Crear API key de servicio para credenciales de máquina (Solo Admin)',
+    description: 'Tarea #18 (docs/modulos/auth-multitenant.md §10.3): genera una API key vía el plugin ' +
+      '`apiKey` de better-auth, pensada para el worker LPR y otros servicios automatizados. ' +
+      'El worker debe enviarla en el header `x-api-key` en cada request (default de better-auth). ' +
+      'La key en texto plano SOLO se muestra en esta respuesta — better-auth solo guarda su hash. ' +
+      'Requiere el permiso "auth.manage-service-tokens".'
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'API key creada exitosamente',
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', example: 'apikey-uuid-123' },
+        key: { type: 'string', example: 'ta_live_abc123...', description: 'Copiar ahora — no se vuelve a mostrar' },
+        name: { type: 'string', example: 'LPR Worker Manager' },
+        prefix: { type: 'string', example: 'ta_live_', nullable: true },
+        start: { type: 'string', example: 'ta_live_ab', nullable: true },
+        ownerUserId: { type: 'string', format: 'uuid' },
+        ownerEmail: { type: 'string', example: 'admin@example.com' },
+        expiresAt: { type: 'string', format: 'date-time', nullable: true },
+        createdAt: { type: 'string', format: 'date-time' }
+      }
+    }
+  })
+  @ApiUnauthorizedResponse({ description: 'Token inválido o expirado' })
+  @ApiForbiddenResponse({ description: 'No tiene el permiso "auth.manage-service-tokens"' })
+  @ApiNotFoundResponse({ description: 'El usuario dueño de la key (targetUserId) no existe' })
+  @ApiBody({ type: CreateServiceApiKeyDto })
+  createServiceApiKey(@Request() req, @Body() createServiceApiKeyDto: CreateServiceApiKeyDto) {
+    return this.authService.createServiceApiKey(req.user.id, createServiceApiKeyDto);
   }
 }

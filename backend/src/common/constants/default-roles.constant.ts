@@ -26,6 +26,9 @@ export const DEFAULT_ROLES: RoleDefinition[] = [
     name: 'Administrador',
     description: 'Gestión completa de usuarios, roles, familias y configuraciones',
     permissions: [
+      // Autenticación (credenciales de servicio)
+      'auth.manage-service-tokens',
+
       // Gestión de usuarios
       'users.create',
       'users.read',
@@ -225,6 +228,9 @@ export const DEFAULT_ROLES: RoleDefinition[] = [
     name: 'Desarrollador',
     description: 'Acceso técnico para desarrollo y mantenimiento del sistema',
     permissions: [
+      // Autenticación (credenciales de servicio)
+      'auth.manage-service-tokens',
+
       // Acceso total a configuraciones
       'admin.dashboard',
       'admin.settings',

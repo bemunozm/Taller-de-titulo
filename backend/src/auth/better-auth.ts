@@ -11,7 +11,13 @@ import { organization } from 'better-auth/plugins/organization';
 import { customSession } from 'better-auth/plugins/custom-session';
 import { apiKey } from '@better-auth/api-key';
 import { Pool } from 'pg';
+import * as nodemailer from 'nodemailer';
 import { hashPassword, checkPassword } from './utils/auth.util';
+import {
+  buildAccountVerificationEmailHtml,
+  buildPasswordResetEmailHtml,
+  buildWelcomeAfterVerificationEmailHtml,
+} from './templates/better-auth-email.templates';
 
 /**
  * Auth — Fase 0 "Auth robusta + Multi-tenant" (docs/modulos/auth-multitenant.md).
@@ -55,12 +61,38 @@ import { hashPassword, checkPassword } from './utils/auth.util';
  *   (Token.userId, Vehicle.ownerId, Notification.recipientId, etc.) — así no
  *   hay que tocar esos 5+ módulos dependientes.
  *
- * Riesgo abierto (documentado para #17/#18, ver docs sección 11): `password`
- * sigue siendo una columna legacy fuera del modelo de better-auth (que guarda
- * su propio hash en `account`), y `disableSignUp` no está seteado todavía —
- * `/api/auth/sign-up/email` es alcanzable hoy pero fallará si no llegan
- * `rut`/`phone` (additionalFields requeridos, reflejando las columnas
- * NOT NULL). Cerrar junto con el resto del checklist de seguridad del POC.
+ * Tarea #18 (docs sección 11/12/13, cierre del checklist de seguridad del
+ * POC) — auth robusta + cierre de sign-up:
+ * - `disableSignUp: true` cierra `/api/auth/sign-up/email` (política
+ *   admin-only/invitaciones, doc §7b). Las cuentas nacen por
+ *   `UsersService.createAccountByAdmin` (src/users/users.service.ts), que
+ *   ahora dispara `auth.api.requestPasswordReset` para que el usuario
+ *   establezca su propia contraseña (reusa el flujo `sendResetPassword` de
+ *   abajo, con copy distinto para "cuenta nueva" — ver
+ *   `buildPasswordResetEmailHtml`).
+ * - `emailVerification`/`emailAndPassword.sendResetPassword` reemplazan los
+ *   códigos de 6 dígitos propios (tabla `Token`, `src/tokens`) para
+ *   confirm-account/forgot-password/reset-password (ver AuthController/
+ *   AuthService). La tabla `Token` NO se retira todavía (queda para #21,
+ *   otros módulos aún podrían depender de `TokensService`).
+ * - **Bridge `user.password` (arista de sincronización, ver RESTRICCIÓN
+ *   CRÍTICA de la tarea #18):** el login legacy (`/api/v1/auth/login`, JWT,
+ *   AuthService.login) sigue leyendo `user.password` (columna propia), pero
+ *   better-auth guarda su hash en `account.password` (tabla separada). Para
+ *   que ambos caminos de login sigan viendo la MISMA contraseña tras un
+ *   reset/activación vía better-auth, `emailAndPassword.onPasswordReset`
+ *   (abajo) copia el hash recién escrito en `account` hacia `user.password`
+ *   con una query SQL directa sobre el mismo `pool`. Es el ÚNICO punto de
+ *   sincronización cableado hoy (cubre forgot-password, reset-password y la
+ *   activación de cuentas nuevas — todos pasan por `resetPassword`).
+ *   `databaseHooks.account.create.after` es un segundo bridge, más liviano,
+ *   para cualquier OTRO flujo futuro que cree una cuenta credential por fuera
+ *   de `resetPassword` (p.ej. invitaciones de organization en #19).
+ *   **Limitación transitoria documentada:** `changePassword`/`setPassword`
+ *   nativos de better-auth (cambio de password con sesión activa) NO están
+ *   expuestos todavía (no hay UI/endpoint que los dispare) y por lo tanto no
+ *   tienen bridge propio — si se cablean en una fase futura, agregar su
+ *   sincronización aquí también (mismo patrón).
  */
 const pool = new Pool({
   host: process.env.DB_HOST,
@@ -81,6 +113,76 @@ interface RolePermissionRow {
   role_id: string;
   role_name: string;
   permission_name: string | null;
+}
+
+/**
+ * Transporter de nodemailer construido "a mano" (mismo motivo que el
+ * `pg.Pool` de arriba: este archivo no tiene DI de Nest, así que no puede
+ * inyectar `MailerService`). Mismos env vars que `MailerModule.forRootAsync`
+ * en src/auth/auth.module.ts — se reusa la config SMTP existente, solo que
+ * sin pasar por Nest.
+ */
+let mailTransporter: nodemailer.Transporter | null = null;
+function getMailTransporter(): nodemailer.Transporter {
+  if (!mailTransporter) {
+    mailTransporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : undefined,
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    });
+  }
+  return mailTransporter;
+}
+
+/**
+ * Envía un email de los hooks de better-auth. No relanza el error: si SMTP no
+ * está configurado (dev) el flujo de auth (verificación/reset) no debe
+ * romperse por eso — se loguea y sigue (mismo criterio "best effort" que
+ * AuthEmailService, que también atrapa y loguea sin design para dev sin SMTP).
+ */
+async function sendAuthEmail(to: string, subject: string, html: string): Promise<void> {
+  try {
+    await getMailTransporter().sendMail({
+      from: 'UpTask <admin@uptask.com>',
+      to,
+      subject,
+      html,
+    });
+    console.log(`[better-auth] Email "${subject}" enviado a ${to}`);
+  } catch (error) {
+    console.error(`[better-auth] Error enviando email "${subject}" a ${to}:`, error);
+  }
+}
+
+/**
+ * Bridge de sincronización `account.password` (better-auth, hash bcrypt vía
+ * el override de arriba) → `user.password` (columna legacy que sigue leyendo
+ * el login JWT propio). Ver docstring de la clase para el detalle de cuándo
+ * se invoca. Query directa sobre el mismo `pool` — no hay TypeORM disponible
+ * en este archivo.
+ */
+async function syncPasswordToLegacyUserColumn(userId: string): Promise<void> {
+  try {
+    const { rows } = await pool.query<{ password: string | null }>(
+      `SELECT password FROM account WHERE "userId" = $1 AND "providerId" = 'credential' LIMIT 1`,
+      [userId],
+    );
+    const hash = rows[0]?.password;
+    if (!hash) {
+      return;
+    }
+    await pool.query(`UPDATE "user" SET password = $1 WHERE id = $2`, [hash, userId]);
+  } catch (error) {
+    // No relanzamos: si el bridge falla, el usuario igual pudo resetear su
+    // password vía better-auth (camino nuevo funciona); solo el login legacy
+    // quedaría desincronizado hasta el próximo reset. Se loguea para que no
+    // pase desapercibido.
+    console.error(`[better-auth] Error sincronizando user.password (bridge) para userId=${userId}:`, error);
+  }
 }
 
 export const auth = betterAuth({
@@ -107,6 +209,9 @@ export const auth = betterAuth({
   },
   emailAndPassword: {
     enabled: true,
+    // Tarea #18 (doc §7b/§11): NADIE se auto-registra. Las cuentas nacen por
+    // UsersService.createAccountByAdmin (admin-only) — ver docstring arriba.
+    disableSignUp: true,
     // better-auth usa scrypt por defecto. Override a bcrypt reutilizando el
     // mismo hashing que el auth propio (src/auth/utils/auth.util.ts) para
     // mantener compatibilidad futura cuando se reconcilien los modelos de User.
@@ -114,14 +219,80 @@ export const auth = betterAuth({
       hash: (password) => hashPassword(password),
       verify: ({ hash, password }) => checkPassword(password, hash),
     },
+    // Tarea #18: reemplaza el flujo propio de forgot-password/reset-password
+    // (tokens de 6 dígitos, tabla Token) — usado tanto por
+    // AuthController.forgotPassword como por AuthService.login (cuenta no
+    // activada) y UsersService.createAccountByAdmin (activación inicial),
+    // todos vía `auth.api.requestPasswordReset`. `isNewAccount` distingue el
+    // copy sin necesitar un hook separado (ver template).
+    sendResetPassword: async ({ user, url }) => {
+      const { rows } = await pool.query<{ exists: boolean }>(
+        `SELECT EXISTS(SELECT 1 FROM account WHERE "userId" = $1 AND "providerId" = 'credential') AS exists`,
+        [user.id],
+      );
+      const isNewAccount = !rows[0]?.exists;
+      const html = buildPasswordResetEmailHtml(user.name, url, isNewAccount);
+      const subject = isNewAccount
+        ? '🎉 Establece tu contraseña - Taller de Título'
+        : '🔐 Restablece tu contraseña - Taller de Título';
+      await sendAuthEmail(user.email, subject, html);
+    },
+    // Bridge user.password (ver docstring de la clase) — se ejecuta luego de
+    // que better-auth ya escribió el hash en `account` (create o update,
+    // ambos casos), así que una relectura simple alcanza sin importar cuál de
+    // los dos caminos internos tomó `resetPassword`.
+    onPasswordReset: async ({ user }) => {
+      await syncPasswordToLegacyUserColumn(user.id);
+    },
+  },
+  // Tarea #18: reemplaza los códigos de 6 dígitos propios de
+  // confirm-account/request-code (AuthController) por la verificación nativa
+  // de better-auth. `user.emailVerified` es la MISMA columna que ya leía el
+  // login legacy (doc §12), así que ambos caminos quedan consistentes.
+  emailVerification: {
+    sendVerificationEmail: async ({ user, url }) => {
+      const html = buildAccountVerificationEmailHtml(user.name, url);
+      await sendAuthEmail(user.email, '✨ Confirma tu cuenta - Taller de Título', html);
+    },
+    // Reemplaza el "email de bienvenida" que antes disparaba
+    // AuthService.confirmAccount tras marcar el Token como usado. A
+    // diferencia de la respuesta de `verifyEmail` (que en el caso normal NO
+    // trae el usuario, solo `{status: true, user: null}`), este hook SÍ
+    // recibe la fila actualizada.
+    afterEmailVerification: async (user) => {
+      const html = buildWelcomeAfterVerificationEmailHtml(user.name, frontendUrl);
+      await sendAuthEmail(user.email, '🎉 ¡Cuenta confirmada! - Taller de Título', html);
+    },
+  },
+  // Segundo bridge de user.password (ver docstring de la clase): cubre
+  // cualquier creación de cuenta `credential` que NO pase por
+  // `resetPassword` (p.ej. futuras invitaciones de organization, #19).
+  // `created` trae la fila completa (a diferencia de `update`, que en
+  // better-auth 1.6.x solo expone el COUNT de filas afectadas — por eso el
+  // bridge principal de arriba usa `onPasswordReset` + relectura en vez de
+  // `databaseHooks.account.update.after`).
+  databaseHooks: {
+    account: {
+      create: {
+        after: async (created: { providerId: string; userId: string; password?: string | null }) => {
+          if (created.providerId !== 'credential' || !created.password) {
+            return;
+          }
+          await syncPasswordToLegacyUserColumn(created.userId);
+        },
+      },
+    },
   },
   plugins: [
     // tenant = condominio (decisión cerrada, doc sección 10.4). Sin config
     // adicional por ahora: se deja montado para las fases siguientes.
     organization(),
     // service-token para el worker LPR (decisión cerrada, doc sección 10.3).
-    // Sin config adicional por ahora: se deja montado para las fases siguientes.
-    apiKey(),
+    // `enableMetadata: true` (default es false) porque
+    // AuthService.createServiceApiKey guarda `description`/`createdBy` ahí
+    // para trazabilidad — sin esto el plugin rechaza la creación con
+    // "Metadata is disabled" (400, METADATA_DISABLED).
+    apiKey({ enableMetadata: true }),
     // Tarea #16, punto 5: inyecta roles + permisos (RBAC fino app-side, tabla
     // Permission/Role via user_roles_role y role_permissions_permission) en la
     // respuesta de /api/auth/get-session, para que la tarea #17 (swap de

@@ -13,11 +13,14 @@ export interface PermissionDefinition {
 
 export const DEFAULT_PERMISSIONS: PermissionDefinition[] = [
   // ============================================
-  // NOTA: El módulo de autenticación (auth) NO tiene permisos porque:
-  // - Las rutas de registro/login/recuperación son PÚBLICAS por diseño
-  // - Las rutas de perfil están protegidas solo con AuthGuard (cualquier usuario autenticado)
-  // - No se requiere control granular de permisos en este módulo
+  // AUTENTICACIÓN
+  // NOTA: la mayoría de rutas de auth (registro/login/recuperación) son
+  // PÚBLICAS por diseño, y las de perfil solo requieren AuthGuard (cualquier
+  // usuario autenticado) — no necesitan permiso granular. La EXCEPCIÓN es la
+  // gestión de credenciales de máquina (API keys de servicio, tarea #18,
+  // docs/modulos/auth-multitenant.md §10.3), que sí es sensible y admin-only.
   // ============================================
+  { name: 'auth.manage-service-tokens', description: 'Generar API keys de servicio para credenciales de máquina', module: 'auth', action: 'manage-service-tokens' },
 
   // ============================================
   // GESTIÓN DE USUARIOS
