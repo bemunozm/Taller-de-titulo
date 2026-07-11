@@ -103,7 +103,7 @@ export const userSchema = z.object({
     email: z.string().email(),
     phone: z.string().max(15),
     password: z.string().optional(), // Opcional porque no siempre se incluye en las respuestas
-    age: z.number().int().positive().optional(),
+    age: z.number().int().positive().nullable().optional(),
     profilePicture: z.string().nullable().optional(),
     confirmed: z.boolean().default(false),
     createdAt: z.string().transform((date) => new Date(date)),
