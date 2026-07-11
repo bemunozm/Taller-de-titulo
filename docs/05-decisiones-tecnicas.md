@@ -68,6 +68,11 @@ Decisiones abiertas y en discusión. Formato mini-ADR. Estado: 🟢 decidido · 
 
 **Riesgo asumido:** re-homar los flujos actuales (register/confirm/forgot/reset/profile/service-token/email) al modelo de better-auth. Bounded, y más barato ahora que con datos.
 
+**Resultado del research (jul-2026) — camino elegido:**
+- **Stack:** lib community `@thallesp/nestjs-better-auth` (v2.7.0, activa) **+** las skills de skills.sh (agent-skills, se usan junto con la lib). NO montar el handler vanilla.
+- **Enfoque híbrido (confirmado por el mapa de auth):** better-auth para identidad/sesión/**organización (=condominio)**/roles gruesos; el **RBAC fino (79 permisos) queda app-side intacto** (`AuthorizationGuard` + `@RequirePermissions`, 114 usos, no se tocan). Poblar permisos en la sesión con `customSession`.
+- **Diseño + plan completo:** ver [modulos/auth-multitenant.md](modulos/auth-multitenant.md). Decisiones abiertas ahí: modelo User (A vs C), sesión (cookies vs stateless), service-token, teams.
+
 ---
 
 ## D5 — Cloud vs Edge (define el modelo de negocio) 🟡

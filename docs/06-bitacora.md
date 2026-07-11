@@ -4,6 +4,13 @@ Registro cronológico de conversaciones, decisiones y avances. Lo más reciente 
 
 ---
 
+## 2026-07-11 (cont. 3) — Research better-auth + mapa de auth → diseño Fase 0
+- **Research (deep-web-researcher, jul-2026):** la lib `@thallesp/nestjs-better-auth` está sana (v2.7.0, 4-jul-2026); las skills de skills.sh son agent-skills que se usan junto con la lib. Recomendación: lib community + skills, NO vanilla. Organization plugin = tenant; RBAC fino mejor app-side (customSession). CVEs parchadas en jun-2026 → pinnear versión.
+- **Mapa de auth (codebase-explorer):** hallazgo clave = el RBAC es SEPARABLE de la autenticación (`AuthorizationGuard` solo lee `request.user`), así que se reemplaza solo la capa de sesión y se conservan los 114 usos de `@RequirePermissions`. Blast radius acotado.
+- **Entregable:** [modulos/auth-multitenant.md](modulos/auth-multitenant.md) — diseño + plan de migración de la Fase 0, con 4 decisiones abiertas para Benjamin (modelo User, sesión, service-token, teams).
+
+---
+
 ## 2026-07-11 (cont. 2) — better-auth pasa a ser Fase 0
 - **Decisión:** migrar a **better-auth** como **Fase 0 (fundacional)** para cerrar auth robusta + multi-tenant desde el inicio, y que el agente-cerebro nazca tenant-aware. Se aprovecha que hoy hay ~cero datos (migración barata).
 - **Guardia de tech lead:** POC primero (fit NestJS + mapeo de los 79 permisos) y **timebox**, para no comerse el runway de septiembre (donde vive el agente, el diferenciador).
