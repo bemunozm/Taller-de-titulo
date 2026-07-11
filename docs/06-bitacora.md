@@ -4,6 +4,15 @@ Registro cronológico de conversaciones, decisiones y avances. Lo más reciente 
 
 ---
 
+## 2026-07-11 (cont. 7) — Fase 0 #18: flujos + apiKey + disableSignUp ✅
+- Delegado a senior-backend-engineer, revisado y verificado por Nova.
+- Sign-up cerrado (`disableSignUp`), flujos forgot/reset/confirm migrados a better-auth, emails re-cableados, bridge `user.password` que mantiene el login legacy vivo, service-token vía apiKey.
+- Verificado: login legacy + módulos 200, sign-up 400, apiKey endpoint 201. Build limpio.
+- Detalle y deudas (#21: retro-assign de permisos, retirar Token/createServiceToken legacy, Jest/ESM) en [modulos/auth-multitenant.md §14](modulos/auth-multitenant.md#14-tarea-18--flujos-de-cuenta--apikey--disablesignup--2026-07-11-verificado).
+- **Fase 0: 4/7 tareas hechas (#15–#18). Faltan #19 (multi-tenant/organization), #20 (frontend cookies), #21 (cleanup+seguridad+tests).**
+
+---
+
 ## 2026-07-11 (cont. 6) — Fase 0 #17: AuthGuard dual-mode ✅
 - Delegado a senior-backend-engineer, revisado y verificado por Nova.
 - `AuthGuard` autentica con sesión de better-auth (cookie) primario + JWT Bearer legacy fallback; ambos cargan el User con roles/permisos. RBAC fino intacto.

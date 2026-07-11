@@ -127,5 +127,13 @@ El `user` de better-auth es la fuente de verdad (opción C). **Una sola tabla `u
 - **Modo dual = transitorio:** #20 migra el frontend a cookies; #21 retira el fallback JWT.
 - 🔴 **Deuda Jest/ESM (para #21):** `@thallesp/nestjs-better-auth` importa subpaths ESM-only de better-auth → Jest no puede parsear specs que importen `auth.guard.ts` (Node 22 sí, la app y el build funcionan). El suite ya estaba 100% rojo en baseline por otras razones. Arreglar la config de Jest (transform/ESM) antes de escribir tests de auth.
 
+## 14. Tarea #18 — Flujos de cuenta + apiKey + disableSignUp ✅ (2026-07-11, verificado)
+- **`disableSignUp: true`** → `/api/auth/sign-up/email` cerrado (400). Cuentas nacen por `UsersService.createAccountByAdmin` (admin-only) que dispara `requestPasswordReset` para que el usuario ponga su clave.
+- **Flujos migrados a better-auth:** forgot/reset → `requestPasswordReset`/`resetPassword`; confirm/verify email → `verifyEmail`/`sendVerificationEmail`. Emails re-cableados a `src/auth/templates/better-auth-email.templates.ts` (nodemailer directo, sin DI). `forgot-password` ahora responde 200 genérico (anti-enumeración).
+- **Bridge `user.password`** (mantiene vivo el login legacy hasta #20): `onPasswordReset` + `databaseHooks.account.create.after` espejan `account.password` → `user.password` (mismo hash bcrypt). Verificado: tras reset, login legacy funciona con la clave nueva. Limitación transitoria: `changePassword/setPassword` nativos aún no expuestos → sin bridge propio hasta que se cableen.
+- **Service-token:** plugin `apiKey({enableMetadata:true})`; endpoint admin `POST /api/v1/auth/service-api-keys` (perm nuevo `auth.manage-service-tokens`). `createServiceToken` legacy → `@deprecated`.
+- Verificado por Nova: build limpio, login legacy + módulos 200, sign-up 400, apiKey 201.
+- 🟠 **Deuda (para #21):** `DataInitializationService` NO retro-asigna permisos nuevos a roles ya sembrados (solo si `role.permissions.length===0`) — Super Admin sí (dinámico), pero Administrador/Desarrollador no reciben `auth.manage-service-tokens` en re-seed. Falta un backfill/migration para permisos nuevos.
+
 ## Fuentes
 Ver informe completo en la bitácora / memoria del research (`agent-memory/deep-web-researcher/better-auth-nestjs-migration-2026.md`). Docs oficiales: better-auth.com (NestJS integration, Organization, Admin, Database, Auth0 migration, Security update June 2026), repo `ThallesP/nestjs-better-auth`, skills.sh/better-auth.
