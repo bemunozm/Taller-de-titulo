@@ -60,6 +60,23 @@ better-auth default = **cookies httpOnly + server session** (lookup en DB). Es m
 - **Tenant scoping en datos:** agregar `organizationId` a las entidades de dominio (vehículos, visitas, detecciones, cámaras, notificaciones, hubs) + un interceptor/guard que filtre por el tenant activo. Es el grueso del trabajo de aislamiento.
 - `dynamicAccessControl` solo si cada condominio necesitara roles propios en runtime (por ahora, no).
 
+## 7b. Onboarding y creación de cuentas (modelo de negocio)
+**Política: NADIE se auto-registra** (`disableSignUp: true`). Las cuentas se crean en cascada, tal como Benjamin lo tenía pensado — y better-auth lo da nativo:
+
+```
+Plataforma (super-admin / nosotros)
+  └─ crea el Condominio (organization) + su Administrador (owner de la org)
+        └─ el Admin del condominio crea/invita a SUS usuarios
+              (residentes, conserjes) DENTRO de su organization
+```
+
+Mecanismos de better-auth (organization + admin plugin):
+- **Invitaciones** (`organization.inviteMember({ email, role })`): email al invitado → acepta y establece su contraseña. Tablas `invitation`/`member` ya vienen con el plugin.
+- **Creación directa por admin** (admin plugin / API server-side): el admin crea la cuenta y el usuario la activa con un link de "establecer contraseña" (reutiliza el flujo de verification/reset).
+- **Roles de la organización** (owner/admin/member, customizables) → se mapean a: Admin-condominio / Conserje / Residente.
+
+Esto **reemplaza** el `/auth/register` deshabilitado y el "cuenta creada por admin" propio (`sendAccountCreatedByAdminEmail`). Se materializa en las fases de **organization (tenant)** + **flujos**. Guía: skill `organization-best-practices`.
+
 ## 8. Plan de migración (por pasos, cadencia en días)
 1. **Spike/POC:** instalar `nestjs-better-auth` + skills; levantar auth email+password con bcrypt override; verificar body-parser deshabilitado y coexistencia con TypeORM (schema separado o tabla compartida).
 2. **Modelo User:** implementar opción C (o A si el POC lo pide); enlazar roles/permisos; poblar `request.user` con permisos (customSession).
