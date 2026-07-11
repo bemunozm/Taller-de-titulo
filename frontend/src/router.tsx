@@ -108,11 +108,13 @@ import UnitsView from "./views/UnitsView";
 import CamerasView from "./views/CamerasView";
 import PrivacyPolicyView from "./views/PrivacyPolicyView";
 import ShareFeedbackView from "./views/ShareFeedbackView";
+import LandingPage from "./views/LandingPage";
 
 export default function Router() {
   return (
     <BrowserRouter>
       <Routes>
+        <Route path="/" element={<LandingPage />} />
         <Route
           element={
             <StackedLayout
@@ -246,11 +248,9 @@ export default function Router() {
             } 
           />
           
-          {/* Home / Dashboard Residente - Ruta por defecto */}
           <Route 
-            path="/" 
+            path="/resident" 
             element={<ResidentDashboardView />} 
-            index 
           />
           
           {/* Gestión de Familias */}

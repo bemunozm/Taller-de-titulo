@@ -97,6 +97,10 @@ export class DigitalConciergeService {
           result = await this.notifyResident(session, parameters as { residentes_ids: string[] });
           break;
 
+        case 'reenviar_notificacion':
+          result = await this.resendNotification(session);
+          break;
+
         default:
           throw new BadRequestException(`Unknown tool: ${toolName}`);
       }
@@ -591,6 +595,92 @@ export class DigitalConciergeService {
         notificado: false,
         mensaje: 'Error al enviar la notificación. Por favor intente nuevamente.',
       };
+    }
+  }
+
+  /**
+   * Reenvía la notificación a los residentes que ya estaban en la lista (si hubo timeout)
+   */
+  private async resendNotification(session: ConciergeSession) {
+    this.logger.debug(`Resending notification for session: ${session.sessionId}`);
+
+    if (!session.residentsNotified || session.residentsNotified.length === 0) {
+      return {
+        reenviado: false,
+        mensaje: "No hay residentes previos a quienes reenviar la notificación.",
+      };
+    }
+
+    try {
+      await Promise.all(
+        session.residentsNotified.map(resident => 
+          this.notificationsService.notifyVisitorArrival(
+            resident.id,
+            session.sessionId,
+            {
+              name: session.visitorName || 'Visitante',
+              rut: session.visitorRut ?? undefined,
+              phone: session.visitorPhone ?? undefined,
+              plate: session.vehiclePlate ?? undefined,
+              reason: session.visitReason ?? undefined,
+            },
+          )
+        )
+      );
+
+      this.logger.log(`📬 Notificaciones reenviadas a ${session.residentsNotified.length} residentes`);
+
+      return {
+        reenviado: true,
+        mensaje: "Notificación reenviada. Diles que vas a seguir esperando un momento.",
+      };
+    } catch (error) {
+      this.logger.error(`Error resending notification: ${error.message}`);
+      return {
+        reenviado: false,
+        mensaje: "Hubo un error al intentar reenviar la notificación.",
+      };
+    }
+  }
+
+  /**
+   * Genera el string de contexto de historial para inyectar en el Prompt de IA
+   */
+  async getHouseContext(houseNumber: string): Promise<string> {
+    try {
+      const family = await this.familiesService.findByDepartment(houseNumber);
+      if (!family) {
+        return 'Sin contexto histórico previo para esta casa.';
+      }
+
+      const visits = await this.visitsService.findAll({ familyId: family.id });
+      const today = new Date();
+      
+      // Filtrar pre-aprobadas para hoy
+      const preAprobadas = visits.filter(v => 
+        v.status === VisitStatus.PENDING && 
+        new Date(v.validFrom) <= today && 
+        new Date(v.validUntil) >= today
+      );
+
+      // Frecuentes (COMPLETED)
+      const frecuentes = visits.filter(v => v.status === VisitStatus.COMPLETED);
+      
+      // Obtener nombres únicos (hasta 5)
+      const nombresFrecuentes = Array.from(new Set(frecuentes.map(v => v.visitorName))).filter(n => n).slice(0, 5);
+
+      let contextStr = '';
+      if (preAprobadas.length > 0) {
+        contextStr += `ATENCIÓN - VISITAS PRE-APROBADAS HOY (Tienen pase directo): ${preAprobadas.map(v => v.visitorName).join(', ')}. `;
+      }
+      if (nombresFrecuentes.length > 0) {
+        contextStr += `VISITANTES FRECUENTES (Reconócelos amistosamente): ${nombresFrecuentes.join(', ')}.`;
+      }
+
+      return contextStr || 'Esta casa no tiene visitas pre-aprobadas ni frecuentes registradas.';
+    } catch (e) {
+      this.logger.warn(`Error al obtener contexto de casa ${houseNumber}: ${e.message}`);
+      return 'No se pudo obtener el historial de visitas.';
     }
   }
 

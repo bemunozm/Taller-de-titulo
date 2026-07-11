@@ -23,6 +23,7 @@ export class ConciergeClientService {
   private targetHouse: string | null = null;
   private isInterrupted = false;
   private isResponseActive = false; // <-- NUEVO: Para saber si vale la pena cancelar
+  private waitingTimeout: NodeJS.Timeout | null = null; // <-- NUEVO: Para tiempos muertos
   
   // Configuración del modelo Realtime (versión GA estable)
   private readonly REALTIME_MODEL = 'gpt-realtime-mini-2025-12-15';
@@ -127,6 +128,8 @@ export class ConciergeClientService {
       this.websocketClient.onEvent(eventName, (data: any) => {
           this.logger.log(`🔔 Evento de residente recibido! Decisión: ${data.approved ? 'APROBADA' : 'RECHAZADA'}`);
           
+          this.clearWaitingTimeout(); // Detener temporizador si contesta
+
           if (!this.conversationActive) {
              this.logger.warn('Se recibió la decisión, pero la conversación ya había terminado.');
              return;
@@ -200,11 +203,11 @@ export class ConciergeClientService {
             },
             turn_detection: {
               type: 'server_vad',
-              threshold: 0.8, // (Antes 0.5). Más alto => Menos sensible al ruido de calle/bocinas
+              threshold: 0.8, // (Antes 0.8). Más alto => Menos sensible al ruido de calle/bocinas
               prefix_padding_ms: 300,
-              silence_duration_ms: 350, 
+              silence_duration_ms: 250, // Ultra-rápido: espera 250ms de silencio para responder
               create_response: true,
-              interrupt_response: true // Que el servidor cancele automáticamente
+              interrupt_response: false // NUEVO: Deshabilitar interrupciones (no corta a la IA)
             }
           },
           output: {
@@ -313,6 +316,15 @@ export class ConciergeClientService {
         type: 'function',
         name: 'finalizar_llamada',
         description: 'Finaliza la llamada con el visitante. Usa esta herramienta SOLO después de despedirte completamente. NO menciones que estás finalizando la llamada, solo despídete naturalmente.',
+        parameters: {
+          type: 'object',
+          properties: {}
+        }
+      },
+      {
+        type: 'function',
+        name: 'reenviar_notificacion',
+        description: 'Vuelve a enviar la notificación al teléfono de los residentes si se han demorado mucho en contestar o si el visitante lo solicita. ÚSALA SOLO TRAS HABER HECHO LA PRIMERA NOTIFICACIÓN.',
         parameters: {
           type: 'object',
           properties: {}
@@ -441,19 +453,11 @@ export class ConciergeClientService {
 
       // VAD
       case 'input_audio_buffer.speech_started':
-        this.logger.log('🎙️ Detectado inicio de habla del usuario (Interrupción)');
+        this.logger.log('🎙️ Detectado inicio de habla del usuario');
         
-        // Barge-in: 
-        // 1. Marcamos interrupción para ignorar paquetes "en vuelo" localmente
-        // 2. Notificamos handlers para limpiar el buffer de audio local (aplay)
-        // 3. Forzamos la cancelación INMEDIATA en el servidor para evitar que 
-        //    OpenAI siga procesando (y tardando) en generar la respuesta anterior.
-        
-        this.isInterrupted = true;
-        
-        if (this.isResponseActive) {
-            this.sendEvent({ type: 'response.cancel' }); // Solo cancelar si hay algo que cancelar
-        }
+        // INTERRUPCIONES DESACTIVADAS:
+        // No marcamos isInterrupted = true, ni enviamos response.cancel.
+        // La IA seguirá hablando y escuchará simultáneamente para el siguiente turno.
         
         this.speechStartedHandlers.forEach(handler => handler());
         break;
@@ -516,11 +520,13 @@ export class ConciergeClientService {
         this.logger.log('📞 Ejecutando tool local: finalizar_llamada');
         
         // Simular delay y desconexión
+        this.logger.log('⏳ Iniciando cuenta regresiva para cortar la comunicación (23s)...');
         setTimeout(() => {
+          this.logger.log('📞 Tiempo de gracia expirado. Cortando canal de audio.');
           this.endConversation();
           // Opcional: desconectar completamente
           // this.disconnect(); 
-        }, 12000); // 12 segundos para permitir despedida (aumentado desde 4s)
+        }, 24000); // 24 segundos para asegurar que termine de hablar por completo
 
         result = {
           finalizada: true,
@@ -533,6 +539,11 @@ export class ConciergeClientService {
           args,
           this.currentSessionId || 'unknown'
         );
+
+        // Si acaba de notificar, iniciar timer
+        if (name === 'notificar_residente') {
+          this.startWaitingTimeout();
+        }
       }
 
       // Enviar resultado de la herramienta
@@ -582,12 +593,13 @@ export class ConciergeClientService {
    * Genera instrucciones detalladas para una casa específica
    * Mismo prompt que en DigitalConciergeView.tsx
    */
-  private getDetailedInstructions(houseNumber: string): string {
+  private getDetailedInstructions(houseNumber: string, houseContext: string): string {
     return `Eres Sofía, la conserje del Condominio San Lorenzo. Eres amable, cálida y conversacional. Tu trabajo es ayudar a los visitantes a ingresar al condominio de manera eficiente pero siempre con una sonrisa en la voz.
 
 INFORMACIÓN INICIAL:
 - El visitante ya marcó la casa de destino: ${houseNumber}
 - YA conoces a dónde va, NO preguntes por la casa/departamento nuevamente
+- HISTORIAL DE VISITAS OBTENIDO DE LA BASE DE DATOS: ${houseContext}
 
 PERSONALIDAD:
 - Habla de manera natural y amigable, como si conversaras con un vecino
@@ -595,93 +607,55 @@ PERSONALIDAD:
 - Sé paciente y empática, especialmente si el visitante parece confundido
 - Haz que la conversación fluya naturalmente, no como un formulario robótico
 
-FLUJO DE CONVERSACIÓN (SIGUE ESTE ORDEN ESTRICTAMENTE):
+FLUJO Y PAUTAS DE CONVERSACIÓN (SÉ FLUIDA, RELAJADA Y 100% NATURAL):
 
-1. SALUDO INICIAL (di esto EXACTAMENTE una sola vez):
-   "¡Hola! Bienvenido al Condominio San Lorenzo. Mi nombre es Sofía y soy la conserje. Veo que deseas visitar la casa ${houseNumber}. ¿Cómo te llamas?"
+1. SALUDO INICIAL ORGANICO:
+   - "¡Hola! Bienvenido al Condominio San Lorenzo. Soy Sofía, la conserje. Cuéntame, ¿cuál es tu nombre y tu RUT?"
+   - (Puedes variar ligeramente el saludo inicial pero SIEMPRE pide nombre y RUT en tu primera interacción).
 
-2. RECOPILACIÓN DE DATOS (UNO POR UNO, en este orden):
+2. RECOPILACIÓN INVISIBLE DE DATOS:
+   Debes obtener: Nombre, RUT/Pasaporte, Vehículo (Patente opcional) y Motivo.
    
-   a) Nombre:
-      - Espera la respuesta
-      - Guarda con guardar_datos_visitante(nombre: "...")
-      - Di: "Encantada [nombre]. ¿Me podrías dar tu RUT o pasaporte por favor?"
+   ⚠️ REGLA DE ORO DE EXTRACCIÓN Y OBLIGATORIEDAD ⚠️: 
+   - SI EL VISITANTE TE DA VARIOS DATOS, LLAMA a 'guardar_datos_visitante' con TODOS esos datos de una vez: 'guardar_datos_visitante'(nombre: "Juan Perez", rut: "1234", motivo: "ver a mi mamá", casa: "${houseNumber}").
+   - REGLA CRÍTICA: SIEMPRE, en CADA llamada a 'guardar_datos_visitante', DEBES incluir el parámetro casa: "${houseNumber}". Es estrictamente obligatorio para el sistema.
+   - NUNCA VUELVAS A PREGUNTAR por información que ya inferiste o te dijeron. Trata de deducir el contexto.
    
-   b) RUT/Pasaporte:
-      - Espera la respuesta
-      - Guarda con guardar_datos_visitante(rut: "...")
-      - Si el sistema responde con error (RUT inválido):
-        * Di amablemente: "Disculpa, el RUT que escuché no parece ser válido. ¿Me lo podrías repetir por favor? Dilo dígito por dígito si es necesario."
-        * Vuelve a intentar guardar el RUT
-      - Si se guarda correctamente, di: "Perfecto. ¿Y un número de teléfono de contacto?"
-   
-   c) Teléfono:
-      - Espera la respuesta
-      - Guarda con guardar_datos_visitante(telefono: "...")
-      - Di: "Genial. ¿Vienes en vehículo?"
-   
-   d) Vehículo (PREGUNTA PRIMERO):
-      - Si dice SÍ: "¿Me podrías decir la patente del vehículo?"
-        * Espera la respuesta
-        * Guarda con guardar_datos_visitante(patente: "...")
-      - Si dice NO: "Vale, sin problema."
-        * NO preguntes por patente
-        * NO llames a guardar_datos_visitante con el campo patente
-        * Simplemente omite este dato y continúa
-      - Luego di: "¿Cuál es el motivo de tu visita?"
-   
-   e) Motivo:
-      - Espera la respuesta
-      - Guarda con guardar_datos_visitante(motivo: "...")
-      - Di: "Excelente, déjame buscar al residente."
+   CÓMO CONTINUAR SI FALTAN DATOS (Usa tus propias palabras, varía las frases):
+   - Nunca suenes como formulario ("Perfecto, ahora dame tu patente").
+   - Intenta algo como: "Ah, buenísimo [nombre]. Oye, ¿vienes en auto por si acaso? Y cuéntame, ¿cuál es el motivo de tu visita?"
+   - Una vez tengas Nombre, RUT, y sepas si viene o no en vehículo junto con el motivo, avisa que contactarás a la casa (ej: "Súper, dame un segundito que llamo a la casa...").
 
 3. BÚSQUEDA Y NOTIFICACIÓN:
-   - Llama buscar_residente(casa: "${houseNumber}")
-   - Si encuentra residentes:
-     * El sistema devuelve un array "residentes" con TODOS los miembros de la familia
-     * Extrae los IDs de TODOS los residentes del array
-     * Llama notificar_residente(residentes_ids: ["id1", "id2", ...]) con TODOS los IDs
-     * IMPORTANTE: Al llamar notificar_residente, la visita se crea AUTOMÁTICAMENTE en estado pendiente
-     * Si hay múltiples residentes, di: "Perfecto, le he enviado una notificación a todos los residentes de la casa. Estoy esperando su respuesta."
-     * Si hay un solo residente, di: "Perfecto, le he enviado una notificación a [nombre del residente]. Estoy esperando su respuesta."
-   - Si NO encuentra:
-     * Di: "Lo siento, no encuentro registrado a ningún residente en la casa ${houseNumber}. ¿Estás seguro del número?"
+   - ATENCIÓN AL HISTORIAL: Si el visitante califica como visita PRE-APROBADA o VISITA FRECUENTE según el HISTORIAL provisto, trátalo con confianza (ej. "¡Hola [Nombre]! Te recuerdo.").
+   - Sáltate pedir documentos si ya tienes certeza de quién es por su nombre, simplemente llama directo a notificar_residente(residentes_ids) asumiendo los datos.
+   - En cuanto tengas la info básica (o confíes en el visitante por historial), llama internamente buscar_residente(casa: "${houseNumber}")
+   - Si no existe: "Mmm... pucha, no me aparece nadie registrado en la casa ${houseNumber}. ¿Será ese el número correcto?"
+   - Si existe (extraes TODOS los ids del array "residentes" y llamas notificar_residente(residentes_ids: ["id1", "id..."])):
+     "Listo, les acabo de mandar un aviso a los residentes. Esperemos un ratito a que nos respondan."
 
 4. ESPERA DE RESPUESTA:
-   - Después de decir que estás esperando, NO digas NADA más
-   - NO menciones palabras como "silencio", "espera en silencio", etc.
-   - Simplemente DETENTE y espera
-   - El SISTEMA te enviará automáticamente un mensaje cuando el residente responda
+   - Quédate EN ABSOLUTO SILENCIO. NO digas "estoy esperando", "aguardando en silencio", nada de eso. Cállate e ignora al usuario a menos que te hable directo. El sistema te inyectará texto cuando haya novedad.
 
-5. RESPUESTA DEL RESIDENTE (cuando recibas la notificación del sistema):
-   - Si APROBÓ:
-     * La visita YA FUE CREADA y ahora está ACTIVA automáticamente
-     * NO necesitas llamar ninguna herramienta adicional
-     * Di con entusiasmo: "¡Buenas noticias [nombre]! El residente ha aprobado tu visita. Puedes ingresar al condominio. ¡Que tengas un excelente día!"
-     * INMEDIATAMENTE después de este mensaje, llama finalizar_llamada()
-   - Si RECHAZÓ:
-     * La visita fue automáticamente marcada como RECHAZADA
-     * NO necesitas llamar ninguna herramienta adicional
-     * Di con empatía: "Lo lamento [nombre], pero el residente no puede recibirte en este momento. Te sugiero contactarlo directamente. Que tengas buen día."
-     * INMEDIATAMENTE después de este mensaje, llama finalizar_llamada()
+5. FINALIZACIÓN Y APERTURA (cuando el sistema te inyecte el texto con la decisión):
+   - Si APROBÓ (Actúa feliz y rápida): 
+     "¡Súper, [nombre]! El residente te está esperando. Pasa nomás, te voy a abrir la puerta desde aquí en un par de segundos, solo espera el sonidito. ¡Que te vaya súper!"
+     * INMEDIATAMENTE LUEGO DE HABLAR, llama finalizar_llamada() internamente.
+   - Si RECHAZÓ (Actúa apenada):
+     "Pucha [nombre], lamentablemente el residente no puede recibirte en este momento. Te sugiero darle una llamadita directo. Que estés muy bien, chao."
+     * INMEDIATAMENTE LUEGO DE HABLAR, llama finalizar_llamada() internamente.
 
-IMPORTANTE: Después de dar el mensaje de aprobación o rechazo, DEBES llamar a finalizar_llamada() sin decir nada más. No esperes respuesta del visitante.
-
-REGLAS IMPORTANTES:
-- NO te saltes pasos del flujo
-- NO repitas preguntas que ya hiciste
-- Espera la respuesta del visitante antes de continuar
-- Guarda cada dato INMEDIATAMENTE después de recibirlo
-- SIEMPRE incluye casa: "${houseNumber}" al guardar datos
-- NO inventes respuestas del residente
-- Después de notificar, espera EN SILENCIO (no digas que estás en silencio)
-- Acepta datos en cualquier formato (el sistema los formatea automáticamente)`;
+REGLAS DE IDENTIDAD:
+- NO actúes como un robot o asistente digital.
+- ¡Toma aire! Haz pausas naturales entre oraciones si quieres.
+- Usa lenguaje ultra coloquial de Chile, suave y educado.
+- Después de decir el mensaje final de apertura o rechazo, LLAMA a la herramienta finalizar_llamada() y deja de hablar. El sistema cerrará el canal físico en la Raspberry Pi.`;
   }
 
   /**
    * Inicia una conversación con el número de casa marcado
    */
-  startConversation(houseNumber: string): void {
+  async startConversation(houseNumber: string): Promise<void> {
     if (this.conversationActive) {
       this.logger.warn('Ya hay una conversación activa');
       return;
@@ -692,6 +666,16 @@ REGLAS IMPORTANTES:
     this.conversationActive = true;
     this.targetHouse = houseNumber;
     
+    let contextStr = 'Sin contexto histórico previo o fallo en obtenerlo.';
+    try {
+      this.logger.log('🔍 Consultando historial de visitantes a la casa...');
+      const response = await axios.post(`${this.backendUrl}/api/v1/concierge/context/${houseNumber}`);
+      contextStr = response.data.context;
+      this.logger.log(`✅ Historial inyectado en prompt: ${contextStr}`);
+    } catch (e) {
+      this.logger.warn('⚠️ No se pudo obtener el historial de visitas para el contexto.');
+    }
+
     // Agregar mensaje del sistema con contexto de la casa específica
     // Según documentación: usar conversation.item.create para updates mid-stream
     this.logger.log('📤 Agregando contexto de la casa al sistema...');
@@ -703,7 +687,7 @@ REGLAS IMPORTANTES:
         content: [
           {
             type: 'input_text',
-            text: this.getDetailedInstructions(houseNumber)
+            text: this.getDetailedInstructions(houseNumber, contextStr)
           }
         ]
       }
@@ -714,7 +698,7 @@ REGLAS IMPORTANTES:
     this.sendEvent({
       type: 'response.create',
       response: {
-        instructions: `El visitante ya marcó la casa ${houseNumber}. Saluda brevemente y pregunta: ¿Cómo te llamas?`
+        instructions: `El visitante ya marcó la casa ${houseNumber}. Inicia la conversación saludando amistosamente: "¡Hola! Bienvenido al Condominio San Lorenzo. Soy Sofía, la conserje. Cuéntame, ¿cuál es tu nombre y tu RUT?"`
       }
     });
   }
@@ -749,8 +733,16 @@ REGLAS IMPORTANTES:
     this.conversationActive = false;
     this.targetHouse = null;
     
+    this.clearWaitingTimeout(); // Detener temporizador si conversación termina por otra causa
+
     // Notificar a los suscriptores (ej. AudioRouter) para que apaguen sus flujos y relés
     this.conversationEndedHandlers.forEach(handler => handler());
+
+    // Limpiar handlers para evitar ejecución duplicada en la siguiente llamada
+    this.audioHandlers = [];
+    this.audioDoneHandlers = [];
+    this.speechStartedHandlers = [];
+    this.conversationEndedHandlers = [];
     
     // NOTA: Eliminamos la creación forzada de respuesta ('response.create')
     // para evitar que el agente se despida múltiples veces o intente "rellenar" el silencio.
@@ -828,5 +820,39 @@ REGLAS IMPORTANTES:
    */
   async cleanup(): Promise<void> {
     await this.disconnect();
+  }
+
+  // --- MÉTODOS DE PROACTIVIDAD ---
+  private startWaitingTimeout() {
+    this.clearWaitingTimeout();
+    this.logger.log('⏳ Iniciando timeout para demora del residente (30s)...');
+    
+    this.waitingTimeout = setTimeout(() => {
+       this.logger.warn('⏰ Residente demora en contestar. Pidiendo a IA que hable...');
+       if (this.conversationActive) {
+           this.sendEvent({
+              type: 'conversation.item.create',
+              item: {
+                  type: 'message',
+                  role: 'system',
+                  content: [
+                      {
+                          type: 'input_text',
+                          text: `ATENCIÓN: Han pasado 30 segundos y la APP del residente no ha contestado. Rompe el silencio de forma empática y natural: Dile al visitante que se están demorando un poquito, sugiérele amable y casualmente que los llame él por su teléfono (si tiene sus números), y confírmale que tú igual vas a reintentar notificar por el sistema. Llama INMEDIATAMENTE a la herramienta reenviar_notificacion() tras terminar de hablar para enviar un recordatorio al residente.`
+                      }
+                  ]
+              }
+           });
+           this.sendEvent({ type: 'response.create' });
+       }
+    }, 30000); // 30s de silencio sin respuesta
+  }
+
+  private clearWaitingTimeout() {
+     if (this.waitingTimeout) {
+        clearTimeout(this.waitingTimeout);
+        this.waitingTimeout = null;
+        this.logger.log('🛑 Temporizador de espera de residente detenido.');
+     }
   }
 }

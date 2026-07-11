@@ -2,6 +2,18 @@ import api from '@/lib/axios'
 import { isAxiosError } from 'axios'
 import type { Camera, CreateCameraFormData, UpdateCameraFormData } from '@/types/index'
 
+export async function enableCameraGuardian(id: string, enableGuardian: boolean): Promise<{ id: string; name: string; enableGuardian: boolean }> {
+  try {
+    const { data } = await api.patch(`/cameras/${id}/enable-guardian`, { enableGuardian })
+    return data
+  } catch (error) {
+    if (isAxiosError(error) && error.response) {
+      throw new Error(error.response.data.message)
+    }
+    throw error
+  }
+}
+
 export async function listCameras(): Promise<Camera[]> {
   try {
     const { data } = await api.get<Camera[]>('/cameras')

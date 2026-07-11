@@ -1,0 +1,7 @@
+{
+  "exclude": [
+    "dist/",
+    "diagramas de secuencia/",
+    "test/"
+  ]
+}

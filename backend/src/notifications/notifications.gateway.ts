@@ -62,6 +62,42 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
     return { success: true, message: 'Registrado exitosamente' };
   }
 
+  @SubscribeMessage('join_room')
+  handleJoinRoom(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { room: string },
+  ) {
+    if (data && data.room) {
+      client.join(data.room);
+      this.logger.log(`Cliente ${client.id} se unió a la sala ${data.room}`);
+      return { success: true };
+    }
+  }
+
+  @SubscribeMessage('leave_room')
+  handleLeaveRoom(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { room: string },
+  ) {
+    if (data && data.room) {
+      client.leave(data.room);
+      this.logger.log(`Cliente ${client.id} abandonó la sala ${data.room}`);
+      return { success: true };
+    }
+  }
+
+  // Enviar a una sala específica
+  sendToRoom(room: string, event: string, data: any) {
+    this.server.to(room).emit(event, data);
+    this.logger.log(`📡 Evento "${event}" enviado a sala ${room}`);
+  }
+
+  // Enviar a todos excepto a una sala
+  broadcastExceptRoom(room: string, event: string, data: any) {
+    this.server.except(room).emit(event, data);
+    this.logger.log(`📡 Evento "${event}" enviado a todos excepto a sala ${room}`);
+  }
+
   // Enviar notificación a un usuario específico
   sendToUser(userId: string, event: string, data: any) {
     const socketIds = this.userSockets.get(userId);

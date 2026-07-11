@@ -3,8 +3,8 @@
 /node_modules
 /build
 
-# Logs
-logs
+# Logs (solo runtime en la raiz del backend, NO src/logs que es codigo)
+/logs
 *.log
 npm-debug.log*
 pnpm-debug.log*
@@ -54,3 +54,6 @@ pids
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# CodeGraph (indice local; codegraph.json se versiona)
+.codegraph/

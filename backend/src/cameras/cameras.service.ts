@@ -33,17 +33,23 @@ export class CamerasService {
   /** Resuelve una cámara por su id (UUID) o por su mountPath (slug). Devuelve null si no existe. */
   private async resolveCameraByIdOrMount(cameraIdOrMount: string) {
     if (!cameraIdOrMount) return null;
-  // Intentar por id cuando el valor parezca un UUID
-    if (this.isUuid(cameraIdOrMount)) {
-      const byId = await this.cameraRepository.findOne({ where: { id: cameraIdOrMount }, relations: ['roles'] });
+
+    // El worker manager usa un ID con sufijo '_guardia' para evitar colisiones.
+    // Lo limpiamos para buscar en la BD.
+    const cleanId = cameraIdOrMount.replace('_guardia', '');
+
+    // Intentar por id cuando el valor parezca un UUID
+    if (this.isUuid(cleanId)) {
+      const byId = await this.cameraRepository.findOne({ where: { id: cleanId }, relations: ['roles'] });
       if (byId) return byId;
     }
-  // Alternativa: intentar por mountPath
-    const byMount = await this.cameraRepository.findOne({ where: { mountPath: cameraIdOrMount }, relations: ['roles'] });
+    // Alternativa: intentar por mountPath
+    const byMount = await this.cameraRepository.findOne({ where: { mountPath: cleanId }, relations: ['roles'] });
     if (byMount) return byMount;
+
     // Como último recurso, si el input parecía un UUID pero lo anterior falló, intentar por id sin relaciones
-    if (this.isUuid(cameraIdOrMount)) {
-      return await this.cameraRepository.findOne({ where: { id: cameraIdOrMount } });
+    if (this.isUuid(cleanId)) {
+      return await this.cameraRepository.findOne({ where: { id: cleanId } });
     }
     return null;
   }
@@ -122,11 +128,16 @@ export class CamerasService {
 
       // Comportamiento por defecto (no strict): guardar e intentar el registro de forma best-effort
       const saved = await this.cameraRepository.save(camera);
-      // notify worker manager if LPR enabled
+      // notify worker manager if LPR or Guardian enabled
       try {
-        if (saved.enableLpr && this.workerNotifier) {
+        if (this.workerNotifier) {
           const decrypted = await this.getDecryptedSourceUrl(saved.id);
-          await this.workerNotifier.registerCamera(saved.id, decrypted || '', saved.mountPath);
+          if (saved.enableLpr) {
+            await this.workerNotifier.registerCamera(saved.id, decrypted || '', saved.mountPath);
+          }
+          if (saved.enableGuardian) {
+            await this.workerNotifier.registerCamera(`${saved.id}_guardia`, decrypted || '', saved.mountPath, 'guardia');
+          }
         }
       } catch (err) {
         this.logger.warn(`No se pudo notificar al worker manager tras crear cámara: ${err?.message || err}`);
@@ -316,12 +327,21 @@ export class CamerasService {
       const saved = await this.cameraRepository.save(camera);
       // notify worker manager about enableLpr changes
       try {
-        if (saved.enableLpr && this.workerNotifier) {
-          const decrypted = await this.getDecryptedSourceUrl(saved.id);
-          await this.workerNotifier.registerCamera(saved.id, decrypted || '', saved.mountPath);
-        } else if (!saved.enableLpr && this.workerNotifier) {
-          // if LPR was disabled, unregister
-          await this.workerNotifier.unregisterCamera(saved.id);
+        if (this.workerNotifier) {
+          if (saved.enableLpr) {
+            const decrypted = await this.getDecryptedSourceUrl(saved.id);
+            await this.workerNotifier.registerCamera(saved.id, decrypted || '', saved.mountPath);
+          } else {
+            await this.workerNotifier.unregisterCamera(saved.id);
+          }
+
+          // Notificar sobre cambios en Guardián Visual
+          if (saved.enableGuardian) {
+            const decrypted = await this.getDecryptedSourceUrl(saved.id);
+            await this.workerNotifier.registerCamera(`${saved.id}_guardia`, decrypted || '', saved.mountPath, 'guardia');
+          } else {
+            await this.workerNotifier.unregisterCamera(`${saved.id}_guardia`);
+          }
         }
       } catch (err) {
         this.logger.warn(`No se pudo notificar al worker manager tras actualizar cámara: ${err?.message || err}`);
@@ -531,6 +551,74 @@ export class CamerasService {
       }
       this.logger.error(`Error al actualizar estado LPR de cámara ${cameraId}:`, error);
       throw new InternalServerErrorException('Error al actualizar estado de IA');
+    }
+  }
+
+  /** Actualiza el estado de Guardián (YOLO Intrusión) de una cámara */
+  async updateGuardianStatus(cameraId: string, enableGuardian: boolean) {
+    try {
+      const camera = await this.resolveCameraByIdOrMount(cameraId);
+      if (!camera) {
+        throw new NotFoundException(`Cámara con ID '${cameraId}' no encontrada`);
+      }
+
+      camera.enableGuardian = enableGuardian;
+      const updated = await this.cameraRepository.save(camera);
+
+      this.logger.log(`Guardián Visual ${enableGuardian ? 'habilitado' : 'deshabilitado'} para cámara ${camera.name} (${camera.id})`);
+
+      try {
+        if (this.workerNotifier) {
+          if (enableGuardian) {
+            const decrypted = await this.getDecryptedSourceUrl(updated.id);
+            // El worker manager debe recibir el modo 'guardia' y un ID diferenciado para no colisionar
+            await this.workerNotifier.registerCamera(`${updated.id}_guardia`, decrypted || '', updated.mountPath, 'guardia');
+            this.logger.log(`Cámara ${updated.id} registrada en worker manager (Guardián Visual)`);
+          } else {
+            await this.workerNotifier.unregisterCamera(`${updated.id}_guardia`);
+            this.logger.log(`Cámara ${updated.id} desregistrada del worker manager (Guardián Visual)`);
+          }
+        }
+      } catch (err) {
+        this.logger.warn(`No se pudo notificar al worker manager sobre cambio de Guardián: ${err?.message || err}`);
+      }
+
+      return {
+        id: updated.id,
+        name: updated.name,
+        enableGuardian: updated.enableGuardian
+      };
+    } catch (error) {
+      if (error instanceof NotFoundException) throw error;
+      this.logger.error(`Error al actualizar estado Guardián de cámara ${cameraId}:`, error);
+      throw new InternalServerErrorException('Error al actualizar Guardián Visual');
+    }
+  }
+
+  /** Actualiza los polígonos/zonas del Guardián Visual */
+  async updateGuardianZones(cameraId: string, zones: any[]) {
+    try {
+      const camera = await this.resolveCameraByIdOrMount(cameraId);
+      if (!camera) {
+        throw new NotFoundException(`Cámara con ID '${cameraId}' no encontrada`);
+      }
+
+      camera.guardianZones = zones;
+      const updated = await this.cameraRepository.save(camera);
+      
+      this.logger.log(`Zonas de Guardián actualizadas para la cámara ${camera.name} (${camera.id})`);
+      
+      // Opcional: Reiniciar el worker o notificarle en vivo sobre los nuevos polígonos
+      
+      return {
+        id: updated.id,
+        name: updated.name,
+        guardianZones: updated.guardianZones
+      };
+    } catch (error) {
+      if (error instanceof NotFoundException) throw error;
+      this.logger.error(`Error al actualizar zonas en la cámara ${cameraId}:`, error);
+      throw new InternalServerErrorException('Error al guardar las zonas de intrusión');
     }
   }
 

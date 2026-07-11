@@ -110,6 +110,7 @@ import os
 
 
 class WorkerConfig(BaseModel):
+    mode: str = Field('patente', min_length=1)
     rtsp_url: Optional[str] = Field(None)
     camera_id: Optional[str] = Field(None, min_length=1)
     backend_url: Optional[str] = Field(None, min_length=1)
@@ -134,7 +135,7 @@ class WorkerConfig(BaseModel):
     combined_threshold: float = Field(0.3, ge=0, le=1)
 
 
-def build_worker_config(rtsp_url: Optional[str], camera_id: Optional[str], backend_url: Optional[str], poll_interval: Optional[float]) -> WorkerConfig:
+def build_worker_config(rtsp_url: Optional[str], camera_id: Optional[str], backend_url: Optional[str], poll_interval: Optional[float], mode: str = 'patente') -> WorkerConfig:
     """Construye LprConfig a partir de los valores en `settings` y argumentos.
 
     Esta función mantiene la resolución de rutas relativas respecto al repo
@@ -149,6 +150,7 @@ def build_worker_config(rtsp_url: Optional[str], camera_id: Optional[str], backe
     dry = bool(settings.LPR_DRY_RUN)
     # build a WorkerConfig pydantic model with the expected attributes
     cfg = WorkerConfig(
+        mode=mode,
         rtsp_url=rtsp,
         camera_id=cam,
         backend_url=backend,

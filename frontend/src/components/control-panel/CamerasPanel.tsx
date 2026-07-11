@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Dialog, DialogTitle, DialogDescription, DialogActions, DialogBody } from '@/components/ui/Dialog'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { listCameras, createCamera, updateCamera, deleteCamera, registerCamera, getCameraSourceUrl, getCameraHasSource, getCameraRecentEventsCount, getIAHealth, getMediamtxHealth, enableCameraLpr } from '@/api/CameraAPI'
+import { listCameras, createCamera, updateCamera, deleteCamera, registerCamera, getCameraSourceUrl, getCameraHasSource, getIAHealth, getMediamtxHealth, enableCameraLpr, enableCameraGuardian } from '@/api/CameraAPI'
 import { listRoles } from '@/api/RoleAPI'
 import type { Role } from '@/types/index'
 import MultiSelectCombobox from '@/components/ui/MultiSelectCombobox'
@@ -20,10 +20,9 @@ import {
   CheckCircleIcon, 
   XCircleIcon,
   BoltIcon,
-  ServerIcon,
-  PlusIcon
+  ServerIcon
 } from '@heroicons/react/24/outline'
-import { Heading, Subheading } from '@/components/ui/Heading'
+import GuardianZoneEditor from './GuardianZoneEditor'
 
 interface CamerasPanelProps {
   triggerNew?: boolean
@@ -34,6 +33,7 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
   const [selected, setSelected] = useState<Camera | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [showDelete, setShowDelete] = useState<Camera | null>(null)
+  const [showZoneEditor, setShowZoneEditor] = useState<Camera | null>(null)
 
   // Responder al trigger para abrir formulario de nueva cámara
   useEffect(() => {
@@ -93,6 +93,15 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
     onError: (err: any) => toast.error(err?.message || 'Error al cambiar estado de LPR'),
   })
 
+  const toggleGuardianMut = useMutation<any, Error, { id: string; enableGuardian: boolean }>({
+    mutationFn: ({ id, enableGuardian }) => enableCameraGuardian(id, enableGuardian),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['cameras'] })
+      toast.success(`Guardián Visual ${data.enableGuardian ? 'activado' : 'desactivado'} para ${data.name}`)
+    },
+    onError: (err: any) => toast.error(err?.message || 'Error al cambiar estado de Guardián Visual'),
+  })
+
   const { register, handleSubmit, reset, setValue, control } = useForm<CreateCameraFormData>({})
 
 
@@ -126,8 +135,10 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
       } else {
         setValue('roleIds', [])
       }
-      // populate enableLpr flag
+  // populate enableLpr flag
   setValue('enableLpr', (selected as any).enableLpr ?? false)
+  // populate enableGuardian flag
+  setValue('enableGuardian', (selected as any).enableGuardian ?? false)
   // populate active flag: backend may treat undefined as active, but for editing we want explicit value
   setValue('active', (selected as any).active === undefined ? true : !!(selected as any).active)
     } else {
@@ -243,6 +254,12 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
               ) : (
                 <DropdownItem onClick={() => toggleLprMut.mutate({ id: cam.id, enableLpr: true })}>Habilitar LPR</DropdownItem>
               )}
+              {(cam as any).enableGuardian ? (
+                <DropdownItem onClick={() => toggleGuardianMut.mutate({ id: cam.id, enableGuardian: false })}>Deshabilitar Guardián</DropdownItem>
+              ) : (
+                <DropdownItem onClick={() => toggleGuardianMut.mutate({ id: cam.id, enableGuardian: true })}>Habilitar Guardián</DropdownItem>
+              )}
+              <DropdownItem onClick={() => setShowZoneEditor(cam)}>Configurar Zonas Alarmas</DropdownItem>
               <DropdownItem onClick={() => setShowDelete(cam)}>Eliminar</DropdownItem>
             </DropdownMenu>
           </Dropdown>
@@ -273,6 +290,13 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
                 <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-blue-500/10 border border-blue-500/20">
                   <BoltIcon className="h-3.5 w-3.5 text-blue-400" />
                   <span className="text-xs font-medium text-blue-400">LPR</span>
+                </div>
+              )}
+              
+              {(cam as any).enableGuardian && (
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20">
+                  <div className="h-2 w-2 bg-indigo-500 rounded-full animate-pulse" />
+                  <span className="text-xs font-medium text-indigo-400">Guardián IA</span>
                 </div>
               )}
             </>
@@ -387,7 +411,7 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
                 <BoltIcon className={`h-5 w-5 ${iaHealth?.ok ? 'text-emerald-400' : 'text-red-400'}`} />
               </div>
               <div>
-                <div className="text-sm font-medium text-zinc-300">Motor IA (LPR)</div>
+                <div className="text-sm font-medium text-zinc-300">Motor IA (Análisis Visual)</div>
                 <div className={`text-xs ${iaHealth?.ok ? 'text-emerald-400' : 'text-red-400'}`}>
                   {iaHealth ? (iaHealth.ok ? 'Activo' : iaHealth.status || 'Inactivo') : 'Desconocido'}
                 </div>
@@ -509,6 +533,21 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
                     )}
                   />
                 </SwitchField>
+                <SwitchField>
+                  <Label>Habilitar Guardián IA</Label>
+                  <Description>Activa el análisis visual de intrusión y merodeo</Description>
+                  <Controller
+                    control={control}
+                    name="enableGuardian"
+                    render={({ field }) => (
+                      <Switch
+                        checked={!!field.value}
+                        onChange={(v: boolean) => field.onChange(!!v)}
+                        name={field.name}
+                      />
+                    )}
+                  />
+                </SwitchField>
               </SwitchGroup>
 
               <DialogActions>
@@ -536,6 +575,18 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
             </DialogActions>
           </div>
         </Dialog>
+      )}
+
+      {/* Editor de Zonas de Intrusión (Guardián) */}
+      {showZoneEditor && (
+        <GuardianZoneEditor 
+          camera={showZoneEditor} 
+          onClose={() => setShowZoneEditor(null)} 
+          onSaved={() => {
+            setShowZoneEditor(null)
+            queryClient.invalidateQueries({ queryKey: ['cameras'] })
+          }} 
+        />
       )}
     </div>
   )

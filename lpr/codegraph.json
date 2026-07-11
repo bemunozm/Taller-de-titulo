@@ -1,0 +1,12 @@
+{
+  "exclude": [
+    "detecciones/",
+    "logs/",
+    "test_video/",
+    "storage/",
+    "lpr.egg-info/",
+    "__pycache__/",
+    "**/__pycache__/",
+    "*.pt"
+  ]
+}

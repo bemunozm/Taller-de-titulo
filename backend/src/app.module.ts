@@ -28,6 +28,7 @@ import { AuditModule } from './audit/audit.module';
 import { LogsModule } from './logs/logs.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { HubModule } from './hub/hub.module';
+import { AnomaliesModule } from './anomalies/anomalies.module';
 
 @Module({
   imports: [
@@ -63,6 +64,7 @@ import { HubModule } from './hub/hub.module';
   LogsModule,
   DashboardModule,
   HubModule,
+  AnomaliesModule,
   ],
   controllers: [],
   providers: [DataInitializationService, ExpirationService],

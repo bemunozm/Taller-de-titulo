@@ -30,6 +30,6 @@ import { HubModule } from '../hub/hub.module';
     SmsService,
     QRCodeService,
   ],
-  exports: [DigitalConciergeService],
+  exports: [DigitalConciergeService, OpenAITokenService],
 })
 export class DigitalConciergeModule {}

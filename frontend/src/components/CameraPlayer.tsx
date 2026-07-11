@@ -4,9 +4,11 @@ import api from '@/lib/axios';
 
 type Props = {
   cameraId: string;
+  objectFit?: 'cover' | 'contain';
+  minimal?: boolean;
 };
 
-export default function CameraPlayer({ cameraId }: Props) {
+export default function CameraPlayer({ cameraId, objectFit = 'cover', minimal = false }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const [connected, setConnected] = useState(false);
@@ -164,8 +166,8 @@ export default function CameraPlayer({ cameraId }: Props) {
 
   return (
     <div className="relative h-full">
-      {/* Screenshot button (bottom-right) — mostrarse solo si hay stream activo */}
-      {hasStream && (
+      {/* Screenshot button — hide in minimal mode */}
+      {hasStream && !minimal && (
         <div className="absolute right-3 bottom-3 z-40">
           <button
             type="button"
@@ -227,12 +229,13 @@ export default function CameraPlayer({ cameraId }: Props) {
         ref={videoRef}
         autoPlay
         playsInline
-        controls={connected}
-        className="w-full h-full object-cover bg-black"
+        controls={connected && !minimal}
+        className={`w-full h-full bg-black ${objectFit === 'contain' ? 'object-contain' : 'object-cover'}`}
       />
 
-      {/* Badge de estado en esquina superior derecha */}
-      <div className="absolute right-4 top-4 z-30">
+      {/* Badge de estado — hide in minimal mode */}
+      {!minimal && (
+        <div className="absolute right-4 top-4 z-30">
         {loading ? (
           // Small circular indicator when loading/reconnecting (no text)
           <div className="h-3 w-3 rounded-full bg-yellow-500 shadow-md" aria-hidden />
@@ -253,6 +256,7 @@ export default function CameraPlayer({ cameraId }: Props) {
           </div>
         )}
       </div>
+    )}
 
       {/* Overlay centrado de carga (solo cuando loading y sin error) */}
       {loading && !error && (

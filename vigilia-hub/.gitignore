@@ -10,8 +10,8 @@ build/
 .env.local
 .env.*.local
 
-# Logs
-logs/
+# Logs (solo runtime en la raiz)
+/logs/
 *.log
 npm-debug.log*
 
@@ -33,3 +33,6 @@ data/*.json
 # Temp files
 tmp/
 temp/
+
+# CodeGraph (indice local; codegraph.json se versiona)
+.codegraph/
