@@ -1,8 +1,12 @@
+# Nombre de proyecto propio para NO colisionar con otros repos que tengan
+# una carpeta 'backend' (p.ej. RUKLO). Aisla red, volumenes y contenedores.
+name: vigilia
+
 services:
   # Base de datos PostgreSQL (único servicio mantenido)
   postgres:
     image: postgres:15-alpine
-    container_name: postgres_db
+    container_name: vigilia_postgres
     env_file:
       - ./.env
     environment:
