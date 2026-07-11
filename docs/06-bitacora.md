@@ -4,6 +4,13 @@ Registro cronológico de conversaciones, decisiones y avances. Lo más reciente 
 
 ---
 
+## 2026-07-11 (cont. 4) — Fase 0 arrancada: POC better-auth verificado
+- Rama `feature/fase-0-auth-multitenant`. Instaladas skills de skills.sh (`.agents/skills`, symlink a `.claude/skills`) y deps (better-auth 1.6.23 + nestjs-better-auth 2.4.0 + @better-auth/api-key).
+- **POC (delegado a senior-backend-engineer, revisado por Nova contra las skills):** better-auth montado en paralelo, no destructivo. Verificado end-to-end (build ok, sign-in con cookie httpOnly, get-session ok, auth propio intacto 401). Detalle y aristas en [modulos/auth-multitenant.md](modulos/auth-multitenant.md#11-estado-del-poc-2026-07-11--verificado).
+- Aristas flagueadas para el cableado real: sign-up abierto (cerrar `disableSignUp`), rate-limit storage, npm audit, audit logging.
+
+---
+
 ## 2026-07-11 (cont. 3) — Research better-auth + mapa de auth → diseño Fase 0
 - **Research (deep-web-researcher, jul-2026):** la lib `@thallesp/nestjs-better-auth` está sana (v2.7.0, 4-jul-2026); las skills de skills.sh son agent-skills que se usan junto con la lib. Recomendación: lib community + skills, NO vanilla. Organization plugin = tenant; RBAC fino mejor app-side (customSession). CVEs parchadas en jun-2026 → pinnear versión.
 - **Mapa de auth (codebase-explorer):** hallazgo clave = el RBAC es SEPARABLE de la autenticación (`AuthorizationGuard` solo lee `request.user`), así que se reemplaza solo la capa de sesión y se conservan los 114 usos de `@RequirePermissions`. Blast radius acotado.

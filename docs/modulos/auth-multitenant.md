@@ -84,5 +84,18 @@ better-auth default = **cookies httpOnly + server session** (lookup en DB). Es m
 
 Con esto el diseño queda **cerrado** y listo para implementar en la Fase 0.
 
+## 11. Estado del POC (2026-07-11) — ✅ verificado
+better-auth quedó montado **en paralelo** al auth propio, sin romper nada. Verificado end-to-end (build limpio, sign-in con cookie httpOnly, get-session ok, rutas propias siguen 401). Archivos: `src/auth/better-auth.ts`, `main.ts`, `app.module.ts`, `scripts/create-better-auth-schema.js`. Schema Postgres dedicado `better_auth`; bcrypt override; `secret` 48 chars.
+
+**Correcciones/hallazgos del POC:**
+- El plugin **apiKey NO está en el core** de better-auth 1.6.23 → es paquete **oficial separado** `@better-auth/api-key` (mismo monorepo). Ya instalado.
+- **Orden de carga de env:** `better-auth.ts` construye el `pg.Pool` a nivel de import (antes de `ConfigModule`) → requiere `import 'dotenv/config'` explícito.
+
+**Aristas de seguridad a resolver al cablear better-auth como auth REAL (checklist de la skill `better-auth-security-best-practices`):**
+- 🔴 **Sign-up abierto:** `emailAndPassword` sin `disableSignUp` deja `/api/auth/sign-up/email` público — contradice la política "solo admins crean usuarios". Cerrar con `disableSignUp: true` + creación por invitación/admin (organization plugin).
+- 🟠 **Rate limiting:** en prod viene ON, pero `storage` default es "memory" → configurar `storage: "database"` + `customRules` para sign-in/sign-up.
+- 🟠 **Prod:** `baseURL` con HTTPS + `useSecureCookies`; auditar `npm audit` (vulns detectadas al instalar) con cybersecurity-engineer antes de mergear.
+- 🟡 **Audit logging** vía `databaseHooks` (sesión creada/revocada) — refuerza la narrativa de seguridad de la tesis.
+
 ## Fuentes
 Ver informe completo en la bitácora / memoria del research (`agent-memory/deep-web-researcher/better-auth-nestjs-migration-2026.md`). Docs oficiales: better-auth.com (NestJS integration, Organization, Admin, Database, Auth0 migration, Security update June 2026), repo `ThallesP/nestjs-better-auth`, skills.sh/better-auth.
