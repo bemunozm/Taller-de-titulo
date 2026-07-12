@@ -10,7 +10,32 @@ import { VehiclesService } from '../vehicles/vehicles.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
+import { TenantContextService } from '../common/tenant/tenant-context.service';
+import { scopeWhere, applyTenantFilter, stampOrganizationId } from '../common/tenant/tenant-context.util';
 import * as crypto from 'crypto';
+
+/**
+ * Opciones internas para los métodos de VisitsService que son compartidos
+ * entre el flujo autenticado (VisitsController, humano con sesión) y flujos
+ * SIN sesión de usuario:
+ *  - Worker LPR (DetectionsService, protegido con ServiceApiKeyGuard — NO
+ *    puebla `request.user`, ver service-api-key.guard.ts).
+ *  - Conserje Digital (DigitalConciergeController — sin NINGÚN guard, el
+ *    visitante habla con la IA de forma anónima desde el citofono).
+ *
+ * Para ambos, `TenantContextService.getContext()` resuelve
+ * `{organizationId: null, isSuperAdmin: false}` (no hay forma de saber el
+ * tenant desde `request.user`, que no existe). Aplicar el scoping por tenant
+ * ahí de todas formas rompería esos flujos (ningún Visit real calzaría con
+ * `organizationId IS NULL` tras el backfill). `skipTenantScope` es la válvula
+ * de escape EXPLÍCITA para esos call-sites puntuales (ver DetectionsService y
+ * DigitalConciergeService) — mismo criterio que
+ * `CamerasService.resolveCameraByIdOrMount`/`getCameraByIdOrMount`, dejados
+ * deliberadamente sin scoping por la misma razón (ver su docstring).
+ */
+interface TenantScopeOptions {
+  skipTenantScope?: boolean;
+}
 
 @Injectable()
 export class VisitsService {
@@ -23,7 +48,37 @@ export class VisitsService {
     private readonly familiesService: FamiliesService,
     private readonly vehiclesService: VehiclesService,
     private readonly notificationsService: NotificationsService,
+    // Tarea de aislamiento tenant (branch fix/visits-tenant-isolation, ver
+    // docs/modulos/auth-multitenant.md §7): scoping por tenant en
+    // create/findAll/findPending/findOne/findByQRCode/findByPlate/
+    // validateAccess/update/checkIn/checkOut (ver métodos abajo e
+    // interfaz TenantScopeOptions sobre los bypass puntuales).
+    private readonly tenantContext: TenantContextService,
   ) {}
+
+  /**
+   * Búsqueda interna SIN scoping por tenant — únicamente para los call-sites
+   * resource-derived (worker LPR / Conserje Digital, ver TenantScopeOptions)
+   * que ya operan sobre un `id` de Visit resuelto por otra vía (plate/QR/
+   * sesión propia), no por enumeración. NO exponer directamente al
+   * controller.
+   */
+  private async loadVisitEntity(id: string, options?: TenantScopeOptions): Promise<Visit> {
+    const where = options?.skipTenantScope
+      ? { id }
+      : scopeWhere({ id }, await this.tenantContext.getContext());
+
+    const visit = await this.visitRepository.findOne({
+      where,
+      relations: ['host', 'family', 'vehicle'],
+    });
+
+    if (!visit) {
+      throw new NotFoundException(`Visita con ID ${id} no encontrada`);
+    }
+
+    return visit;
+  }
 
   /**
    * Crear una nueva visita (vehicular o peatonal)
@@ -34,7 +89,7 @@ export class VisitsService {
     // Validar que la fecha de inicio sea anterior a la fecha de fin
     const from = new Date(validFrom);
     const until = new Date(validUntil);
-    
+
     if (from >= until) {
       throw new BadRequestException('La fecha de inicio debe ser anterior a la fecha de fin');
     }
@@ -63,6 +118,20 @@ export class VisitsService {
       maxUses: createVisitDto.maxUses !== undefined ? createVisitDto.maxUses : null,
       usedCount: 0,
     });
+
+    // Tarea de aislamiento tenant: el organizationId se deriva PRIORITARIAMENTE
+    // de la familia del host (recurso ya resuelto arriba) y solo si no tiene
+    // familia se cae al tenant del creador (ctx). Esto es deliberado: `create`
+    // lo invocan tanto el flujo autenticado (conserje/admin crea la visita
+    // desde su propio condominio — ver VisitsController) como el Conserje
+    // Digital (visitante anónimo en el citofono, SIN sesión de usuario — ver
+    // DigitalConciergeController, no tiene guards). Para este último,
+    // `tenantContext.getContext()` no puede resolver nada (no hay
+    // `request.user`), así que la familia del host (que si vive en un
+    // condominio ya tiene su `organizationId`, scopeado desde Fase 0) es la
+    // única fuente confiable en ambos casos.
+    const ctx = await this.tenantContext.getContext();
+    stampOrganizationId(visit, { ...ctx, organizationId: family?.organizationId ?? ctx.organizationId });
 
     // Generar código QR único para TODAS las visitas (peatonales y vehiculares)
     // Para vehiculares sirve como respaldo si el LPR falla
@@ -124,12 +193,17 @@ export class VisitsService {
     type?: VisitType;
     hostId?: string;
     familyId?: string;
-  }): Promise<Visit[]> {
+  }, options?: TenantScopeOptions): Promise<Visit[]> {
     const query = this.visitRepository.createQueryBuilder('visit')
       .leftJoinAndSelect('visit.host', 'host')
       .leftJoinAndSelect('visit.family', 'family')
       .leftJoinAndSelect('visit.vehicle', 'vehicle')
       .orderBy('visit.createdAt', 'DESC');
+
+    if (!options?.skipTenantScope) {
+      const ctx = await this.tenantContext.getContext();
+      applyTenantFilter(query, 'visit', ctx);
+    }
 
     if (filters?.status) {
       query.andWhere('visit.status = :status', { status: filters.status });
@@ -161,11 +235,12 @@ export class VisitsService {
    * Obtener visitas pendientes (programadas para hoy o futuro)
    */
   async findPending(): Promise<Visit[]> {
+    const ctx = await this.tenantContext.getContext();
     return await this.visitRepository.find({
-      where: {
+      where: scopeWhere({
         status: VisitStatus.PENDING,
         validFrom: MoreThan(new Date()),
-      },
+      }, ctx),
       relations: ['host', 'family', 'vehicle'],
       order: { validFrom: 'ASC' },
     });
@@ -175,16 +250,7 @@ export class VisitsService {
    * Obtener una visita por ID
    */
   async findOne(id: string): Promise<Visit> {
-    const visit = await this.visitRepository.findOne({
-      where: { id },
-      relations: ['host', 'family', 'vehicle'],
-    });
-
-    if (!visit) {
-      throw new NotFoundException(`Visita con ID ${id} no encontrada`);
-    }
-
-    return visit;
+    return this.loadVisitEntity(id);
   }
 
   /**
@@ -192,8 +258,9 @@ export class VisitsService {
    * Las visitas vehiculares también tienen QR como respaldo del LPR
    */
   async findByQRCode(qrCode: string): Promise<Visit> {
+    const ctx = await this.tenantContext.getContext();
     const visit = await this.visitRepository.findOne({
-      where: { qrCode },
+      where: scopeWhere({ qrCode }, ctx),
       relations: ['host', 'family', 'vehicle'],
     });
 
@@ -207,19 +274,25 @@ export class VisitsService {
   /**
    * Buscar visita por patente (para visitas vehiculares)
    */
-  async findByPlate(plate: string): Promise<Visit | null> {
-    const visit = await this.visitRepository
+  async findByPlate(plate: string, options?: TenantScopeOptions): Promise<Visit | null> {
+    const query = this.visitRepository
       .createQueryBuilder('visit')
       .leftJoinAndSelect('visit.vehicle', 'vehicle')
       .leftJoinAndSelect('visit.host', 'host')
       .leftJoinAndSelect('visit.family', 'family')
       .where('vehicle.plate = :plate', { plate })
-      .andWhere('visit.status IN (:...statuses)', { 
-        statuses: [VisitStatus.PENDING, VisitStatus.ACTIVE, VisitStatus.READY_FOR_REENTRY] 
+      .andWhere('visit.status IN (:...statuses)', {
+        statuses: [VisitStatus.PENDING, VisitStatus.ACTIVE, VisitStatus.READY_FOR_REENTRY]
       })
       .andWhere('visit.validFrom <= :now', { now: new Date() })
-      .andWhere('visit.validUntil >= :now', { now: new Date() })
-      .getOne();
+      .andWhere('visit.validUntil >= :now', { now: new Date() });
+
+    if (!options?.skipTenantScope) {
+      const ctx = await this.tenantContext.getContext();
+      applyTenantFilter(query, 'visit', ctx);
+    }
+
+    const visit = await query.getOne();
 
     return visit;
   }
@@ -227,10 +300,14 @@ export class VisitsService {
   /**
    * Actualizar solo el estado de una visita
    * Método simplificado para cambios rápidos de estado
+   *
+   * Único caller: DigitalConciergeService (flujo del citofono, sin sesión de
+   * usuario — ver TenantScopeOptions), por eso la carga es siempre
+   * resource-derived (sin scoping por tenant).
    */
   async updateStatus(id: string, status: string): Promise<Visit> {
-    const visit = await this.findOne(id);
-    
+    const visit = await this.loadVisitEntity(id, { skipTenantScope: true });
+
     // Convertir string a enum de VisitStatus
     const validStatuses = ['pending', 'active', 'ready', 'completed', 'cancelled', 'expired', 'denied'];
     if (!validStatuses.includes(status)) {
@@ -244,8 +321,8 @@ export class VisitsService {
   /**
    * Actualizar una visita
    */
-  async update(id: string, updateVisitDto: UpdateVisitDto): Promise<Visit> {
-    const visit = await this.findOne(id);
+  async update(id: string, updateVisitDto: UpdateVisitDto, options?: TenantScopeOptions): Promise<Visit> {
+    const visit = await this.loadVisitEntity(id, options);
 
     // Actualizar campos básicos de la visita
     if (updateVisitDto.type !== undefined) {
@@ -282,16 +359,16 @@ export class VisitsService {
       console.log(`[VISITS] 🔄 Actualizando host de visita ${id}`);
       console.log(`[VISITS] Host anterior: ${visit.host?.name} (${visit.host?.id})`);
       console.log(`[VISITS] Nuevo hostId: ${updateVisitDto.hostId}`);
-      
+
       const host = await this.usersService.findOne(updateVisitDto.hostId);
       if (!host) {
         throw new NotFoundException(`Usuario anfitrión con ID ${updateVisitDto.hostId} no encontrado`);
       }
       visit.host = host;
-      
+
       // Actualizar automáticamente la familia del nuevo anfitrión
       visit.family = host.family || null;
-      
+
       console.log(`[VISITS] ✅ Nuevo host asignado: ${host.name} (${host.id})`);
       console.log(`[VISITS] Familia: ${visit.family?.name || 'Sin familia'}`);
     }
@@ -306,7 +383,7 @@ export class VisitsService {
       if (updateVisitDto.vehiclePlate) {
         // Si hay patente, buscar o crear vehículo
         let vehicle = await this.vehiclesService.findByPlate(updateVisitDto.vehiclePlate);
-        
+
         if (!vehicle) {
           // Crear nuevo vehículo si no existe
           vehicle = await this.vehiclesService.create({
@@ -324,7 +401,7 @@ export class VisitsService {
             color: updateVisitDto.vehicleColor || vehicle.color || undefined,
           });
         }
-        
+
         visit.vehicle = vehicle;
       } else {
         visit.vehicle = null;
@@ -354,20 +431,20 @@ export class VisitsService {
     }
 
     const savedVisit = await this.visitRepository.save(visit);
-    
+
     // Log de confirmación si se actualizó el host
     if (updateVisitDto.hostId !== undefined) {
       console.log(`[VISITS] 💾 Visita guardada con nuevo host: ${savedVisit.host.name} (${savedVisit.host.id})`);
     }
-    
+
     return savedVisit;
   }
 
   /**
    * Registrar entrada de una visita
    */
-  async checkIn(id: string): Promise<Visit> {
-    const visit = await this.findOne(id);
+  async checkIn(id: string, options?: TenantScopeOptions): Promise<Visit> {
+    const visit = await this.loadVisitEntity(id, options);
     const now = new Date();
 
     // Validar que la visita esté en estado PENDING, READY_FOR_REENTRY o COMPLETED (para reusos)
@@ -400,10 +477,10 @@ export class VisitsService {
     const savedVisit = await this.visitRepository.save(visit);
 
     // Notificar al host sobre la llegada de la visita
-    const usageInfo = visit.maxUses !== null 
-      ? ` (Uso ${visit.usedCount}/${visit.maxUses})` 
+    const usageInfo = visit.maxUses !== null
+      ? ` (Uso ${visit.usedCount}/${visit.maxUses})`
       : '';
-    
+
     await this.notificationsService.create({
       recipientId: visit.host.id,
       type: NotificationType.VISIT_CHECK_IN,
@@ -426,8 +503,8 @@ export class VisitsService {
   /**
    * Registrar salida de una visita
    */
-  async checkOut(id: string): Promise<Visit> {
-    const visit = await this.findOne(id);
+  async checkOut(id: string, options?: TenantScopeOptions): Promise<Visit> {
+    const visit = await this.loadVisitEntity(id, options);
 
     // Validar que la visita esté en estado ACTIVE
     if (visit.status !== VisitStatus.ACTIVE) {
@@ -435,7 +512,7 @@ export class VisitsService {
     }
 
     visit.exitTime = new Date();
-    
+
     // Si aún tiene usos disponibles, marcar como READY_FOR_REENTRY para permitir reingreso
     // Si ya no tiene usos, marcar como COMPLETED
     if (visit.maxUses === null || visit.usedCount < visit.maxUses) {
@@ -447,10 +524,10 @@ export class VisitsService {
     const savedVisit = await this.visitRepository.save(visit);
 
     // Notificar al host sobre la salida de la visita
-    const statusInfo = savedVisit.status === VisitStatus.COMPLETED 
-      ? 'Visita completada (sin usos disponibles).' 
+    const statusInfo = savedVisit.status === VisitStatus.COMPLETED
+      ? 'Visita completada (sin usos disponibles).'
       : 'Podrá reingresar si está dentro del período válido.';
-    
+
     await this.notificationsService.create({
       recipientId: visit.host.id,
       type: NotificationType.VISIT_CHECK_OUT,
@@ -474,7 +551,7 @@ export class VisitsService {
    * Cancelar una visita
    */
   async cancel(id: string): Promise<Visit> {
-    const visit = await this.findOne(id);
+    const visit = await this.loadVisitEntity(id);
 
     if (visit.status === VisitStatus.COMPLETED) {
       throw new BadRequestException('No se puede cancelar una visita completada');
@@ -494,14 +571,14 @@ export class VisitsService {
    * Eliminar una visita
    */
   async remove(id: string): Promise<void> {
-    const visit = await this.findOne(id);
+    const visit = await this.loadVisitEntity(id);
     await this.visitRepository.remove(visit);
   }
 
   /**
    * Validar acceso de una visita (por QR o patente)
    */
-  async validateAccess(identifier: string, type: 'qr' | 'plate'): Promise<{
+  async validateAccess(identifier: string, type: 'qr' | 'plate', options?: TenantScopeOptions): Promise<{
     valid: boolean;
     visit?: Visit;
     message: string;
@@ -515,7 +592,7 @@ export class VisitsService {
         return { valid: false, message: 'Código QR no válido' };
       }
     } else if (type === 'plate') {
-      visit = await this.findByPlate(identifier);
+      visit = await this.findByPlate(identifier, options);
       if (!visit) {
         return { valid: false, message: 'Patente no autorizada' };
       }
@@ -543,10 +620,10 @@ export class VisitsService {
     // Verificar período de validez ANTES de verificar si está marcada como expirada
     // Esto permite marcar como expirada una visita que aún no lo está
     if (now < visit.validFrom) {
-      return { 
-        valid: false, 
-        visit, 
-        message: `Visita válida desde ${visit.validFrom.toLocaleString()}` 
+      return {
+        valid: false,
+        visit,
+        message: `Visita válida desde ${visit.validFrom.toLocaleString()}`
       };
     }
 
@@ -555,7 +632,7 @@ export class VisitsService {
       if (visit.status === VisitStatus.PENDING || visit.status === VisitStatus.ACTIVE || visit.status === VisitStatus.READY_FOR_REENTRY) {
         visit.status = VisitStatus.EXPIRED;
         await this.visitRepository.save(visit);
-        
+
         // Notificar al host
         await this.notificationsService.create({
           recipientId: visit.host.id,
@@ -587,10 +664,10 @@ export class VisitsService {
       }
     }
 
-    return { 
-      valid: true, 
-      visit, 
-      message: 'Acceso autorizado' 
+    return {
+      valid: true,
+      visit,
+      message: 'Acceso autorizado'
     };
   }
 

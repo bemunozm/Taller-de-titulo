@@ -290,7 +290,14 @@ export class DigitalConciergeService {
     try {
       if (approved) {
         // Si se aprueba, registrar entrada (checkIn) para incrementar usedCount correctamente
-        await this.visitsService.checkIn(session.createdVisit.id);
+        // Tarea de aislamiento tenant (branch fix/visits-tenant-isolation): este
+        // flujo (Conserje Digital) no tiene sesión de usuario en absoluto
+        // (DigitalConciergeController no tiene guards — el visitante habla con
+        // la IA de forma anónima) — TenantContextService no puede resolver el
+        // condominio del caller. La visita ya fue creada y su id ya vive en
+        // esta MISMA sesión (resource-derived), así que se bypassa el scoping
+        // por tenant en vez de romper el flujo de aprobación.
+        await this.visitsService.checkIn(session.createdVisit.id, { skipTenantScope: true });
         this.logger.log(`✅ Visit ${session.createdVisit.id} check-in registered (status: ACTIVE, usedCount incremented)`);
       } else {
         // Si se niega, solo cambiar el status
@@ -308,7 +315,8 @@ export class DigitalConciergeService {
         
         if (residentIsValid) {
           // Actualizar el host de la visita al residente que respondió
-          const updatedVisit = await this.visitsService.update(session.createdVisit.id, { hostId: residentId });
+          // (sin sesión de usuario — ver comentario del checkIn más arriba)
+          const updatedVisit = await this.visitsService.update(session.createdVisit.id, { hostId: residentId }, { skipTenantScope: true });
           this.logger.log(`✅ Visit host updated to residentId: ${residentId}, new host: ${updatedVisit.host.name}`);
         } else {
           this.logger.warn(`⚠️ ResidentId ${residentId} no está en la lista de residentes notificados`);
@@ -673,7 +681,11 @@ export class DigitalConciergeService {
         return 'Sin contexto histórico previo para esta casa.';
       }
 
-      const visits = await this.visitsService.findAll({ familyId: family.id });
+      // Sin sesión de usuario (ver comentario en respondToVisitor) — ya está
+      // acotado a UNA familia resource-derived (familyId), que a su vez
+      // pertenece a un único condominio, así que el bypass no reabre el leak
+      // cross-tenant que motivó esta tarea.
+      const visits = await this.visitsService.findAll({ familyId: family.id }, { skipTenantScope: true });
       const today = new Date();
       
       // Filtrar pre-aprobadas para hoy

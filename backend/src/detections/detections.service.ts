@@ -91,24 +91,32 @@ export class DetectionsService {
       } else if (vehicle.vehicleType === 'visitante' || vehicle.accessLevel === 'temporal') {
         // Vehículo de visitante, verificar si tiene visita válida
         try {
-          const visitValidation = await this.visitsService.validateAccess(dto.plate, 'plate');
-          
+          // Tarea de aislamiento tenant (branch fix/visits-tenant-isolation):
+          // este endpoint lo llama el worker LPR sin sesión de usuario
+          // (ServiceApiKeyGuard, no puebla request.user) — TenantContextService
+          // no puede resolver el condominio del caller. `skipTenantScope`
+          // preserva el comportamiento resource-derived existente (igual que
+          // resolveCameraOrganizationId arriba): la patente ya es el criterio
+          // de búsqueda, no hace falta acotar por tenant para no romper el
+          // flujo de apertura automática.
+          const visitValidation = await this.visitsService.validateAccess(dto.plate, 'plate', { skipTenantScope: true });
+
           if (visitValidation.valid && visitValidation.visit) {
             const visit = visitValidation.visit;
             decision = 'Permitido';
             residente = visit.host; // El anfitrión es el residente
-            
+
             // Determinar si es entrada o salida basado en el estado de la visita
             if (visit.status === 'pending' || visit.status === 'ready') {
               // Entrada: Visita pendiente o lista para reingreso → registrar check-in
-              await this.visitsService.checkIn(visit.id);
-              reason = visit.status === 'pending' 
+              await this.visitsService.checkIn(visit.id, { skipTenantScope: true });
+              reason = visit.status === 'pending'
                 ? `Entrada autorizada - ${visit.visitorName}`
                 : `Reingreso autorizado - ${visit.visitorName}`;
               isExit = false;
             } else if (visit.status === 'active') {
               // Salida: Visita activa → registrar check-out
-              await this.visitsService.checkOut(visit.id);
+              await this.visitsService.checkOut(visit.id, { skipTenantScope: true });
               reason = `Salida registrada - ${visit.visitorName}`;
               isExit = true;
             } else {
@@ -134,24 +142,26 @@ export class DetectionsService {
     } else if (!vehicle) {
       // No existe el vehículo, verificar si hay una visita programada
       try {
-        const visitValidation = await this.visitsService.validateAccess(dto.plate, 'plate');
-        
+        // Ver comentario equivalente más arriba: worker LPR sin sesión de
+        // usuario, bypass explícito del scoping por tenant.
+        const visitValidation = await this.visitsService.validateAccess(dto.plate, 'plate', { skipTenantScope: true });
+
         if (visitValidation.valid && visitValidation.visit) {
           const visit = visitValidation.visit;
           decision = 'Permitido';
           residente = visit.host;
-          
+
           // Determinar si es entrada o salida basado en el estado de la visita
           if (visit.status === 'pending' || visit.status === 'ready') {
             // Entrada: Visita pendiente o lista para reingreso → registrar check-in
-            await this.visitsService.checkIn(visit.id);
+            await this.visitsService.checkIn(visit.id, { skipTenantScope: true });
             reason = visit.status === 'pending'
               ? `Entrada autorizada - ${visit.visitorName}`
               : `Reingreso autorizado - ${visit.visitorName}`;
             isExit = false;
           } else if (visit.status === 'active') {
             // Salida: Visita activa → registrar check-out
-            await this.visitsService.checkOut(visit.id);
+            await this.visitsService.checkOut(visit.id, { skipTenantScope: true });
             reason = `Salida registrada - ${visit.visitorName}`;
             isExit = true;
           } else {
