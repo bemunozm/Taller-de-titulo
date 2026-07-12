@@ -468,6 +468,74 @@ export class NotificationsService {
   }
 
   /**
+   * Igual que `notifyByRole` pero acotado a los usuarios con el rol dado que
+   * pertenecen a `organizationId` (Fase 2, revisión pre-F2.2 —
+   * docs/modulos/agente-cerebro.md §12: fix del leak de escalamiento
+   * cross-tenant en `PendingActionsService.notifyEscalation`/
+   * `notifyResolution`, que notificaba a conserjes de TODOS los condominios).
+   *
+   * `UsersService.findByRole` no filtra por tenant porque NO EXISTE una
+   * columna `organizationId` a nivel de `User` ni de `Role` en el esquema
+   * actual (`Role.name` es único global; `User.family` es nulo para staff
+   * sin residencia asignada) — no hay JOIN posible ahí. El filtrado ocurre
+   * acá resolviendo la organización REAL de cada candidato con el mismo
+   * mecanismo canónico que ya usa `create()` arriba
+   * (`resolveOrganizationIdForUser` contra la tabla `member` de better-auth,
+   * la única fuente de verdad de membresía de organización del sistema).
+   *
+   * `organizationId: null` (el "cajón sin condominio" ya usado en el resto
+   * del sistema — hub aún no asociado) hace match por IGUALDAD, no por
+   * bypass: solo notifica a usuarios cuya organización resuelta sea también
+   * `null`, nunca a todos.
+   */
+  async notifyByRoleForOrganization(
+    roleName: string,
+    organizationId: string | null,
+    type: NotificationType,
+    title: string,
+    message: string,
+    options?: {
+      priority?: NotificationPriority;
+      data?: any;
+      requiresAction?: boolean;
+    },
+  ): Promise<Notification[]> {
+    const candidates = await this.usersService.findByRole(roleName);
+
+    const scoped: typeof candidates = [];
+    for (const user of candidates) {
+      const userOrganizationId = await resolveOrganizationIdForUser(
+        user.id,
+        this.dataSource,
+      );
+      if (userOrganizationId === organizationId) {
+        scoped.push(user);
+      }
+    }
+
+    this.logger.log(
+      `Notificando a ${scoped.length}/${candidates.length} usuarios con rol ${roleName} (organizationId=${organizationId ?? 'null'})`,
+    );
+
+    const notifications: Notification[] = [];
+
+    for (const user of scoped) {
+      const notification = await this.create({
+        recipientId: user.id,
+        type,
+        title,
+        message,
+        priority: options?.priority || NotificationPriority.NORMAL,
+        data: options?.data,
+        requiresAction: options?.requiresAction,
+      });
+      notifications.push(notification);
+    }
+
+    return notifications;
+  }
+
+  /**
    * Notificar a múltiples usuarios con el mismo mensaje
    */
   async notifyMultiple(

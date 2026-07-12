@@ -1,11 +1,16 @@
 import { forwardRef, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from '../auth/auth.module';
+import { DetectionsModule } from '../detections/detections.module';
 import { ConciergeAuthGuard } from '../digital-concierge/guards/concierge-auth.guard';
 import { DigitalConciergeModule } from '../digital-concierge/digital-concierge.module';
 import { FamiliesModule } from '../families/families.module';
 import { HubModule } from '../hub/hub.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { UsersModule } from '../users/users.module';
+import { VehiclesModule } from '../vehicles/vehicles.module';
+import { VisitsModule } from '../visits/visits.module';
 import {
   AGENT_LANGUAGE_MODEL,
   createAgentLanguageModel,
@@ -13,10 +18,17 @@ import {
 import { AgentController } from './agent.controller';
 import { AgentRunnerService } from './agent-runner.service';
 import { AuthorizedContextFactory } from './authorized-context.factory';
+import { PendingAction } from './entities/pending-action.entity';
+import { PendingActionsController } from './pending-actions.controller';
+import { PendingActionsService } from './pending-actions.service';
 import { ToolDispatcherService } from './tool-dispatcher.service';
 import { ToolRegistryService } from './tool-registry.service';
 import { VIGILIA_TOOLS } from './tool-registry.token';
+import { AbrirAccesoTool } from './tools/abrir-acceso.tool';
 import { BuscarResidenteTool } from './tools/buscar-residente.tool';
+import { ConsultarAccesosRecientesTool } from './tools/consultar-accesos-recientes.tool';
+import { ConsultarVehiculoTool } from './tools/consultar-vehiculo.tool';
+import { ConsultarVisitasTool } from './tools/consultar-visitas.tool';
 import { FinalizarLlamadaTool } from './tools/finalizar-llamada.tool';
 import { GuardarDatosVisitanteTool } from './tools/guardar-datos-visitante.tool';
 import { NotificarResidenteTool } from './tools/notificar-residente.tool';
@@ -56,13 +68,22 @@ import { ReenviarNotificacionTool } from './tools/reenviar-notificacion.tool';
  */
 @Module({
   imports: [
+    TypeOrmModule.forFeature([PendingAction]),
     UsersModule,
     FamiliesModule,
     HubModule,
     AuthModule,
+    NotificationsModule,
+    // Fase 2, Bloque F2.1 (docs/modulos/agente-cerebro.md §12): las 3 tools de
+    // consulta nuevas inyectan estos servicios de dominio directo — ninguno
+    // importa AgentModule de vuelta, así que no hace falta forwardRef (a
+    // diferencia de DigitalConciergeModule más abajo).
+    VehiclesModule,
+    VisitsModule,
+    DetectionsModule,
     forwardRef(() => DigitalConciergeModule),
   ],
-  controllers: [AgentController],
+  controllers: [AgentController, PendingActionsController],
   providers: [
     // Guard de transporte reusado (ver docstring de la clase arriba). Sus
     // dependencias (HubAuthGuard, AuthGuard) llegan vía los `imports` de
@@ -75,6 +96,15 @@ import { ReenviarNotificacionTool } from './tools/reenviar-notificacion.tool';
     NotificarResidenteTool,
     ReenviarNotificacionTool,
     FinalizarLlamadaTool,
+    ConsultarVehiculoTool,
+    ConsultarVisitasTool,
+    ConsultarAccesosRecientesTool,
+    // Fase 2, Bloque F2.2 (docs/modulos/agente-cerebro.md §12): apertura física
+    // de accesos con autonomía condicional (`requiresApproval` dinámico) —
+    // inyecta `DigitalConciergeService` (igual que `finalizar_llamada`/
+    // `notificar_residente`, ver forwardRef abajo) + `HubGateway` (ya exportado
+    // por `HubModule`, importado arriba).
+    AbrirAccesoTool,
     {
       provide: VIGILIA_TOOLS,
       useFactory: (
@@ -83,12 +113,20 @@ import { ReenviarNotificacionTool } from './tools/reenviar-notificacion.tool';
         notificarResidente: NotificarResidenteTool,
         reenviarNotificacion: ReenviarNotificacionTool,
         finalizarLlamada: FinalizarLlamadaTool,
+        consultarVehiculo: ConsultarVehiculoTool,
+        consultarVisitas: ConsultarVisitasTool,
+        consultarAccesosRecientes: ConsultarAccesosRecientesTool,
+        abrirAcceso: AbrirAccesoTool,
       ) => [
         buscarResidente,
         guardarDatosVisitante,
         notificarResidente,
         reenviarNotificacion,
         finalizarLlamada,
+        consultarVehiculo,
+        consultarVisitas,
+        consultarAccesosRecientes,
+        abrirAcceso,
       ],
       inject: [
         BuscarResidenteTool,
@@ -96,9 +134,20 @@ import { ReenviarNotificacionTool } from './tools/reenviar-notificacion.tool';
         NotificarResidenteTool,
         ReenviarNotificacionTool,
         FinalizarLlamadaTool,
+        ConsultarVehiculoTool,
+        ConsultarVisitasTool,
+        ConsultarAccesosRecientesTool,
+        AbrirAccesoTool,
       ],
     },
     ToolRegistryService,
+
+    // Fase 2, Bloque F2.1: mecanismo de autonomía/aprobación —
+    // `ToolDispatcherService` la usa para escalar (`requiresApproval`), el
+    // endpoint de aprobación (`PendingActionsController`) la usa para
+    // resolver. Ver su docstring sobre por qué NO depende de vuelta de
+    // `ToolDispatcherService` (evita un ciclo de providers).
+    PendingActionsService,
     ToolDispatcherService,
 
     // Modelo del AI SDK — provider-agnóstico, configurable por env (ver
@@ -115,6 +164,10 @@ import { ReenviarNotificacionTool } from './tools/reenviar-notificacion.tool';
   // Bloque A2b: `DigitalConciergeController` (otro módulo, ver forwardRef
   // arriba) necesita estos tres para reemplazar su `switch` por el
   // dispatcher del catálogo — ver digital-concierge.module.ts.
-  exports: [ToolDispatcherService, ToolRegistryService, AuthorizedContextFactory],
+  exports: [
+    ToolDispatcherService,
+    ToolRegistryService,
+    AuthorizedContextFactory,
+  ],
 })
 export class AgentModule {}

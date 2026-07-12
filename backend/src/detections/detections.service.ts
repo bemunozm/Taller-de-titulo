@@ -14,6 +14,8 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { UsersService } from '../users/users.service';
 import { NotificationType, NotificationPriority } from '../notifications/entities/notification.entity';
 import { HubGateway } from '../hub/hub.gateway';
+import { applyTenantFilter } from '../common/tenant/tenant-context.util';
+import type { TenantContext } from '../common/tenant/tenant-context.types';
 
 @Injectable()
 export class DetectionsService {
@@ -275,12 +277,29 @@ export class DetectionsService {
     return this.attemptsRepo.save(att);
   }
 
-  async listAttempts(limit = 50) {
-    return this.attemptsRepo.find({ 
-      relations: ['detection', 'residente', 'residente.family'], 
-      take: limit, 
-      order: { createdAt: 'DESC' } 
-    });
+  /**
+   * Fase 2, Bloque F2.1 (docs/modulos/agente-cerebro.md §12): `tenantScope`
+   * es OPCIONAL y ADITIVO — el caller existente (`DetectionsController`,
+   * gap conocido de tarea #19: "filtrado por tenant... queda PENDIENTE")
+   * sigue llamando sin este parámetro y mantiene su comportamiento actual
+   * (sin filtrar). La tool `consultar_accesos_recientes` es la primera en
+   * pasarlo, porque SÍ tiene un `AuthorizedContext` con tenant resuelto y NO
+   * puede confiar en el default sin filtro.
+   */
+  async listAttempts(limit = 50, tenantScope?: TenantContext) {
+    const query = this.attemptsRepo
+      .createQueryBuilder('attempt')
+      .leftJoinAndSelect('attempt.detection', 'detection')
+      .leftJoinAndSelect('attempt.residente', 'residente')
+      .leftJoinAndSelect('residente.family', 'family')
+      .orderBy('attempt.createdAt', 'DESC')
+      .take(limit);
+
+    if (tenantScope) {
+      applyTenantFilter(query, 'attempt', tenantScope);
+    }
+
+    return query.getMany();
   }
 
   /**
