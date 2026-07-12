@@ -14,6 +14,16 @@ import { SmsService } from '../../common/services/sms.service';
 import { QRCodeService } from '../../common/services/qrcode.service';
 import { HubGateway } from '../../hub/hub.gateway';
 import { User } from '../../users/entities/user.entity';
+import {
+  formatRut,
+  isValidChileanPhone,
+  isValidChileanPlate,
+  isValidPassport,
+  isValidRut,
+  looksLikeRut,
+  normalizeChileanPhone,
+  normalizeChileanPlate,
+} from '../../common/utils/chilean-format.util';
 
 /**
  * Origen de una sesión, resuelto por el controller a partir de
@@ -40,6 +50,34 @@ export interface SaveVisitorDataInput {
   patente?: string;
   motivo?: string;
   casa?: string;
+}
+
+/** Campos de `SaveVisitorDataInput` que pasan por validación/normalización de dominio. */
+export type SaveVisitorDataField = 'rut' | 'telefono' | 'patente';
+
+/**
+ * Resultado de `saveVisitorData` (cierre de brecha Fase 1 → Fase 2: revive en
+ * el backend la validación/formateo que el frontend hacía antes de
+ * adelgazarse — ver `common/utils/chilean-format.util.ts`).
+ *
+ * Extiende (no rompe) la forma anterior `{ message, saved }`: agrega `ok` y,
+ * cuando `ok` es `false`, `campo`/`mensaje` para que la tool se lo devuelva
+ * al modelo (Sofía) y este le pida al visitante que repita el dato en vez de
+ * fallar duro (ver `agent/prompts/sofia.prompt.ts`).
+ */
+export interface SaveVisitorDataResult {
+  message: string;
+  saved: {
+    nombre: string | null;
+    rut: string | null;
+    telefono: string | null;
+    patente: string | null;
+    motivo: string | null;
+    casa: string | null;
+  };
+  ok: boolean;
+  campo?: SaveVisitorDataField;
+  mensaje?: string;
 }
 
 /**
@@ -462,22 +500,80 @@ export class DigitalConciergeService {
   // estos métodos.
 
   /**
-   * Guarda datos del visitante en la sesión
+   * Guarda datos del visitante en la sesión.
+   *
+   * Cierre de brecha Fase 1 → Fase 2: el frontend adelgazado dejó de validar
+   * y formatear RUT/teléfono/patente antes de mandarlos — este método ahora
+   * es la ÚNICA línea de defensa (dominio, no UI) para esos tres campos, vía
+   * `common/utils/chilean-format.util.ts`.
+   *
+   * Diseño "fail-soft" a propósito: un dato inválido NUNCA lanza una
+   * excepción (esto es una llamada telefónica en curso, no un formulario) —
+   * simplemente no se persiste ese campo, y el resultado devuelve
+   * `ok: false` + `campo`/`mensaje` para que la tool `guardar_datos_visitante`
+   * se lo entregue al modelo (Sofía), que le pide al visitante que repita el
+   * dato (ver `agent/prompts/sofia.prompt.ts`, pasos 2b/2c/2d). Si llegan
+   * varios campos en la misma llamada y más de uno es inválido, se reporta
+   * el primero (rut > telefono > patente) — el flujo normal de Sofía llama
+   * esta tool con un campo a la vez, así que en la práctica siempre hay como
+   * máximo uno.
    */
-  async saveVisitorData(session: ConciergeSession, data: SaveVisitorDataInput) {
+  async saveVisitorData(
+    session: ConciergeSession,
+    data: SaveVisitorDataInput,
+  ): Promise<SaveVisitorDataResult> {
     this.logger.debug('Saving visitor data...', data);
 
+    let campoInvalido: SaveVisitorDataField | undefined;
+    let mensajeInvalido: string | undefined;
+
     if (data.nombre) session.visitorName = data.nombre;
-    if (data.rut) session.visitorRut = data.rut;
-    if (data.telefono) session.visitorPhone = data.telefono;
-    if (data.patente) session.vehiclePlate = data.patente;
+
+    if (data.rut) {
+      if (looksLikeRut(data.rut)) {
+        if (isValidRut(data.rut)) {
+          session.visitorRut = formatRut(data.rut);
+        } else {
+          campoInvalido = 'rut';
+          mensajeInvalido = `El RUT "${data.rut}" no tiene un dígito verificador válido.`;
+        }
+      } else if (isValidPassport(data.rut)) {
+        session.visitorRut = data.rut.trim().toUpperCase();
+      } else {
+        campoInvalido = 'rut';
+        mensajeInvalido = `"${data.rut}" no parece un RUT ni un pasaporte válido.`;
+      }
+    }
+
+    if (data.telefono) {
+      const normalizedPhone = normalizeChileanPhone(data.telefono);
+      if (isValidChileanPhone(normalizedPhone)) {
+        session.visitorPhone = normalizedPhone;
+      } else if (!campoInvalido) {
+        campoInvalido = 'telefono';
+        mensajeInvalido = `El teléfono "${data.telefono}" no parece un número chileno válido.`;
+      }
+    }
+
+    if (data.patente) {
+      const normalizedPlate = normalizeChileanPlate(data.patente);
+      if (isValidChileanPlate(normalizedPlate)) {
+        session.vehiclePlate = normalizedPlate;
+      } else if (!campoInvalido) {
+        campoInvalido = 'patente';
+        mensajeInvalido = `La patente "${data.patente}" no tiene un formato chileno válido.`;
+      }
+    }
+
     if (data.motivo) session.visitReason = data.motivo;
     if (data.casa) session.destinationHouse = data.casa;
 
     await this.sessionRepository.save(session);
 
     return {
-      message: 'Datos guardados correctamente',
+      message: campoInvalido
+        ? 'Uno de los datos entregados no es válido, no se guardó ese campo'
+        : 'Datos guardados correctamente',
       saved: {
         nombre: session.visitorName,
         rut: session.visitorRut,
@@ -486,6 +582,8 @@ export class DigitalConciergeService {
         motivo: session.visitReason,
         casa: session.destinationHouse,
       },
+      ok: !campoInvalido,
+      ...(campoInvalido ? { campo: campoInvalido, mensaje: mensajeInvalido } : {}),
     };
   }
 

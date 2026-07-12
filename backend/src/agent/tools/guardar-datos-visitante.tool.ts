@@ -24,6 +24,14 @@ const outputSchema = z.object({
     motivo: z.string().nullable(),
     casa: z.string().nullable(),
   }),
+  // Cierre de brecha Fase 1 → Fase 2 (ver `DigitalConciergeService.saveVisitorData`
+  // y `common/utils/chilean-format.util.ts`): `ok: false` indica que uno de
+  // los campos declarados por voz (rut/telefono/patente) no pasó la
+  // validación de dominio y NO se guardó — `campo`/`mensaje` le dicen a
+  // Sofía (agent/prompts/sofia.prompt.ts) qué pedirle de nuevo al visitante.
+  ok: z.boolean(),
+  campo: z.enum(['rut', 'telefono', 'patente']).optional(),
+  mensaje: z.string().optional(),
 });
 type GuardarDatosVisitanteOutput = z.infer<typeof outputSchema>;
 
