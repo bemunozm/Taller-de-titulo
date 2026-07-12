@@ -210,7 +210,7 @@ export class DetectionsService {
     }
 
     // Enviar notificaciones según el tipo de detección
-    await this.sendDetectionNotifications(dto.plate, decision, reason, isExit, residente, vehicle);
+    await this.sendDetectionNotifications(dto.plate, decision, reason, isExit, residente, vehicle, saved.organizationId);
 
     // AUTO-APERTURA INTEGRADADA AL HUB:
     // Si la placa está autorizada, mandamos evento directo a la Raspberry Pi saltándonos a Sofía
@@ -316,6 +316,15 @@ export class DetectionsService {
    * Enviar notificaciones de detección según el tipo de vehículo
    * - Si es un vehículo de visita: notificar a la familia y al conserje
    * - Cualquier otra detección: notificar solo al conserje
+   *
+   * Fix cross-tenant (mismo leak que `createPendingDetectionForConcierge`,
+   * cerrado en el mismo follow-up): notificar a los conserjes vía
+   * `notifyByRoleForOrganization` (filtra por la tabla `member`) en vez de
+   * `notifyByRole`, que ignora la organización y llegaba a los conserjes de
+   * TODOS los condominios en CADA detección de patente (no solo las
+   * pendientes). El aviso directo al host (`notificationsService.create` más
+   * abajo) no necesita este scoping: va a un `recipientId` puntual ya
+   * resuelto (el residente/host de la visita), no es un broadcast por rol.
    */
   private async sendDetectionNotifications(
     plate: string,
@@ -324,24 +333,26 @@ export class DetectionsService {
     isExit: boolean,
     residente: User | null,
     vehicle: any,
+    organizationId: string | null,
   ) {
     try {
       const action = isExit ? 'salida' : 'entrada';
       const actionCapitalized = isExit ? 'Salida' : 'Entrada';
-      
+
       // Determinar el tipo de notificación según la decisión
-      const notificationType = decision === 'Permitido' 
-        ? NotificationType.VEHICLE_DETECTED 
+      const notificationType = decision === 'Permitido'
+        ? NotificationType.VEHICLE_DETECTED
         : NotificationType.UNKNOWN_VEHICLE;
 
       // Prioridad alta para accesos denegados, normal para permitidos
-      const priority = decision === 'Permitido' 
-        ? NotificationPriority.NORMAL 
+      const priority = decision === 'Permitido'
+        ? NotificationPriority.NORMAL
         : NotificationPriority.HIGH;
 
       // Si el vehículo es de tipo visitante y hay un residente (host) asociado
       if (vehicle?.vehicleType === 'visitante' && residente) {
-        // Notificar solo al host (creador de la visita)
+        // Notificar solo al host (creador de la visita) — recipientId puntual,
+        // no un broadcast por rol, no requiere scoping por organización.
         await this.notificationsService.create({
           recipientId: residente.id,
           type: notificationType,
@@ -356,20 +367,33 @@ export class DetectionsService {
             detectionType: 'visit',
           },
         });
-        
+
         this.logger.log(`Notificación de visita enviada al host para patente ${plate}`);
       }
 
-      // Siempre notificar a todos los conserjes
-      await this.notificationsService.notifyByRole(
-        'Conserje',
-        notificationType,
-        `Detección de Vehículo - ${actionCapitalized}`,
-        `Se detectó la ${action} del vehículo con patente ${plate}. Decisión: ${decision}. ${reason}`,
-        { priority },
-      );
+      // Notificar a los conserjes del MISMO condominio que la detección.
+      // Fail-closed en cámaras legacy sin organización asignada
+      // (organizationId === null, pre-tarea #19): en vez de dejar que
+      // `notifyByRoleForOrganization` compare "null === null" (que en teoría
+      // podría calzar con un conserje sin membresía registrada), se opta
+      // explícitamente por NO notificar a nadie — preferible a arriesgar un
+      // broadcast o un match accidental cross-tenant.
+      if (organizationId === null) {
+        this.logger.warn(
+          `Detección de patente ${plate} sin organizationId (cámara legacy) — no se notifica a conserjes (fail-closed)`,
+        );
+      } else {
+        await this.notificationsService.notifyByRoleForOrganization(
+          'Conserje',
+          organizationId,
+          notificationType,
+          `Detección de Vehículo - ${actionCapitalized}`,
+          `Se detectó la ${action} del vehículo con patente ${plate}. Decisión: ${decision}. ${reason}`,
+          { priority },
+        );
 
-      this.logger.log(`Notificación enviada a conserjes para detección ${plate}`);
+        this.logger.log(`Notificación enviada a conserjes para detección ${plate}`);
+      }
     } catch (error) {
       this.logger.error(`Error al enviar notificaciones de detección: ${error.message}`, error.stack);
       // No lanzar el error para no interrumpir el flujo de detección
@@ -412,9 +436,15 @@ export class DetectionsService {
       );
     }
     
-    // Notificar a todos los conserjes
-    const notifications = await this.notificationsService.notifyByRole(
+    // Fix cross-tenant (follow-up post-auditoría Fase 0/1): notificar SOLO a
+    // los conserjes del condominio de la detección (vía `notifyByRoleForOrganization`,
+    // que filtra por la tabla `member`) — antes se usaba `notifyByRole`, que
+    // notifica a TODOS los conserjes de la plataforma sin importar su
+    // organización, filtrando conserjes de otros condominios con la
+    // detección pendiente de otro.
+    const notifications = await this.notificationsService.notifyByRoleForOrganization(
       'Conserje',
+      detection.organizationId,
       NotificationType.UNKNOWN_VEHICLE,
       'Vehículo No Reconocido - Requiere Aprobación',
       `Se detectó el vehículo con patente ${detection.plate}. ${reason}. Por favor, revisa y toma una decisión.`,
