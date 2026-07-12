@@ -1,10 +1,19 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, OneToMany } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, OneToMany, Index } from 'typeorm';
 import { AccessAttempt } from '../../detections/entities/access-attempt.entity';
 
 @Entity({ name: 'plate_detections' })
 export class PlateDetection {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // Tarea #19 (docs/modulos/auth-multitenant.md §7) — resource-derived desde
+  // la cámara asociada (`cameraId` de abajo), estampado en
+  // DetectionsService.createDetection al recibir la detección del worker LPR
+  // (sin sesión de usuario). Ver docstring de la misma columna en
+  // access-attempt.entity.ts.
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  organizationId: string | null;
 
   @Column({ type: 'varchar', length: 128 })
   cameraId: string;

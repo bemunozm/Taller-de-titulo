@@ -4,7 +4,7 @@
  * Uso:
  *   node scripts/seed-admin.js <email> <password> [nombre] [rut] [phone]
  *
- * Idempotente: si el email ya existe, actualiza password + confirmed y
+ * Idempotente: si el email ya existe, actualiza password + emailVerified y
  * asegura el rol Super Administrador. Lee la config de DB desde backend/.env.
  * Usa el mismo hashing que el backend (bcrypt, 10 rounds).
  */
@@ -59,13 +59,13 @@ async function main() {
     if (existing.rowCount > 0) {
       userId = existing.rows[0].id;
       await client.query(
-        `UPDATE "user" SET password = $1, confirmed = true, name = $2, "updatedAt" = now() WHERE id = $3`,
+        `UPDATE "user" SET password = $1, "emailVerified" = true, name = $2, "updatedAt" = now() WHERE id = $3`,
         [hash, name, userId],
       );
       console.log(`Usuario existente actualizado: ${emailLc} (${userId})`);
     } else {
       const ins = await client.query(
-        `INSERT INTO "user" (rut, name, email, phone, password, confirmed, age)
+        `INSERT INTO "user" (rut, name, email, phone, password, "emailVerified", age)
          VALUES ($1, $2, $3, $4, $5, true, $6) RETURNING id`,
         [rut, name, emailLc, phone, hash, age],
       );
@@ -80,7 +80,26 @@ async function main() {
       [userId, roleId],
     );
 
-    console.log(`Rol Super Administrador asignado. Listo para login: ${emailLc}`);
+    // asegurar cuenta better-auth (provider 'credential') con el MISMO hash, para
+    // poder loguear por cookie (better-auth) además del login legacy (Fase 0 #20).
+    // better-auth guarda su hash en `account`, no en `user.password`. accountId
+    // = userId para el provider credential. No hay unique (userId,providerId) →
+    // upsert manual.
+    const acct = await client.query(
+      `SELECT id FROM account WHERE "userId" = $1 AND "providerId" = 'credential' LIMIT 1`,
+      [userId],
+    );
+    if (acct.rowCount > 0) {
+      await client.query(`UPDATE account SET password = $1, "updatedAt" = now() WHERE id = $2`, [hash, acct.rows[0].id]);
+    } else {
+      await client.query(
+        `INSERT INTO account ("accountId", "providerId", "userId", password, "updatedAt")
+         VALUES ($1, 'credential', $2, $3, now())`,
+        [userId, userId, hash],
+      );
+    }
+
+    console.log(`Rol Super Administrador + cuenta better-auth listos. Login (legacy y cookie): ${emailLc}`);
   } finally {
     await client.end();
   }

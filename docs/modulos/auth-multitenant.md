@@ -60,6 +60,23 @@ better-auth default = **cookies httpOnly + server session** (lookup en DB). Es m
 - **Tenant scoping en datos:** agregar `organizationId` a las entidades de dominio (vehículos, visitas, detecciones, cámaras, notificaciones, hubs) + un interceptor/guard que filtre por el tenant activo. Es el grueso del trabajo de aislamiento.
 - `dynamicAccessControl` solo si cada condominio necesitara roles propios en runtime (por ahora, no).
 
+## 7b. Onboarding y creación de cuentas (modelo de negocio)
+**Política: NADIE se auto-registra** (`disableSignUp: true`). Las cuentas se crean en cascada, tal como Benjamin lo tenía pensado — y better-auth lo da nativo:
+
+```
+Plataforma (super-admin / nosotros)
+  └─ crea el Condominio (organization) + su Administrador (owner de la org)
+        └─ el Admin del condominio crea/invita a SUS usuarios
+              (residentes, conserjes) DENTRO de su organization
+```
+
+Mecanismos de better-auth (organization + admin plugin):
+- **Invitaciones** (`organization.inviteMember({ email, role })`): email al invitado → acepta y establece su contraseña. Tablas `invitation`/`member` ya vienen con el plugin.
+- **Creación directa por admin** (admin plugin / API server-side): el admin crea la cuenta y el usuario la activa con un link de "establecer contraseña" (reutiliza el flujo de verification/reset).
+- **Roles de la organización** (owner/admin/member, customizables) → se mapean a: Admin-condominio / Conserje / Residente.
+
+Esto **reemplaza** el `/auth/register` deshabilitado y el "cuenta creada por admin" propio (`sendAccountCreatedByAdminEmail`). Se materializa en las fases de **organization (tenant)** + **flujos**. Guía: skill `organization-best-practices`.
+
 ## 8. Plan de migración (por pasos, cadencia en días)
 1. **Spike/POC:** instalar `nestjs-better-auth` + skills; levantar auth email+password con bcrypt override; verificar body-parser deshabilitado y coexistencia con TypeORM (schema separado o tabla compartida).
 2. **Modelo User:** implementar opción C (o A si el POC lo pide); enlazar roles/permisos; poblar `request.user` con permisos (customSession).
@@ -83,6 +100,66 @@ better-auth default = **cookies httpOnly + server session** (lookup en DB). Es m
 4. **Tenant:** ✅ **Solo `organization` = condominio** por ahora; `teams` (torres/edificios) se agregan después si el piloto lo pide.
 
 Con esto el diseño queda **cerrado** y listo para implementar en la Fase 0.
+
+## 11. Estado del POC (2026-07-11) — ✅ verificado
+better-auth quedó montado **en paralelo** al auth propio, sin romper nada. Verificado end-to-end (build limpio, sign-in con cookie httpOnly, get-session ok, rutas propias siguen 401). Archivos: `src/auth/better-auth.ts`, `main.ts`, `app.module.ts`, `scripts/create-better-auth-schema.js`. Schema Postgres dedicado `better_auth`; bcrypt override; `secret` 48 chars.
+
+**Correcciones/hallazgos del POC:**
+- El plugin **apiKey NO está en el core** de better-auth 1.6.23 → es paquete **oficial separado** `@better-auth/api-key` (mismo monorepo). Ya instalado.
+- **Orden de carga de env:** `better-auth.ts` construye el `pg.Pool` a nivel de import (antes de `ConfigModule`) → requiere `import 'dotenv/config'` explícito.
+
+**Aristas de seguridad a resolver al cablear better-auth como auth REAL (checklist de la skill `better-auth-security-best-practices`):**
+- 🔴 **Sign-up abierto:** `emailAndPassword` sin `disableSignUp` deja `/api/auth/sign-up/email` público — contradice la política "solo admins crean usuarios". Cerrar con `disableSignUp: true` + creación por invitación/admin (organization plugin).
+- 🟠 **Rate limiting:** en prod viene ON, pero `storage` default es "memory" → configurar `storage: "database"` + `customRules` para sign-in/sign-up.
+- 🟠 **Prod:** `baseURL` con HTTPS + `useSecureCookies`; auditar `npm audit` (vulns detectadas al instalar) con cybersecurity-engineer antes de mergear.
+- 🟡 **Audit logging** vía `databaseHooks` (sesión creada/revocada) — refuerza la narrativa de seguridad de la tesis.
+
+## 12. Tarea #16 — Modelo User unificado ✅ (2026-07-11, verificado)
+El `user` de better-auth es la fuente de verdad (opción C). **Una sola tabla `user` en `public`**: TypeORM la crea (declara columnas nativas de better-auth + additionalFields `rut/phone/age/profilePicture`); better-auth crea `session/account/verification/organization/...` vía su CLI. `confirmed`→`emailVerified` nativo. `generateId: uuid` calza con las FK existentes. Plugin `customSession` inyecta `roles`+`permissions` (SQL parametrizado) en `get-session`. Verificado por Nova: build limpio, login legacy + módulos dependientes (`/users`,`/vehicles`) 200, sign-up + get-session devuelven el user unificado con roles/permisos. El RBAC fino quedó intacto.
+
+**Aristas transitorias (para #17/#18/#19):**
+- 🟠 **Dos stores de credenciales** conviven: `user.password` (legacy, AuthService JWT) y tabla `account` (better-auth). Un usuario existe en un path de login o el otro hasta que #17/#18 unifiquen. `user.password` quedó `nullable`.
+- 🔴 **`disableSignUp` sigue sin setear** — `/api/auth/sign-up/email` alcanzable. Cerrar en #18/onboarding.
+- 🟠 **`rut`/`phone` son additionalFields requeridos** → los flujos de invitación/creación por admin (#19, onboarding §7b) DEBEN proveerlos o el INSERT falla por NOT NULL. `phone` es `varchar(15)` (formato chileno `+569XXXXXXXX` = 12, cabe).
+
+## 13. Tarea #17 — AuthGuard dual-mode ✅ (2026-07-11, verificado)
+`src/auth/auth.guard.ts` reescrito: autentica vía **sesión de better-auth (cookie)** como primario y **JWT Bearer legacy** como fallback (`??`); en ambos caminos carga el User completo (roles.permissions.family) → `request.user`. `AuthorizationGuard` + los 114 `@RequirePermissions` + `@Public` intactos. Verificado por Nova: legacy 200/401/401, cookie better-auth 403(sin rol)/200(con rol). Build limpio.
+- **Modo dual = transitorio:** #20 migra el frontend a cookies; #21 retira el fallback JWT.
+- 🔴 **Deuda Jest/ESM (para #21):** `@thallesp/nestjs-better-auth` importa subpaths ESM-only de better-auth → Jest no puede parsear specs que importen `auth.guard.ts` (Node 22 sí, la app y el build funcionan). El suite ya estaba 100% rojo en baseline por otras razones. Arreglar la config de Jest (transform/ESM) antes de escribir tests de auth.
+
+## 14. Tarea #18 — Flujos de cuenta + apiKey + disableSignUp ✅ (2026-07-11, verificado)
+- **`disableSignUp: true`** → `/api/auth/sign-up/email` cerrado (400). Cuentas nacen por `UsersService.createAccountByAdmin` (admin-only) que dispara `requestPasswordReset` para que el usuario ponga su clave.
+- **Flujos migrados a better-auth:** forgot/reset → `requestPasswordReset`/`resetPassword`; confirm/verify email → `verifyEmail`/`sendVerificationEmail`. Emails re-cableados a `src/auth/templates/better-auth-email.templates.ts` (nodemailer directo, sin DI). `forgot-password` ahora responde 200 genérico (anti-enumeración).
+- **Bridge `user.password`** (mantiene vivo el login legacy hasta #20): `onPasswordReset` + `databaseHooks.account.create.after` espejan `account.password` → `user.password` (mismo hash bcrypt). Verificado: tras reset, login legacy funciona con la clave nueva. Limitación transitoria: `changePassword/setPassword` nativos aún no expuestos → sin bridge propio hasta que se cableen.
+- **Service-token:** plugin `apiKey({enableMetadata:true})`; endpoint admin `POST /api/v1/auth/service-api-keys` (perm nuevo `auth.manage-service-tokens`). `createServiceToken` legacy → `@deprecated`.
+- Verificado por Nova: build limpio, login legacy + módulos 200, sign-up 400, apiKey 201.
+- 🟠 **Deuda (para #21):** `DataInitializationService` NO retro-asigna permisos nuevos a roles ya sembrados (solo si `role.permissions.length===0`) — Super Admin sí (dinámico), pero Administrador/Desarrollador no reciben `auth.manage-service-tokens` en re-seed. Falta un backfill/migration para permisos nuevos.
+
+## 15. Tarea #19 — Multi-tenant (organization=condominio) ✅ (2026-07-11, verificado)
+- `organization` plugin (`allowUserToCreateOrganization:false`); tenant resuelto desde la **membresía** del `request.user` (tabla `member`), NO desde `session.activeOrganizationId` → funciona con JWT legacy y sesión better-auth por igual.
+- Mecanismo reutilizable en `src/common/tenant/`: `TenantInterceptor` (global) + `TenantContextService` (request-scoped) + helpers `scopeWhere`/`applyTenantFilter`/`stampOrganizationId` (SQL parametrizado, **super-admin bypass**).
+- `organizationId` en 10 entidades núcleo; stamp+filter en cameras/units/families/vehicles; stamp resource-derived en detections/anomalies/notifications.
+- Onboarding (`src/onboarding/`): `POST /onboarding/condominiums` (super-admin: crea condominio+admin) + `POST /onboarding/members` (admin: crea residentes/conserjes en su org). §7b materializado.
+- Verificado por Nova (test independiente): 2 condominios, **cada admin ve SOLO su data**, super-admin cross-tenant, RBAC 403, login legacy+módulos 200. Build limpio.
+- 🟠 **Pendiente para #21:** filtrado de `Visits`, filtrado de lectura en `detections`/`anomalies` (ya estampados), `Hub` (sin CRUD REST hoy).
+
+## 17. Tarea #21 — Hardening de seguridad ✅ (2026-07-11, verificado)
+Auditoría del cybersecurity-engineer (2🔴 · 3🟠 · 3🟡 · 5🔵) + fixes implementados y verificados por Nova. Postura: de "Necesita mejoras" → "Aceptable".
+- 🔴 **Ingesta cerrada:** `ServiceApiKeyGuard` (verifica `x-api-key` vía `verifyApiKey`) en `/detections/plates(+attempts)` y `/anomalies`; `/workers/ia-health` → `AuthGuard` (lo usa el frontend). Worker LPR (`lpr/settings.py`, `lpr/api/client.py`) manda `x-api-key` desde `LPR_SERVICE_API_KEY`. **Verificado: 401 sin key.** Cierra el riesgo #1 (abrir el portón sin auth).
+- 🔴 **JWT_SECRET:** eliminado el fallback `'yourSecretKey'`, fail-fast + `algorithms:['HS256']`. **Bug grave encontrado:** por orden de carga, `auth.module` firmaba los JWT con el secret hardcodeado ignorando el `.env` — arreglado con `import 'dotenv/config'`.
+- 🟠 Rate-limit: better-auth (`storage:'database'`) + `@nestjs/throttler` en login legacy (verificado 429 al 6º intento). `synchronize` solo en no-producción. `createServiceApiKey` restringe `targetUserId` (super-admin o misma org, verificado 403).
+- 🟡/🔵 Anti-enumeración en login legacy, `useSecureCookies`+https en prod, `helmet`, CORS validado, sin logs de PII.
+- **Deuda:** `lpr/.env` estaba trackeado con secretos (JWT legacy + `WORKER_MANAGER_SECRET`) → **desregistrado**, pero siguen en el historial de git → **ROTAR esos secretos**. Diferido: cajón `null` de tenant, Jest/ESM (bloquea tests), ~880 issues ESLint preexistentes.
+
+## 16. Tarea #20 — Frontend a cookies httpOnly ✅ (2026-07-12, verificado)
+Cutover del frontend de JWT/localStorage a **cookies httpOnly de better-auth**.
+- **Prerequisito resuelto:** `seed-admin.js` ahora provisiona la cuenta better-auth (`account` credential) además de `user.password`, para que el admin de dev loguee por cookie. Los usuarios de onboarding la obtienen al activarse (reset flow).
+- **Frontend:** `axios` con `withCredentials` (sin Bearer/localStorage); login → `POST /api/auth/sign-in/email` (cookie); logout → `sign-out`; `getUser` por `/api/v1/auth/user` (cookie vía guard dual-mode); vistas reset/confirm leen el token opaco de la URL. `usePermissions`/`ProtectedRoute` intactos.
+- **Regresión arreglada:** `CameraPlayer` (WHEP) y `useNotifications`/`WebSocketService` ya no usan `AUTH_TOKEN` — van por cookie (`withCredentials`). Cero usos de `AUTH_TOKEN` en el frontend.
+- **Verificado por Nova en el navegador:** login `ben.munozm` → redirige (sin `AUTH_TOKEN` en localStorage, cookie httpOnly no legible por JS) → `/dashboard` ("Dashboard Ejecutivo") carga con RBAC por cookie, sin errores en consola.
+- **Deuda (fuera de #20):** el frontend tiene ~11 errores `tsc` PREEXISTENTES (NotificationDetailModal `user` no definido, UserForm, useAuditLogs, etc.) que bloquean `vite build` de producción — corre en dev igual. El gateway de notificaciones NO valida la sesión (registra por `userId` del cliente) — hueco pre-existente a cerrar. `.claude/launch.json` creado (local) para el preview.
+
+## 🏁 Fase 0 COMPLETA (7/7): #15 POC · #16 User unificado · #17 guard dual-mode · #18 flujos+apiKey · #19 multi-tenant · #20 frontend cookies · #21 hardening. Mejor migrarlo antes de mergear: rotar los secretos de `lpr/.env` (estaban en git).
 
 ## Fuentes
 Ver informe completo en la bitácora / memoria del research (`agent-memory/deep-web-researcher/better-auth-nestjs-migration-2026.md`). Docs oficiales: better-auth.com (NestJS integration, Organization, Admin, Database, Auth0 migration, Security update June 2026), repo `ThallesP/nestjs-better-auth`, skills.sh/better-auth.

@@ -18,7 +18,7 @@ describe('UsersService', () => {
     rut: '12345678-9',
     phone: '123456789',
     age: 25,
-    confirmed: false,
+    emailVerified: false,
     roles: [],
   };
 
@@ -153,7 +153,7 @@ describe('UsersService', () => {
       // Assert
       expect(repository.findOne).toHaveBeenCalledWith({
         where: { email: 'test@example.com' },
-        select: ['id', 'email', 'password', 'name', 'confirmed'],
+        select: ['id', 'email', 'password', 'name', 'emailVerified'],
       });
       expect(result).toEqual(userWithPassword);
     });

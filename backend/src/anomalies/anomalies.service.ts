@@ -39,6 +39,15 @@ export class AnomaliesService {
     let suspicionLevel = 'MEDIUM';
     let reasoning = 'Sin evaluación de IA';
 
+    // Tarea #19 (docs/modulos/auth-multitenant.md §7): resource-derived —
+    // este endpoint lo llama el worker de analítica visual sin sesión de
+    // usuario (sin AuthGuard, ver AnomaliesController), así que el
+    // organizationId se deriva de la cámara asociada, no de TenantContext.
+    const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(cleanId);
+    const camera = isUuid
+      ? await this.cameraRepository.findOne({ where: { id: cleanId } })
+      : await this.cameraRepository.findOne({ where: { mountPath: cleanId } });
+
     // Evaluar con OpenAI Vision si hay foto adjunta
     if (meta.snapshot_jpeg_b64) {
       try {
@@ -52,6 +61,7 @@ export class AnomaliesService {
     
     const anomaly = this.anomaliesRepository.create({
       cameraId: cleanId,
+      organizationId: camera?.organizationId ?? null, // Tarea #19
       anomalyType: payload.anomalyType,
       confidence: payload.confidence,
       snapshotJpegB64: meta.snapshot_jpeg_b64,

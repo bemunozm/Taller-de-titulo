@@ -62,9 +62,9 @@ export default function CameraPlayer({ cameraId, objectFit = 'cover', minimal = 
     }
 
     const start = async () => {
-  const token = localStorage.getItem('AUTH_TOKEN');
-  const config = token ? { headers: { Authorization: `Bearer ${token}` } } : {};
-
+      // Auth por cookie httpOnly de better-auth (Fase 0 #20): la instancia `api`
+      // ya envía la cookie (withCredentials) y /streams/whep usa el guard
+      // dual-mode que la acepta — sin token en localStorage.
       const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
       pcRef.current = pc;
 
@@ -133,7 +133,7 @@ export default function CameraPlayer({ cameraId, objectFit = 'cover', minimal = 
         const localSdp = pc.localDescription?.sdp ?? offer.sdp;
         const url = `/streams/whep`;
   // send cameraMount (could be mountPath or id) to backend
-  const resp = await api.post(url, { offer: localSdp, cameraMount: cameraId }, config);
+  const resp = await api.post(url, { offer: localSdp, cameraMount: cameraId });
   const answerSdp = resp.data?.answer ?? resp.data;
   await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp } as RTCSessionDescriptionInit);
         // Remote description applied — negotiation finished (may still be connecting)

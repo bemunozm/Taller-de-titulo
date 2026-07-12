@@ -54,7 +54,7 @@ export class UsersController {
             name: { type: 'string', example: 'Juan Carlos Pérez González' },
             email: { type: 'string', example: 'juan.perez@universidad.cl' },
             age: { type: 'number', example: 22 },
-            confirmed: { type: 'boolean', example: false },
+            emailVerified: { type: 'boolean', example: false },
             createdAt: { type: 'string', format: 'date-time' },
             roles: { type: 'array', items: { type: 'object' } }
           }
@@ -114,7 +114,7 @@ export class UsersController {
             name: { type: 'string', example: 'Juan Carlos Pérez González' },
             email: { type: 'string', example: 'juan.perez@universidad.cl' },
             age: { type: 'number', example: 22 },
-            confirmed: { type: 'boolean', example: false },
+            emailVerified: { type: 'boolean', example: false },
             createdAt: { type: 'string', format: 'date-time' },
             roles: { type: 'array', items: { type: 'object' } },
             family: { type: 'object', nullable: true }
@@ -162,7 +162,7 @@ export class UsersController {
           email: { type: 'string', example: 'juan.perez@universidad.cl' },
           phone: { type: 'string', example: '+56912345678' },
           age: { type: 'number', example: 22 },
-          confirmed: { type: 'boolean', example: true },
+          emailVerified: { type: 'boolean', example: true },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
           roles: {
@@ -210,7 +210,7 @@ export class UsersController {
         email: { type: 'string', example: 'juan.perez@universidad.cl' },
         phone: { type: 'string', example: '+56912345678' },
         age: { type: 'number', example: 22 },
-        confirmed: { type: 'boolean', example: true },
+        emailVerified: { type: 'boolean', example: true },
         createdAt: { type: 'string', format: 'date-time' },
         updatedAt: { type: 'string', format: 'date-time' },
         roles: {

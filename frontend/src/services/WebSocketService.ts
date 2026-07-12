@@ -18,7 +18,7 @@ class WebSocketService {
    * Conecta al servidor WebSocket
    * @param token Token JWT del usuario autenticado
    */
-  connect(token: string): void {
+  connect(token?: string): void {
     if (this.socket?.connected) {
       console.log('[WebSocket] Ya está conectado')
       return
@@ -31,6 +31,7 @@ class WebSocketService {
 
     this.socket = io(wsUrl, {
       auth: { token },
+      withCredentials: true, // envía la cookie de sesión de better-auth (Fase 0 #20)
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionAttempts: this.maxReconnectAttempts,

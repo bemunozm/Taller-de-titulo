@@ -4,6 +4,66 @@ Registro cronológico de conversaciones, decisiones y avances. Lo más reciente 
 
 ---
 
+## 2026-07-12 — Fase 0 #20: frontend a cookies ✅ → FASE 0 COMPLETA (7/7)
+- Delegado a frontend-senior-dev, más fixes de regresión (CameraPlayer/useNotifications/WebSocketService) y verificación en navegador por Nova.
+- Cutover a cookies httpOnly de better-auth: axios withCredentials, login/logout/getUser por cookie, vistas reset/confirm con token opaco. `seed-admin` provisiona la cuenta better-auth (prereq). Cero `AUTH_TOKEN` en el frontend.
+- Verificado (navegador): login `ben.munozm` → dashboard con RBAC por cookie, cookie httpOnly, sin `AUTH_TOKEN` en localStorage, sin errores de consola.
+- **FASE 0 (auth robusta + multi-tenant) COMPLETA.** Detalle en [modulos/auth-multitenant.md §16](modulos/auth-multitenant.md#16-tarea-20--frontend-a-cookies-httponly--2026-07-12-verificado).
+- Pendientes antes de mergear/prod: rotar secretos de `lpr/.env`; ~11 errores tsc preexistentes del frontend (bloquean build prod); gateway de notificaciones sin validar sesión; Jest/ESM.
+
+---
+
+## 2026-07-11 (cont. 9) — Fase 0 #21: review de seguridad + hardening ✅
+- Auditoría del cybersecurity-engineer (2🔴/3🟠/3🟡/5🔵) + fixes por senior-backend-engineer, revisado y verificado por Nova.
+- **Cerrado el riesgo #1**: los endpoints de ingesta que abrían el portón sin auth ahora exigen `apiKey` (ServiceApiKeyGuard) — verificado 401 sin key. Worker LPR cablea la key.
+- JWT_SECRET: fallback eliminado + fix de un bug grave (firmaba con el secret hardcodeado por orden de carga). Rate-limit, synchronize prod-safe, targetUserId restringido, anti-enumeración, helmet, secure cookies.
+- `lpr/.env` desregistrado (tenía secretos) → **ROTAR**. Detalle en [modulos/auth-multitenant.md §17](modulos/auth-multitenant.md#17-tarea-21--hardening-de-seguridad--2026-07-11-verificado).
+- **Fase 0: 6/7 (#15–#19, #21). Solo falta #20 (frontend→cookies), diferido para cuando Benjamin esté presente (cutover visible + acoplamiento §16).**
+
+---
+
+## 2026-07-11 (cont. 8) — Fase 0 #19: multi-tenant ✅
+- Delegado a senior-backend-engineer, revisado y verificado por Nova (test de aislamiento independiente).
+- organization=condominio; tenant desde membresía; TenantInterceptor + helpers de scoping (super-admin bypass); `organizationId` en 10 entidades núcleo; módulo onboarding (condominios + members).
+- Verificado: 2 condominios aislados (cada admin ve solo su data), super-admin cross-tenant, RBAC 403, login legacy+módulos 200.
+- **Fase 0: 5/7 (#15–#19). Falta #20 (frontend→cookies, ver acoplamiento §16) y #21 (cleanup+seguridad+tests).**
+- Detalle en [modulos/auth-multitenant.md §15](modulos/auth-multitenant.md#15-tarea-19--multi-tenant-organizationcondominio--2026-07-11-verificado).
+
+---
+
+## 2026-07-11 (cont. 7) — Fase 0 #18: flujos + apiKey + disableSignUp ✅
+- Delegado a senior-backend-engineer, revisado y verificado por Nova.
+- Sign-up cerrado (`disableSignUp`), flujos forgot/reset/confirm migrados a better-auth, emails re-cableados, bridge `user.password` que mantiene el login legacy vivo, service-token vía apiKey.
+- Verificado: login legacy + módulos 200, sign-up 400, apiKey endpoint 201. Build limpio.
+- Detalle y deudas (#21: retro-assign de permisos, retirar Token/createServiceToken legacy, Jest/ESM) en [modulos/auth-multitenant.md §14](modulos/auth-multitenant.md#14-tarea-18--flujos-de-cuenta--apikey--disablesignup--2026-07-11-verificado).
+- **Fase 0: 4/7 tareas hechas (#15–#18). Faltan #19 (multi-tenant/organization), #20 (frontend cookies), #21 (cleanup+seguridad+tests).**
+
+---
+
+## 2026-07-11 (cont. 6) — Fase 0 #17: AuthGuard dual-mode ✅
+- Delegado a senior-backend-engineer, revisado y verificado por Nova.
+- `AuthGuard` autentica con sesión de better-auth (cookie) primario + JWT Bearer legacy fallback; ambos cargan el User con roles/permisos. RBAC fino intacto.
+- Verificado: legacy 200/401/401, cookie better-auth 403(sin rol)/200(con rol Super Admin). Build limpio.
+- Deuda para #21: Jest roto por imports ESM-only de la lib (baseline ya estaba rojo). Ver [modulos/auth-multitenant.md §13](modulos/auth-multitenant.md#13-tarea-17--authguard-dual-mode--2026-07-11-verificado).
+
+---
+
+## 2026-07-11 (cont. 5) — Fase 0 #16: modelo User unificado ✅
+- Delegado a senior-backend-engineer (con skills), revisado y verificado por Nova.
+- `user` de better-auth = fuente de verdad (opción C). Una sola tabla `user` en `public` (TypeORM la crea con nativos + additionalFields); better-auth crea el resto vía CLI. `confirmed`→`emailVerified`; `customSession` inyecta roles/permisos.
+- Verificado: build limpio, login legacy + 5 módulos dependientes 200, sign-up + get-session con user unificado (roles/permisos). RBAC fino intacto.
+- Aristas transitorias (dual password store, disableSignUp abierto, rut/phone requeridos) documentadas en [modulos/auth-multitenant.md §12](modulos/auth-multitenant.md#12-tarea-16--modelo-user-unificado--2026-07-11-verificado). Onboarding (org+invitaciones) en §7b.
+- Documentado el modelo de onboarding: plataforma → admin de condominio → usuarios (sign-up cerrado, invitaciones del organization plugin).
+
+---
+
+## 2026-07-11 (cont. 4) — Fase 0 arrancada: POC better-auth verificado
+- Rama `feature/fase-0-auth-multitenant`. Instaladas skills de skills.sh (`.agents/skills`, symlink a `.claude/skills`) y deps (better-auth 1.6.23 + nestjs-better-auth 2.4.0 + @better-auth/api-key).
+- **POC (delegado a senior-backend-engineer, revisado por Nova contra las skills):** better-auth montado en paralelo, no destructivo. Verificado end-to-end (build ok, sign-in con cookie httpOnly, get-session ok, auth propio intacto 401). Detalle y aristas en [modulos/auth-multitenant.md](modulos/auth-multitenant.md#11-estado-del-poc-2026-07-11--verificado).
+- Aristas flagueadas para el cableado real: sign-up abierto (cerrar `disableSignUp`), rate-limit storage, npm audit, audit logging.
+
+---
+
 ## 2026-07-11 (cont. 3) — Research better-auth + mapa de auth → diseño Fase 0
 - **Research (deep-web-researcher, jul-2026):** la lib `@thallesp/nestjs-better-auth` está sana (v2.7.0, 4-jul-2026); las skills de skills.sh son agent-skills que se usan junto con la lib. Recomendación: lib community + skills, NO vanilla. Organization plugin = tenant; RBAC fino mejor app-side (customSession). CVEs parchadas en jun-2026 → pinnear versión.
 - **Mapa de auth (codebase-explorer):** hallazgo clave = el RBAC es SEPARABLE de la autenticación (`AuthorizationGuard` solo lee `request.user`), así que se reemplaza solo la capa de sesión y se conservan los 114 usos de `@RequirePermissions`. Blast radius acotado.

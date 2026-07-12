@@ -1,9 +1,18 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 
 @Entity({ name: 'hubs' })
 export class Hub {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // Tarea #19 (docs/modulos/auth-multitenant.md §7). Columna agregada al
+  // esquema; sin CRUD propio todavía (solo existe HubGateway, un websocket
+  // gateway sin service/controller REST) — no hay dónde estampar/filtrar por
+  // ahora. Queda listo para cuando se implemente la gestión de hubs. Ver
+  // docstring en src/cameras/entities/camera.entity.ts sobre el diseño.
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  organizationId: string | null;
 
   @Column({ type: 'varchar', length: 64, unique: true })
   hubId: string; // hub-001, hub-002, etc.

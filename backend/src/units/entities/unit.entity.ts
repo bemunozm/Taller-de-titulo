@@ -1,12 +1,13 @@
-import { 
-  Entity, 
-  PrimaryGeneratedColumn, 
-  Column, 
-  OneToMany, 
-  CreateDateColumn, 
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  OneToMany,
+  CreateDateColumn,
   UpdateDateColumn,
   BeforeInsert,
   BeforeUpdate,
+  Index,
 } from 'typeorm';
 import { Family } from '../../families/entities/family.entity';
 
@@ -14,6 +15,12 @@ import { Family } from '../../families/entities/family.entity';
 export class Unit {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // Tarea #19 (docs/modulos/auth-multitenant.md §7). Ver docstring en
+  // src/cameras/entities/camera.entity.ts sobre el diseño de esta columna.
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  organizationId: string | null;
 
   @Column({ type: 'varchar', length: 10, nullable: true })
   block: string | null; // "A", "B", null para casas/sin bloques

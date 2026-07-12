@@ -7,6 +7,8 @@ import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationType, NotificationPriority } from '../notifications/entities/notification.entity';
+import { TenantContextService } from '../common/tenant/tenant-context.service';
+import { applyTenantFilter, stampOrganizationId } from '../common/tenant/tenant-context.util';
 
 @Injectable()
 export class VehiclesService {
@@ -16,6 +18,11 @@ export class VehiclesService {
     @InjectRepository(Vehicle) private readonly repo: Repository<Vehicle>,
     private readonly usersService: UsersService,
     private readonly notificationsService: NotificationsService,
+    // Tarea #19 (docs/modulos/auth-multitenant.md §7): scoping por tenant en
+    // create/listAll. `findByPlate`/`findByOwnerIds` NO se scopean: los usa
+    // DetectionsService en el flujo del worker LPR (sin sesión de usuario,
+    // resource-derived desde la cámara) — ver reporte de la tarea #19.
+    private readonly tenantContext: TenantContextService,
   ) {}
 
   async create(dto: CreateVehicleDto) {
@@ -23,7 +30,7 @@ export class VehiclesService {
     this.logger.debug('DTO recibido:', JSON.stringify(dto, null, 2));
     this.logger.debug('ownerId:', dto.ownerId);
     this.logger.debug('ownerId type:', typeof dto.ownerId);
-    
+
     // Validate owner exists if ownerId provided
     if (dto.ownerId) {
       const owner = await this.usersService.findOneWithFamily(dto.ownerId);
@@ -41,6 +48,7 @@ export class VehiclesService {
       active: dto.active ?? null,
       ownerId: dto.ownerId ?? null,
     });
+    stampOrganizationId(ent, await this.tenantContext.getContext());
 
     const savedVehicle = await this.repo.save(ent);
 
@@ -255,10 +263,13 @@ export class VehiclesService {
   }
 
   async listAll(filters?: { familyId?: string; ownerId?: string }, limit = 100) {
+    const ctx = await this.tenantContext.getContext();
     const query = this.repo.createQueryBuilder('vehicle')
       .leftJoinAndSelect('vehicle.owner', 'owner')
       .orderBy('vehicle.createdAt', 'DESC')
       .take(limit);
+
+    applyTenantFilter(query, 'vehicle', ctx);
 
     // Si hay filtro por familyId, obtener vehículos de todos los miembros
     if (filters?.familyId) {

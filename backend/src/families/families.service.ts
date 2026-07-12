@@ -7,6 +7,8 @@ import { User } from '../users/entities/user.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationType, NotificationPriority } from '../notifications/entities/notification.entity';
 import { UnitsService } from '../units/units.service';
+import { TenantContextService } from '../common/tenant/tenant-context.service';
+import { scopeWhere, stampOrganizationId } from '../common/tenant/tenant-context.util';
 
 @Injectable()
 export class FamiliesService {
@@ -19,13 +21,19 @@ export class FamiliesService {
     private readonly userRepository: Repository<User>,
     private readonly notificationsService: NotificationsService,
     private readonly unitsService: UnitsService,
+    // Tarea #19 (docs/modulos/auth-multitenant.md §7): scoping por tenant.
+    private readonly tenantContext: TenantContextService,
   ) {}
 
   async create(createFamilyDto: CreateFamilyDto): Promise<Family> {
+    const ctx = await this.tenantContext.getContext();
+
     // Si se proporciona un unitId, verificar que la unidad existe y está disponible
+    // (UnitsService.findOne ya está scopeado por tenant — tarea #19 — así que
+    // esto además impide asignar una unidad de OTRO condominio).
     if (createFamilyDto.unitId) {
       const unit = await this.unitsService.findOne(createFamilyDto.unitId);
-      
+
       // Verificar que no haya otra familia ACTIVA en esa unidad
       const activeFamily = await this.familyRepository.findOne({
         where: {
@@ -48,19 +56,23 @@ export class FamiliesService {
       active: createFamilyDto.active ?? true,
       unit: createFamilyDto.unitId ? { id: createFamilyDto.unitId } as any : null,
     });
-    
+    stampOrganizationId(family, ctx);
+
     return await this.familyRepository.save(family);
   }
 
   async findAll(): Promise<Family[]> {
+    const ctx = await this.tenantContext.getContext();
     return await this.familyRepository.find({
+      where: scopeWhere({}, ctx),
       relations: ['members'],
     });
   }
 
   async findOne(id: string): Promise<Family> {
+    const ctx = await this.tenantContext.getContext();
     const family = await this.familyRepository.findOne({
-      where: { id },
+      where: scopeWhere({ id }, ctx),
       relations: ['members'],
     });
 

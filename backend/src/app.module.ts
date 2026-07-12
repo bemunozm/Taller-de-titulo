@@ -2,10 +2,12 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
+import { AuthModule as BetterAuthModule } from '@thallesp/nestjs-better-auth';
 import { UsersModule } from './users/users.module';
 import { RolesModule } from './roles/roles.module';
 import { TokensModule } from './tokens/tokens.module';
 import { AuthModule } from './auth/auth.module';
+import { auth } from './auth/better-auth';
 import { PermissionsModule } from './permissions/permissions.module';
 import { StreamsModule } from './streams/streams.module';
 import { DataInitializationService } from './common/services/data-initialization.service';
@@ -29,6 +31,8 @@ import { LogsModule } from './logs/logs.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { HubModule } from './hub/hub.module';
 import { AnomaliesModule } from './anomalies/anomalies.module';
+import { TenantModule } from './common/tenant/tenant.module';
+import { OnboardingModule } from './onboarding/onboarding.module';
 
 @Module({
   imports: [
@@ -42,9 +46,27 @@ import { AnomaliesModule } from './anomalies/anomalies.module';
       password: process.env.DB_PASSWORD,
       database: process.env.DB_NAME,
       autoLoadEntities: true, // Carga automaticamente las entidades
-      synchronize: true, // no usar en produccion
+      // Tarea #21 (hardening): `synchronize: true` en producción puede alterar
+      // el schema de forma destructiva en cada arranque (drop/recreate de
+      // columnas, pérdida de datos) — solo debe usarse en dev. Producción
+      // necesita migraciones reales de TypeORM (`typeorm migration:generate` +
+      // `migration:run`), que hoy NO existen en este repo — son prerequisito
+      // antes de desplegar con NODE_ENV=production (ver reporte de la tarea).
+      synchronize: process.env.NODE_ENV !== 'production',
     }),
     TypeOrmModule.forFeature([Role, Permission, AccessAttempt, Notification, Visit]),
+    // POC Fase 0 (docs/modulos/auth-multitenant.md): better-auth montado EN
+    // PARALELO al AuthModule propio (JWT+RBAC, sigue intacto más abajo).
+    // `disableGlobalAuthGuard: true` es CRÍTICO: sin esto la librería registra
+    // su AuthGuard como guard global (APP_GUARD) y protegería/rompería TODAS
+    // las rutas existentes, que hoy usan su propio guard. Con el guard global
+    // deshabilitado, better-auth solo expone sus endpoints (/api/auth/*) y no
+    // interfiere con el resto de la API.
+    BetterAuthModule.forRoot({ auth, disableGlobalAuthGuard: true }),
+    // Tarea #19 (docs/modulos/auth-multitenant.md §7): mecanismo de tenant
+    // scoping reutilizable (TenantContextService + interceptor global).
+    // Global, así que no hace falta re-importarlo en cada módulo de dominio.
+    TenantModule,
     UsersModule,
     RolesModule,
     TokensModule,
@@ -65,6 +87,7 @@ import { AnomaliesModule } from './anomalies/anomalies.module';
   DashboardModule,
   HubModule,
   AnomaliesModule,
+  OnboardingModule,
   ],
   controllers: [],
   providers: [DataInitializationService, ExpirationService],

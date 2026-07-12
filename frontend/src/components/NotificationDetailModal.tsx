@@ -24,6 +24,7 @@ import {
   ArrowTopRightOnSquareIcon,
 } from '@heroicons/react/24/outline'
 import { useNotifications } from '@/hooks/useNotifications'
+import { useAuth } from '@/hooks/useAuth'
 import ConciergeAPI from '@/api/ConciergeAPI'
 import type { AppNotification } from '@/types/index'
 
@@ -170,6 +171,7 @@ export function NotificationDetailModal({
   const [isProcessing, setIsProcessing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const { markAsRead } = useNotifications()
+  const { data: user } = useAuth()
 
   // No marcar automáticamente como leída - esto lo maneja el componente padre
   // Solo se marca como leída cuando el padre lo decide

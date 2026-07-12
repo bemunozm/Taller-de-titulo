@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, OneToMany, ManyToOne, JoinColumn, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, OneToMany, ManyToOne, JoinColumn, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 import { Unit } from '../../units/entities/unit.entity';
 
@@ -6,6 +6,12 @@ import { Unit } from '../../units/entities/unit.entity';
 export class Family {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // Tarea #19 (docs/modulos/auth-multitenant.md §7). Ver docstring en
+  // src/cameras/entities/camera.entity.ts sobre el diseño de esta columna.
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  organizationId: string | null;
 
   @Column({ type: 'varchar', length: 128 })
   name: string;

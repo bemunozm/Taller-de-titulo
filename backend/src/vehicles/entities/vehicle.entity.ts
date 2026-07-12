@@ -1,10 +1,16 @@
-import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 
 @Entity({ name: 'vehicles' })
 export class Vehicle {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // Tarea #19 (docs/modulos/auth-multitenant.md §7) — ver docstring en
+  // src/cameras/entities/camera.entity.ts sobre el diseño de esta columna.
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  organizationId: string | null;
 
   @Column({ type: 'varchar', length: 16, unique: true })
   plate: string;

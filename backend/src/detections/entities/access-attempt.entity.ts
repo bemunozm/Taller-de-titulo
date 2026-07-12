@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, CreateDateColumn, UpdateDateColumn, JoinColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, CreateDateColumn, UpdateDateColumn, JoinColumn, Index } from 'typeorm';
 import { PlateDetection } from './plate-detection.entity';
 import { User } from '../../users/entities/user.entity';
 
@@ -7,7 +7,18 @@ export class AccessAttempt {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  // patente, reconocimiento facial, visitante, manual, app. 
+  // Tarea #19 (docs/modulos/auth-multitenant.md §7) — resource-derived: se
+  // copia desde `detection.organizationId` (a su vez derivado de la cámara,
+  // ver DetectionsService.createDetection). NO viene de TenantContext: estos
+  // registros los crea el worker LPR sin sesión de usuario (endpoint sin
+  // AuthGuard, ver DetectionsController). Filtrado por tenant en los
+  // endpoints de lectura (listAttempts/listPendingDetections) queda
+  // PENDIENTE — ver reporte de la tarea #19.
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  organizationId: string | null;
+
+  // patente, reconocimiento facial, visitante, manual, app.
   @Column({ type: 'varchar', length: 128, nullable: true })
   method: string | null;
 

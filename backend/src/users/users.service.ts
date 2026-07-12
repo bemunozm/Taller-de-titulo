@@ -1,4 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, InternalServerErrorException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { AuthService as BetterAuthService } from '@thallesp/nestjs-better-auth';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { CreateAccountByAdminDto } from './dto/create-account-by-admin.dto';
@@ -7,15 +9,8 @@ import { User } from './entities/user.entity';
 import { Role } from '../roles/entities/role.entity';
 import { Family } from '../families/entities/family.entity';
 import { Repository } from 'typeorm';
-import { TokensService } from '../tokens/tokens.service';
-import { AuthEmailService } from '../auth/services/auth-email.service';
 import { hashPassword } from '../auth/utils/auth.util';
 import * as crypto from 'crypto';
-
-// Función para generar token de 6 dígitos
-const generateToken = (): string => {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-};
 
 @Injectable()
 export class UsersService {
@@ -25,8 +20,14 @@ export class UsersService {
     @InjectRepository(User) private userRepository: Repository<User>,
     @InjectRepository(Role) private roleRepository: Repository<Role>,
     @InjectRepository(Family) private familyRepository: Repository<Family>,
-    private readonly tokensService: TokensService,
-    private readonly authEmailService: AuthEmailService,
+    private readonly configService: ConfigService,
+    // Tarea #18 (docs/modulos/auth-multitenant.md §7b/§18): la activación de
+    // cuentas creadas por admin ahora reusa el flujo nativo de
+    // password-reset de better-auth (ver createAccountByAdmin abajo) en vez
+    // de la tabla Token propia + AuthEmailService.sendAccountCreatedByAdminEmail.
+    // Disponible por DI porque BetterAuthModule.forRoot(...) es global
+    // (app.module.ts) — mismo patrón que src/auth/auth.guard.ts.
+    private readonly betterAuthService: BetterAuthService,
   ) {}
 
 
@@ -59,7 +60,7 @@ export class UsersService {
       const newUser = this.userRepository.create({
         ...createAccountByAdminDto,
         password: await hashPassword(randomPassword),
-        confirmed: false, // El usuario debe confirmar su cuenta
+        emailVerified: false, // El usuario debe confirmar su cuenta
       });
 
       // Asignar roles si se proporcionaron
@@ -85,15 +86,24 @@ export class UsersService {
       // Guardar usuario
       const savedUser = await this.userRepository.save(newUser);
 
-      // Generar token de recuperación de contraseña
-      const tokenValue = generateToken();
-      await this.tokensService.create({
-        token: tokenValue,
-        userId: savedUser.id,
-      });
-
-      // Enviar email de bienvenida con token
-      await this.authEmailService.sendAccountCreatedByAdminEmail(savedUser, tokenValue);
+      // Tarea #18: activar la cuenta = establecer contraseña por primera vez,
+      // vía el flujo nativo de better-auth (reemplaza el token de 6 dígitos +
+      // sendAccountCreatedByAdminEmail). Dispara el hook `sendResetPassword`
+      // de better-auth.ts, que detecta "cuenta nueva" (sin `account`
+      // credential todavía) y manda el copy de bienvenida correcto.
+      try {
+        const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:5173';
+        await this.betterAuthService.api.requestPasswordReset({
+          body: {
+            email: savedUser.email,
+            redirectTo: `${frontendUrl}/auth/new-password`,
+          },
+        });
+      } catch (error) {
+        // No abortamos la creación del usuario por un fallo de envío de
+        // email — el admin puede reintentar desde "olvidé mi contraseña".
+        console.error('Error al enviar email de activación de cuenta (better-auth):', error);
+      }
 
       return savedUser;
     } catch (error) {
@@ -159,9 +169,9 @@ export class UsersService {
 
   async findByEmailWithPassword(email: string) {
     try {
-      const user = await this.userRepository.findOne({ 
+      const user = await this.userRepository.findOne({
         where: { email: email.toLowerCase() },
-        select: ['id', 'email', 'password', 'name', 'confirmed'],
+        select: ['id', 'email', 'password', 'name', 'emailVerified'],
         relations: ['roles', 'roles.permissions']
       });
       

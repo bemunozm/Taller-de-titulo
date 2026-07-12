@@ -47,7 +47,7 @@ export default function MultiSelectCombobox<T extends { [k: string]: any }>({
         else onChange([...selectedIds, id])
       }
     }} onClose={() => setQuery('')} multiple>
-      {({ open }) => (
+      {() => (
         <div className={clsx('relative', className)}>
           <Headless.ComboboxButton as="div" className="relative">
             <Headless.ComboboxInput

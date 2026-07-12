@@ -10,6 +10,7 @@ lpr/test_video/*.mp4
 # Herramientas de agentes / editor (local, no versionar)
 .agent/
 .agents/
+.claude/
 .vscode/
 skills-lock.json
 repomix-output.xml

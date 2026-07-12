@@ -63,7 +63,9 @@ export const authSchema = z.object({
     password: z.string().min(6).max(100),
     current_password: z.string().min(6).max(100),
     password_confirmation: z.string().min(6).max(100),
-    token: z.string().length(6),
+    // Tarea #20: token opaco de better-auth (link de confirmación/recuperación
+    // por email), ya no un código propio de 6 dígitos — longitud variable.
+    token: z.string().min(1),
 })
 export type Auth = z.infer<typeof authSchema>
 export type UserLoginForm = Pick<Auth   , 'email' | 'password'>

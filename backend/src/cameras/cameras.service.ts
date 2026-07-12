@@ -10,6 +10,8 @@ import { encryptString, decryptString } from 'src/utils/crypto.util';
 import { MediamtxService } from 'src/mediamtx/mediamtx.service';
 import { WorkerNotifierService } from 'src/workers/worker-notifier.service';
 import { v4 as uuidv4 } from 'uuid';
+import { TenantContextService } from 'src/common/tenant/tenant-context.service';
+import { scopeWhere, stampOrganizationId } from 'src/common/tenant/tenant-context.util';
 
 @Injectable()
 export class CamerasService {
@@ -19,6 +21,13 @@ export class CamerasService {
     private readonly cameraRepository: Repository<Camera>,
     @InjectRepository(Role)
     private readonly roleRepository: Repository<Role>,
+    // Tarea #19 (docs/modulos/auth-multitenant.md §7): scoping por tenant en
+    // create/findAll/findOne (ver métodos abajo). Los helpers internos
+    // (resolveCameraByIdOrMount, getDecryptedSourceUrl, etc.) NO se scopean:
+    // los usan otros servicios (AnomaliesService, DetectionsService, workers)
+    // que resuelven la cámara por id/mountPath sin contexto de tenant —
+    // scopearlos rompería esos flujos resource-derived.
+    private readonly tenantContext: TenantContextService,
     private readonly mediamtxService?: MediamtxService,
     private readonly dataSource?: DataSource,
     private readonly workerNotifier?: WorkerNotifierService,
@@ -64,6 +73,7 @@ export class CamerasService {
       const { roleIds, ...data } = createCameraDto;
 
       const camera = this.cameraRepository.create(data);
+      stampOrganizationId(camera, await this.tenantContext.getContext());
 
       // Si se proporcionó sourceUrl, encriptarla antes de guardar
       if (data.sourceUrl) {
@@ -198,7 +208,12 @@ export class CamerasService {
 
   async findAll() {
     try {
-      return await this.cameraRepository.find({ relations: ['roles'], order: { name: 'ASC' } });
+      const ctx = await this.tenantContext.getContext();
+      return await this.cameraRepository.find({
+        where: scopeWhere({}, ctx),
+        relations: ['roles'],
+        order: { name: 'ASC' },
+      });
     } catch (error) {
       throw new InternalServerErrorException('Error al obtener cámaras');
     }
@@ -206,7 +221,11 @@ export class CamerasService {
 
   async findOne(id: string) {
     try {
-      const camera = await this.cameraRepository.findOne({ where: { id }, relations: ['roles'] });
+      const ctx = await this.tenantContext.getContext();
+      const camera = await this.cameraRepository.findOne({
+        where: scopeWhere({ id }, ctx),
+        relations: ['roles'],
+      });
   if (!camera) throw new NotFoundException(`Cámara con ID ${id} no encontrada`);
       return camera;
     } catch (error) {

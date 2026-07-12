@@ -65,7 +65,7 @@ export function UserForm({ user, onSuccess }: UserFormProps) {
         email: user.email,
         rut: user.rut,
         phone: user.phone || '',
-        age: user.age,
+        age: user.age ?? undefined,
         roleIds: user.roles?.map(r => r.id) || [],
         familyId: user.family?.id || '',
       })
