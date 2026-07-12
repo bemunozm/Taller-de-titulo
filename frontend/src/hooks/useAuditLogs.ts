@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getAuditLogs, getAuditStats } from '@/api/AuditAPI';
-import type { AuditLogQuery, PaginatedAuditLogs, AuditStats } from '@/types/audit';
+import type { AuditLogQuery } from '@/types/audit';
 
 export function useAuditLogs(initialQuery: AuditLogQuery = {}) {
   const [query, setQuery] = useState<AuditLogQuery>({

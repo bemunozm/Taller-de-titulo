@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
-import { Alert, AlertTitle, AlertDescription, AlertBody, AlertActions } from '@/components/ui/Alert'
+import { Alert, AlertTitle, AlertBody, AlertActions } from '@/components/ui/Alert'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { Text } from '@/components/ui/Text'

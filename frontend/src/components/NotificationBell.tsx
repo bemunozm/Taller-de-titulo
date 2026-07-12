@@ -94,7 +94,6 @@ export function NotificationBell() {
     markAsRead,
   } = useNotifications()
 
-  const [selectedNotification, setSelectedNotification] = useState<AppNotification | null>(null)
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [notificationSnapshot, setNotificationSnapshot] = useState<AppNotification | null>(null)
 
@@ -104,8 +103,7 @@ export function NotificationBell() {
   const handleNotificationClick = (notification: AppNotification) => {
     // Guardar un snapshot de la notificación para evitar que cambios posteriores causen parpadeo
     setNotificationSnapshot({ ...notification })
-    setSelectedNotification(notification)
-    
+
     // Abrir el modal después de un pequeño delay para evitar conflictos
     setTimeout(() => {
       setIsModalOpen(true)
@@ -121,7 +119,6 @@ export function NotificationBell() {
     setIsModalOpen(false)
     // Pequeño delay antes de limpiar la notificación seleccionada para la animación
     setTimeout(() => {
-      setSelectedNotification(null)
       setNotificationSnapshot(null)
     }, 300)
   }

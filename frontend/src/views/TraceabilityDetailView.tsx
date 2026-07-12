@@ -728,7 +728,7 @@ export default function TraceabilityDetailView() {
                       {det?.full_frame_path && (
                         <Button 
                           plain
-                          onClick={() => window.open(det.full_frame_path, '_blank')}
+                          onClick={() => window.open(det.full_frame_path ?? undefined, '_blank')}
                           className="text-xs"
                         >
                           <EyeIcon className="w-4 h-4" />
