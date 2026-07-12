@@ -57,9 +57,9 @@ function UserAvatar() {
 function LogoutItem() {
   const navigate = useNavigate()
   const { logout } = useAuth()
-  const handle = () => {
+  const handle = async () => {
     try {
-      logout()
+      await logout()
     } catch (e) {
       // ignore
     }

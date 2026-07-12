@@ -1,13 +1,12 @@
 
 
 import { useForm, Controller } from 'react-hook-form'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Button } from '@/components/ui/Button'
 import { Field, Fieldset, Label } from '@/components/ui/Fieldset'
 import { Heading } from '@/components/ui/Heading'
 import { Input } from '@/components/ui/Input'
 import { Text, TextLink } from '@/components/ui/Text'
-import { Divider } from '@/components/ui/Divider'
 import { PasswordInput } from '@/components/ui/PasswordInput'
 import { type UserLoginForm } from '@/types/index'
 import { authenticateUser } from '@/api/AuthAPI'
@@ -16,7 +15,8 @@ import { useNavigate } from 'react-router-dom'
 
 export default function LoginView() {
   const navigate = useNavigate()
-  
+  const queryClient = useQueryClient()
+
   const {
     register,
     handleSubmit,
@@ -27,7 +27,10 @@ export default function LoginView() {
 
   const { mutate, isPending } = useMutation({
     mutationFn: authenticateUser,
-    onSuccess: () => {
+    onSuccess: async () => {
+      // La cookie de sesión ya quedó seteada por better-auth; invalidamos
+      // ['user'] para que useAuth recargue el usuario con esa sesión.
+      await queryClient.invalidateQueries({ queryKey: ['user'] })
       toast.success('¡Bienvenido! Has iniciado sesión correctamente')
       reset() // Limpiar el formulario
       navigate('/') // Redirigir al dashboard

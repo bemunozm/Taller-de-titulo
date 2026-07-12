@@ -265,18 +265,13 @@ export function useNotifications(): UseNotificationsResult {
       return
     }
 
-    const token = localStorage.getItem('AUTH_TOKEN')
-    if (!token) {
-      console.warn('[useNotifications] No se encontró el token de autenticación')
-      return
-    }
-
-    // Conectar solo una vez
+    // Conectar solo una vez. La auth real es la cookie httpOnly de better-auth
+    // (Fase 0 #20) — el gate es `user?.id` de arriba, ya no un token en localStorage.
     if (!hasConnected.current) {
       console.log('[useNotifications] 🔌 Iniciando conexión WebSocket...')
       console.log('[useNotifications] Usuario ID:', user.id)
-      
-      webSocketService.connect(token)
+
+      webSocketService.connect()
       
       // Esperar un momento para que la conexión se establezca
       // antes de registrar al usuario (ahora registerUser maneja esto automáticamente)

@@ -44,10 +44,10 @@ export default function RequestCodeView() {
       {/* Header Section */}
       <div className="text-center mb-6 sm:mb-8">
         <Heading level={1} className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white">
-          Solicitar código de confirmación
+          Solicitar enlace de confirmación
         </Heading>
         <Text className="mt-2 sm:mt-3 text-sm sm:text-base text-gray-600 dark:text-gray-400">
-          Ingresa tu correo electrónico y te enviaremos un nuevo código para confirmar tu cuenta
+          Ingresa tu correo electrónico y te enviaremos un nuevo enlace para confirmar tu cuenta
         </Text>
       </div>
 
@@ -108,7 +108,7 @@ export default function RequestCodeView() {
                 <span>Enviando...</span>
               </div>
             ) : (
-              'Enviar código'
+              'Enviar enlace'
             )}
           </Button>
           {isPending && (
@@ -124,7 +124,7 @@ export default function RequestCodeView() {
         {/* Help Text */}
         <div className="text-center">
           <Text className="text-xs sm:text-sm text-gray-500 dark:text-gray-400">
-            Revisa tu bandeja de entrada y la carpeta de spam. El código tiene una validez de 10 minutos.
+            Revisa tu bandeja de entrada y la carpeta de spam. El enlace tiene una validez limitada.
           </Text>
         </div>
 
@@ -132,17 +132,6 @@ export default function RequestCodeView() {
         <Divider className="my-4 sm:my-6" />
         
         <div className="text-center space-y-2">
-          <div>
-            <Text className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">
-              ¿Ya tienes un código?{' '}
-              <TextLink 
-                to="/auth/confirm-account"
-                className="font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300 underline-offset-2"
-              >
-                Confirmar cuenta
-              </TextLink>
-            </Text>
-          </div>
           <div>
             <Text className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">
               ¿Ya confirmaste tu cuenta?{' '}

@@ -1,5 +1,5 @@
 import {useQuery, useQueryClient} from '@tanstack/react-query'
-import { getUser } from "@/api/AuthAPI";
+import { getUser, signOutUser } from "@/api/AuthAPI";
 import { useCallback } from 'react'
 
 export const useAuth = () => {
@@ -11,14 +11,11 @@ export const useAuth = () => {
         refetchOnWindowFocus: false
     });
 
-    const logout = useCallback(() => {
+    const logout = useCallback(async () => {
+        // Tarea #20: cierra la sesión de better-auth (limpia la cookie httpOnly
+        // en el servidor) y luego limpia el cache local del usuario.
+        await signOutUser()
         try {
-            localStorage.removeItem('AUTH_TOKEN')
-        } catch (e) {
-            // ignore
-        }
-        try {
-            // remove user query and clear cache to force refetch when needed
             queryClient.removeQueries({ queryKey: ['user'] })
             // optionally clear all queries: queryClient.clear()
         } catch (e) {

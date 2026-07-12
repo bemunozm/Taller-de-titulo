@@ -1,83 +1,44 @@
-import { useState, useEffect, useRef } from 'react'
-import { useForm } from 'react-hook-form'
+import { useEffect, useRef } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Field, Fieldset } from '@/components/ui/Fieldset'
 import { Heading } from '@/components/ui/Heading'
 import { Text, TextLink } from '@/components/ui/Text'
 import { Divider } from '@/components/ui/Divider'
-import PinCode from '@/components/PinCode'
-import { type ConfirmToken } from '@/types/index'
 import { confirmAccount } from '@/api/AuthAPI'
 import { toast } from 'react-toastify'
 
+/**
+ * Tarea #20: better-auth confirma la cuenta con un token opaco de un solo uso
+ * que viaja como query param en el link del email (`/auth/confirm-account?token=...`),
+ * ya no con un código de 6 dígitos que el usuario tipeaba a mano. Esta vista
+ * solo lee el token de la URL y confirma automáticamente.
+ */
 export default function ConfirmAccountView() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
-  const [pinValues, setPinValues] = useState<string[]>(['', '', '', '', '', ''])
-  const hasProcessedUrlToken = useRef(false)
-  
-  const {
-    handleSubmit,
-    setValue,
-    formState: { errors },
-    reset,
-  } = useForm<ConfirmToken>()
+  const token = searchParams.get('token')
+  const hasSubmitted = useRef(false)
 
-  const { mutate, isPending } = useMutation({
+  const { mutate, isPending, isError } = useMutation({
     mutationFn: confirmAccount,
     onSuccess: (data) => {
       toast.success(data)
-      reset()
       navigate('/auth/login')
     },
     onError: (error) => {
       console.error('Error al confirmar la cuenta:', error)
-      toast.error(error.message || 'Código inválido o expirado')
-      // Limpiar los campos al fallar
-      setPinValues(['', '', '', '', '', ''])
+      toast.error(error.message || 'El enlace de confirmación es inválido o expiró')
     }
   })
 
-  // Efecto para auto-completar el token desde la URL
   useEffect(() => {
-    const tokenFromUrl = searchParams.get('token')
-    if (tokenFromUrl && tokenFromUrl.length === 6 && !hasProcessedUrlToken.current && !isPending) {
-      hasProcessedUrlToken.current = true
-      console.log('Auto-submitting token from URL:', tokenFromUrl)
-      // Convertir el token en array de dígitos
-      const tokenArray = tokenFromUrl.split('')
-      setPinValues(tokenArray)
-      setValue('token', tokenFromUrl)
-      
-      // Auto-submit después de un pequeño delay para que el usuario vea el código
-      setTimeout(() => {
-        mutate({ token: tokenFromUrl })
-      }, 1000)
+    if (token && !hasSubmitted.current) {
+      hasSubmitted.current = true
+      mutate({ token })
     }
-  }, [searchParams, setValue, mutate, isPending])
+  }, [token, mutate])
 
-  const handlePinChange = (values: string[], fullValue: string) => {
-    setPinValues(values)
-    setValue('token', fullValue)
-  }
-
-  const handlePinComplete = (fullValue: string) => {
-    // Solo auto-submit si NO vino desde URL y no se está procesando ya
-    if (fullValue.length === 6 && !isPending && !hasProcessedUrlToken.current) {
-      const tokenFromUrl = searchParams.get('token')
-      // Si no hay token en URL o es diferente al completado manualmente
-      if (!tokenFromUrl || tokenFromUrl !== fullValue) {
-        handleSubmit(onSubmit)()
-      }
-    }
-  }
-
-  const onSubmit = (data: ConfirmToken) => {
-    if (data.token.length === 6 && !isPending) {
-      mutate(data)
-    }
-  }
+  const showRetryHelp = !token || isError
 
   return (
     <div className="mx-auto w-full max-w-md px-4 sm:px-6 lg:px-8">
@@ -87,76 +48,48 @@ export default function ConfirmAccountView() {
           Confirmar cuenta
         </Heading>
         <Text className="mt-2 sm:mt-3 text-sm sm:text-base text-gray-600 dark:text-gray-400">
-          Ingresa el código de 6 dígitos que enviamos a tu correo electrónico
+          {!token && 'Revisa tu correo y haz clic en el enlace de confirmación que te enviamos.'}
+          {token && isPending && 'Confirmando tu cuenta...'}
+          {token && isError && 'No pudimos confirmar tu cuenta con este enlace.'}
+          {token && !isPending && !isError && 'Haz clic en el enlace de tu correo para confirmar tu cuenta.'}
         </Text>
       </div>
 
-      {/* Form Section */}
-      <form 
-        onSubmit={handleSubmit(onSubmit)} 
-        className="space-y-4 sm:space-y-6"
-        noValidate
-        aria-label="Formulario de confirmación de cuenta"
-      >
-        <Fieldset className="space-y-4 sm:space-y-6">
-          
-          <Field>
-            {/* PIN Code Component */}
-            <PinCode
-              length={6}
-              value={pinValues}
-              onChange={handlePinChange}
-              onComplete={handlePinComplete}
-              disabled={isPending}
-              loading={isPending}
-              error={!!errors.token}
-              autoSubmit={!hasProcessedUrlToken.current}
-              autoSubmitDelay={1000}
-              className="w-full"
-            />
-            
-            {/* Mensaje de error */}
-            {errors.token && (
-              <Text 
-                className="mt-2 text-center text-sm text-red-600 dark:text-red-400"
-                role="alert"
-                aria-live="polite"
-              >
-                {errors.token.message}
-              </Text>
-            )}
-          </Field>
+      {isPending && (
+        <div className="flex items-center justify-center py-4" role="status" aria-live="polite">
+          <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+          <span className="sr-only">Confirmando cuenta, por favor espere</span>
+        </div>
+      )}
 
-        </Fieldset>
-
-        {/* Resend Code Section */}
+      {showRetryHelp && (
         <div className="text-center space-y-3">
           <Text className="text-xs sm:text-sm text-zinc-600 dark:text-zinc-400">
-            ¿No recibiste el código?{' '}
-            <TextLink 
+            ¿El enlace no funciona o ya expiró?{' '}
+            <TextLink
               to="/auth/request-code"
               className="font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300"
             >
-              Solicitar nuevo código
+              Solicitar un nuevo enlace
             </TextLink>
           </Text>
         </div>
+      )}
 
-        {/* Footer Links */}
-        <Divider className="my-4 sm:my-6" />
-        
-        <div className="text-center">
-          <Text className="text-xs sm:text-sm text-zinc-600 dark:text-zinc-400">
-            ¿Ya confirmaste tu cuenta?{' '}
-            <TextLink 
-              to="/auth/login"
-              className="font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300 underline-offset-2"
-            >
-              Iniciar sesión
-            </TextLink>
-          </Text>
-        </div>
-      </form>
+      {/* Footer Links */}
+      <Divider className="my-4 sm:my-6" />
+
+      <div className="text-center">
+        <Text className="text-xs sm:text-sm text-zinc-600 dark:text-zinc-400">
+          ¿Ya confirmaste tu cuenta?{' '}
+          <TextLink
+            to="/auth/login"
+            className="font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300 underline-offset-2"
+          >
+            Iniciar sesión
+          </TextLink>
+        </Text>
+      </div>
     </div>
   )
 }
