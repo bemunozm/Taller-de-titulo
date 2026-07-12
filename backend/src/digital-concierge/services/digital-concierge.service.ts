@@ -1,8 +1,8 @@
-import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConciergeSession, SessionStatus } from '../entities/concierge-session.entity';
-import { OpenAITokenService } from './openai-token.service';
+import { RealtimeVoiceTokenService } from './realtime-voice-token.service';
 import { UsersService } from '../../users/users.service';
 import { FamiliesService } from '../../families/families.service';
 import { VisitsService } from '../../visits/visits.service';
@@ -13,6 +13,48 @@ import { randomBytes } from 'crypto';
 import { SmsService } from '../../common/services/sms.service';
 import { QRCodeService } from '../../common/services/qrcode.service';
 import { HubGateway } from '../../hub/hub.gateway';
+import { User } from '../../users/entities/user.entity';
+
+/**
+ * Origen de una sesión, resuelto por el controller a partir de
+ * `ConciergeAuthGuard` (Fase 1, Bloque A1) ANTES de llegar acá — este
+ * servicio no conoce headers ni request, solo recibe el resultado ya
+ * resuelto (hub autenticado, o sesión humana vía tenantContext).
+ */
+export interface ConciergeSessionOrigin {
+  hubId: string | null;
+  source: 'web' | 'hub';
+  organizationId: string | null;
+}
+
+/**
+ * Datos parciales del visitante que `guardar_datos_visitante` (Fase 1,
+ * Bloque A2b) va acumulando de a uno en la `ConciergeSession` — el modelo
+ * llama esta tool repetidamente con un campo a la vez (ver
+ * `agent/prompts/sofia.prompt.ts`).
+ */
+export interface SaveVisitorDataInput {
+  nombre?: string;
+  rut?: string;
+  telefono?: string;
+  patente?: string;
+  motivo?: string;
+  casa?: string;
+}
+
+/**
+ * Forma mínima de `AuthorizedContext` que este servicio necesita para el fix
+ * M1 (defensa en profundidad, Bloque A2b — ver docstring de `notifyResident`
+ * más abajo). Se define localmente en vez de importar `AuthorizedContext` de
+ * `agent/types/` para no crear una dependencia de tipos del dominio hacia la
+ * capa de agente (la dirección natural es agente → dominio, no al revés) —
+ * cualquier objeto con estos dos campos (incluido un `AuthorizedContext`
+ * completo) es asignable acá por tipado estructural.
+ */
+export interface TenantScope {
+  tenantId: string | null;
+  isSuperAdmin: boolean;
+}
 
 @Injectable()
 export class DigitalConciergeService {
@@ -21,7 +63,7 @@ export class DigitalConciergeService {
   constructor(
     @InjectRepository(ConciergeSession)
     private readonly sessionRepository: Repository<ConciergeSession>,
-    private readonly tokenService: OpenAITokenService,
+    private readonly tokenService: RealtimeVoiceTokenService,
     private readonly usersService: UsersService,
     private readonly familiesService: FamiliesService,
     private readonly visitsService: VisitsService,
@@ -34,11 +76,23 @@ export class DigitalConciergeService {
 
   /**
    * Inicia una nueva sesión del conserje digital
+   *
+   * Fase 1, Bloque A1: `origin` estampa el tenant (`organizationId`) y, si
+   * aplica, el hub físico que originó la sesión — resuelto por el
+   * controller a partir de `ConciergeAuthGuard`. Con `organizationId`
+   * poblado, `executeTool` → `buscar_residente`/`notificar_residente` quedan
+   * automáticamente scopeados por condominio (vía `TenantContextService`,
+   * que lee `request.tenantContext` — mismo request, sin lógica adicional acá).
    */
-  async startSession(socketId?: string) {
+  async startSession(socketId: string | undefined, origin: ConciergeSessionOrigin) {
     this.logger.log('Starting new concierge session...');
     if (socketId) {
       this.logger.log(`Socket ID del visitante: ${socketId}`);
+    }
+    if (!origin.organizationId) {
+      this.logger.warn(
+        `Sesión iniciada sin organizationId resuelto (source=${origin.source}, hubId=${origin.hubId ?? 'n/a'}) — quedará en el "cajón nulo".`,
+      );
     }
 
     // Generar token efímero de OpenAI
@@ -53,71 +107,20 @@ export class DigitalConciergeService {
       transcript: [],
       functionCalls: [],
       visitorSocketId: socketId || null,
+      hubId: origin.hubId,
+      source: origin.source,
+      organizationId: origin.organizationId,
     });
 
     await this.sessionRepository.save(session);
 
-    this.logger.log(`Session created: ${sessionId}`);
+    this.logger.log(`Session created: ${sessionId} (source=${origin.source}, organizationId=${origin.organizationId ?? 'null'})`);
 
     return {
       sessionId,
       ephemeralToken: token,
       expiresAt,
     };
-  }
-
-  /**
-   * Ejecuta una herramienta solicitada por el agente de OpenAI
-   */
-  async executeTool(sessionId: string, toolName: string, parameters: Record<string, any>) {
-    this.logger.debug(`Executing tool: ${toolName} for session: ${sessionId}`);
-
-    const session = await this.findSessionById(sessionId);
-
-    // Log de la llamada
-    const functionCall = {
-      timestamp: new Date(),
-      toolName,
-      parameters,
-    };
-
-    try {
-      let result: any;
-
-      switch (toolName) {
-        case 'guardar_datos_visitante':
-          result = await this.saveVisitorData(session, parameters);
-          break;
-
-        case 'buscar_residente':
-          result = await this.findResident(parameters as { casa: string });
-          break;
-
-        case 'notificar_residente':
-          result = await this.notifyResident(session, parameters as { residentes_ids: string[] });
-          break;
-
-        case 'reenviar_notificacion':
-          result = await this.resendNotification(session);
-          break;
-
-        default:
-          throw new BadRequestException(`Unknown tool: ${toolName}`);
-      }
-
-      // Actualizar log de función
-      session.functionCalls.push({ ...functionCall, result, success: true });
-      await this.sessionRepository.save(session);
-
-      return { success: true, data: result };
-    } catch (error) {
-      this.logger.error(`Tool execution failed: ${error.message}`, error.stack);
-      
-      session.functionCalls.push({ ...functionCall, error: error.message, success: false });
-      await this.sessionRepository.save(session);
-
-      return { success: false, error: error.message };
-    }
   }
 
   /**
@@ -376,15 +379,21 @@ export class DigitalConciergeService {
       visitId: session.createdVisit.id,
       timestamp: new Date(),
     };
-    
+
     this.logger.log(`📡 Enviando evento: ${eventName}`);
     this.logger.log(`📦 Payload:`, JSON.stringify(payload));
-    
+
     // El frontend web tiene su propio NotificationsGateway (app movil/web de residentes),
     // pero el vigilIA-hub de la Raspberry Pi escucha en HubGateway (namespace /hub).
     // Notificamos al hub directamente porque es el agente activo que está esperando la respuesta.
-    this.logger.log(`🎯 Enviando a todos los Hubs conectados vía HubGateway...`);
-    this.hubGateway.broadcastToAllHubs(eventName, payload);
+    //
+    // Fase 1, Bloque A1.1 (docs/modulos/agente-cerebro.md §7/§11 — hallazgo H2
+    // de la auditoría): antes esto era `broadcastToAllHubs` — TODOS los hubs
+    // conectados (de CUALQUIER condominio) recibían la respuesta de esta
+    // sesión. `notifyHub` dirige el evento al hub que originó la sesión
+    // (`session.hubId`, más preciso) o, si no se conoce, a todos los hubs del
+    // MISMO condominio (`session.organizationId`) — nunca a otro tenant.
+    this.notifyHub(session, eventName, payload);
 
     this.logger.log(`✅ Notificación en tiempo real enviada para sesión ${sessionId}`);
 
@@ -394,25 +403,60 @@ export class DigitalConciergeService {
         type: session.createdVisit.type === VisitType.VEHICULAR ? 'vehicular' : 'pedestrian',
         visitId: session.createdVisit.id
       };
-      
+
+      // Hallazgo H2 (ALTO): antes `broadcastToAllHubs('hub:door_open', ...)`
+      // abría el portón físico de TODOS los condominios conectados al
+      // aprobar UNA visita en UNO solo. Ahora se dirige exclusivamente al hub
+      // que originó la sesión o, en su defecto, a los hubs del mismo
+      // condominio — ver `notifyHub`.
       this.logger.log(`🔑 Emitiendo comando de apertura de accesos al Hub (${doorPayload.type})`);
-      this.hubGateway.broadcastToAllHubs('hub:door_open', doorPayload);
+      this.notifyHub(session, 'hub:door_open', doorPayload);
     }
 
     return {
       success: true,
-      message: approved 
-        ? 'Visita aprobada exitosamente' 
+      message: approved
+        ? 'Visita aprobada exitosamente'
         : 'Visita rechazada exitosamente',
     };
   }
 
+  /**
+   * Fase 1, Bloque A1.1 (docs/modulos/agente-cerebro.md §7/§11 — hallazgo H2):
+   * dirige un evento al hub correcto en vez de `broadcastToAllHubs`. Prioriza
+   * el hub exacto que originó la sesión (`session.hubId`, vía
+   * `HubGateway.sendToHub`) — más preciso que por-organización si un
+   * condominio tiene más de un hub. Si ese hub no está conectado (o la
+   * sesión no tiene `hubId`, p.ej. transporte web), cae a
+   * `HubGateway.sendToOrganization`, que igual respeta el límite de tenant
+   * (nunca cruza a otro condominio, y no hace nada si `organizationId` es
+   * `null` — ver su docstring sobre el "cajón nulo").
+   */
+  private notifyHub(session: ConciergeSession, event: string, payload: unknown): void {
+    if (session.hubId && this.hubGateway.isHubConnected(session.hubId)) {
+      this.hubGateway.sendToHub(session.hubId, event, payload);
+      return;
+    }
+
+    this.hubGateway.sendToOrganization(session.organizationId, event, payload);
+  }
+
   // ========== HERRAMIENTAS ==========
+  //
+  // Fase 1, Bloque A2b (docs/modulos/agente-cerebro.md §5/§7/§10.2 paso 4):
+  // estos métodos eran `private`, invocados solo desde el `switch` de
+  // `executeTool` (ya eliminado). Ahora son `public` porque los adaptadores
+  // `VigiliaTool` en `agent/tools/*.tool.ts` los invocan directamente — la
+  // lógica de negocio NO se reescribe, solo cambia quién la llama (el
+  // `ToolDispatcherService`, vía el adaptador, en vez del switch). Ver
+  // `findSessionForTenant` más abajo para cómo el adaptador resuelve la
+  // `ConciergeSession` de forma tenant-aware antes de llamar a cualquiera de
+  // estos métodos.
 
   /**
    * Guarda datos del visitante en la sesión
    */
-  private async saveVisitorData(session: ConciergeSession, data: any) {
+  async saveVisitorData(session: ConciergeSession, data: SaveVisitorDataInput) {
     this.logger.debug('Saving visitor data...', data);
 
     if (data.nombre) session.visitorName = data.nombre;
@@ -438,62 +482,26 @@ export class DigitalConciergeService {
   }
 
   /**
-   * Busca un residente por número de casa/departamento
-   * Soporta múltiples formatos: "15", "Casa 15", "Depto A-1234", etc.
-   */
-  private async findResident(params: { casa: string }) {
-    this.logger.debug(`Searching resident for house: ${params.casa}`);
-
-    try {
-      // Usar búsqueda flexible que maneja múltiples formatos
-      const family = await this.familiesService.findByDepartment(params.casa);
-
-      if (!family) {
-        this.logger.debug(`No family found for search term: ${params.casa}`);
-        return {
-          encontrado: false,
-          mensaje: `No se encontró ningún residente en ${params.casa}. El visitante debe verificar el número o nombre correcto de la casa/departamento.`,
-        };
-      }
-
-      this.logger.debug(`Found family: ${family.name} - Unit: ${family.unit?.identifier || 'sin unidad'}`);
-
-      // Obtener miembros de la familia (ya vienen en family.members)
-      if (!family.members || family.members.length === 0) {
-        return {
-          encontrado: false,
-          mensaje: `La casa/departamento "${family.unit?.identifier || params.casa}" existe pero no tiene residentes registrados`,
-        };
-      }
-
-      // Devolver TODOS los miembros de la familia
-      const residentes = family.members.map(member => ({
-        id: member.id,
-        nombre: member.name,
-        telefono: member.phone,
-      }));
-
-      return {
-        encontrado: true,
-        casa: params.casa,
-        residentes: residentes,
-        cantidad_residentes: residentes.length,
-        familia: family.name,
-      };
-    } catch (error) {
-      this.logger.error(`Error finding resident: ${error.message}`);
-      return {
-        encontrado: false,
-        mensaje: 'Error al buscar el residente. Por favor intente nuevamente.',
-      };
-    }
-  }
-
-  /**
    * Notifica a TODOS los residentes de la familia sobre la visita
    * NUEVO: Crea la visita en estado PENDING automáticamente
+   *
+   * Fix M1 (Fase 1, Bloque A2b — docs/modulos/agente-cerebro.md §6/§11):
+   * antes, `usersService.findOne(id)` cargaba CUALQUIER usuario por id, sin
+   * verificar que perteneciera al condominio de la sesión — un id de OTRO
+   * condominio (adivinado, filtrado desde otra sesión, o inyectado por un
+   * modelo comprometido) se notificaba/asignaba como host igual. Ahora se
+   * exige que `user.family.organizationId` coincida con `tenantScope`
+   * (mismo criterio que `scopeWhere`/`stampOrganizationId` del resto del
+   * sistema — super-admin sin restricción, resto exige igualdad exacta
+   * incluyendo el caso `null === null`) ANTES de aceptarlo como destinatario
+   * válido; un id que no matchea se descarta igual que un id inexistente
+   * (mismo log + mismo comportamiento observable para el modelo).
    */
-  private async notifyResident(session: ConciergeSession, params: { residentes_ids: string[] }) {
+  async notifyResident(
+    session: ConciergeSession,
+    params: { residentes_ids: string[] },
+    tenantScope: TenantScope,
+  ) {
     this.logger.debug(`Notifying residents:`, params.residentes_ids);
 
     try {
@@ -502,14 +510,26 @@ export class DigitalConciergeService {
         throw new BadRequestException('No se proporcionaron IDs de residentes');
       }
 
-      // Obtener todos los residentes, ignorando los que no se encuentren (ej. usuarios eliminados)
-      const validResidents: any[] = [];
+      // Obtener todos los residentes, ignorando los que no se encuentren (ej.
+      // usuarios eliminados) o no pertenezcan al condominio de esta sesión
+      // (fix M1, ver docstring del método).
+      const validResidents: User[] = [];
       for (const id of params.residentes_ids) {
         try {
           const user = await this.usersService.findOne(id);
-          if (user) {
-            validResidents.push(user);
+          if (!user) {
+            continue;
           }
+
+          const userOrganizationId = user.family?.organizationId ?? null;
+          if (!tenantScope.isSuperAdmin && userOrganizationId !== tenantScope.tenantId) {
+            this.logger.warn(
+              `Fix M1: residente ${id} pertenece a otro condominio (organizationId=${userOrganizationId ?? 'null'}, esperado=${tenantScope.tenantId ?? 'null'}) — se ignora.`,
+            );
+            continue;
+          }
+
+          validResidents.push(user);
         } catch (error) {
           this.logger.warn(`No se pudo cargar el residente con ID ${id}: ${error.message}`);
         }
@@ -601,7 +621,7 @@ export class DigitalConciergeService {
   /**
    * Reenvía la notificación a los residentes que ya estaban en la lista (si hubo timeout)
    */
-  private async resendNotification(session: ConciergeSession) {
+  async resendNotification(session: ConciergeSession) {
     this.logger.debug(`Resending notification for session: ${session.sessionId}`);
 
     if (!session.residentsNotified || session.residentsNotified.length === 0) {
@@ -688,7 +708,7 @@ export class DigitalConciergeService {
 
   // ========== HELPERS ==========
 
-  private async findSessionById(sessionId: string): Promise<ConciergeSession> {
+  async findSessionById(sessionId: string): Promise<ConciergeSession> {
     const session = await this.sessionRepository.findOne({
       where: { sessionId },
       relations: ['createdVisit'],
@@ -696,6 +716,32 @@ export class DigitalConciergeService {
 
     if (!session) {
       throw new NotFoundException(`Session not found: ${sessionId}`);
+    }
+
+    return session;
+  }
+
+  /**
+   * Resuelve una `ConciergeSession` Y verifica que pertenezca al condominio
+   * de `tenantScope` (Fase 1, Bloque A2b — docs/modulos/agente-cerebro.md
+   * §6: "toda tool y todo lookup filtran por el condominio activo"). Punto
+   * de entrada único que usan los adaptadores `VigiliaTool` de
+   * `agent/tools/*.tool.ts` que operan sobre una sesión de citófono
+   * (`guardar_datos_visitante`, `notificar_residente`, `reenviar_notificacion`,
+   * `finalizar_llamada`) — evita que el contexto del condominio A pueda leer
+   * o mutar una `ConciergeSession` que originó el condominio B, aunque
+   * conozca (o adivine) su `sessionId`.
+   */
+  async findSessionForTenant(
+    sessionId: string,
+    tenantScope: TenantScope,
+  ): Promise<ConciergeSession> {
+    const session = await this.findSessionById(sessionId);
+
+    if (!tenantScope.isSuperAdmin && session.organizationId !== tenantScope.tenantId) {
+      throw new ForbiddenException(
+        `La sesión "${sessionId}" no pertenece al condominio del contexto autorizado`,
+      );
     }
 
     return session;

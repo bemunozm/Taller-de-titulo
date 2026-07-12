@@ -204,9 +204,15 @@ export class DetectionsService {
     // Si la placa está autorizada, mandamos evento directo a la Raspberry Pi saltándonos a Sofía
     if (decision === 'Permitido') {
       this.logger.log(`🚗 Placa autorizada (${dto.plate}) detectada. Enviando comando de apertura al Portón Vehicular...`);
-      this.hubGateway.broadcastToAllHubs('hub:door_open', { 
-        type: 'vehicular', 
-        plate: dto.plate 
+      // Fase 1, Bloque A1.1 (docs/modulos/agente-cerebro.md §7/§11 — hallazgo
+      // H2 de la auditoría, reportado también aquí aunque no era el foco del
+      // bloque): mismo patrón que `DigitalConciergeService.respondToVisitor` —
+      // antes `broadcastToAllHubs` abría el portón físico de TODOS los
+      // condominios ante una patente autorizada en UNO solo. Se dirige por
+      // `organizationId` de la detección (`saved.organizationId`, tarea #19).
+      this.hubGateway.sendToOrganization(saved.organizationId, 'hub:door_open', {
+        type: 'vehicular',
+        plate: dto.plate,
       });
     }
 

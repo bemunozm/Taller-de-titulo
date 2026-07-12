@@ -5,6 +5,7 @@ import { Repository } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 import { ROLES_KEY } from '../decorators/roles.decorator';
 import { PERMISSIONS_KEY } from '../decorators/permissions.decorator';
+import { getUserPermissionNames, hasAnyPermission } from '../utils/permissions.util';
 
 @Injectable()
 export class AuthorizationGuard implements CanActivate {
@@ -43,12 +44,11 @@ export class AuthorizationGuard implements CanActivate {
 
     // Obtener nombres de roles del usuario
     const userRoleNames = user.roles.map(role => role.name);
-    
-    // Obtener todos los permisos del usuario
-    const userPermissions = user.roles.reduce((allPermissions, role) => {
-      const rolePermissions = role.permissions?.map(p => p.name) || [];
-      return [...allPermissions, ...rolePermissions];
-    }, []);
+
+    // Obtener todos los permisos del usuario — lógica compartida con
+    // ToolDispatcherService (agente-cerebro, Fase 1 Bloque A2a) vía
+    // permissions.util.ts, para no duplicar el aplanado de permisos.
+    const userPermissions = getUserPermissionNames(user);
 
     // Verificar roles (si están definidos)
     if (requiredRoles) {
@@ -59,13 +59,8 @@ export class AuthorizationGuard implements CanActivate {
     }
 
     // Verificar permisos (si están definidos)
-    if (requiredPermissions) {
-      const hasPermission = requiredPermissions.some(permission => 
-        userPermissions.includes(permission)
-      );
-      if (hasPermission) {
-        return true;
-      }
+    if (requiredPermissions && hasAnyPermission(userPermissions, requiredPermissions)) {
+      return true;
     }
 
     // Si llegamos aquí, no tiene ni el rol ni los permisos

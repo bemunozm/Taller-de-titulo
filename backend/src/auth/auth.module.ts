@@ -25,6 +25,7 @@ import { User } from 'src/users/entities/user.entity';
 import { Token } from 'src/tokens/entities/token.entity';
 import { AuthEmailService } from './services/auth-email.service';
 import { AuthorizationGuard } from './guards/authorization.guard';
+import { AuthGuard } from './auth.guard';
 import { MailerModule } from '@nestjs-modules/mailer';
 import { CloudinaryModule } from 'src/cloudinary/cloudinary.module';
 
@@ -69,7 +70,21 @@ const logger = new Logger('AuthModule');
     // registra como guard global — solo se aplica explícitamente en la ruta
     // de login vía @UseGuards(ThrottlerGuard) + @Throttle, así no afecta el
     // resto de endpoints de AuthController).
-    ThrottlerModule.forRoot([{ name: 'login', ttl: 60_000, limit: 5 }]),
+    //
+    // 'concierge-agent-chat' (Fase 1, Bloque A2a, revisión de calidad):
+    // throttler para `POST /concierge/agent/chat` (backend/src/agent/
+    // agent.controller.ts) — reenvía cada mensaje al proveedor del modelo
+    // (costo por token, latencia de red) y no tenía ningún límite de tasa.
+    // `ThrottlerModule` es `@Global()` (ver su source en
+    // node_modules/@nestjs/throttler), así que registrarlo acá — una sola
+    // vez, junto a 'login' — alcanza para que `AgentModule` (que ni siquiera
+    // importa `ThrottlerModule` directamente) pueda usar `ThrottlerGuard` +
+    // `@Throttle({ 'concierge-agent-chat': {...} })` en su controller, mismo
+    // patrón que 'login' en AuthController.
+    ThrottlerModule.forRoot([
+      { name: 'login', ttl: 60_000, limit: 5 },
+      { name: 'concierge-agent-chat', ttl: 60_000, limit: 20 },
+    ]),
     MailerModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -99,7 +114,14 @@ const logger = new Logger('AuthModule');
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, AuthEmailService, AuthorizationGuard],
-  exports: [AuthorizationGuard, AuthEmailService],
+  providers: [AuthService, AuthEmailService, AuthorizationGuard, AuthGuard],
+  // AuthGuard: Fase 1, Bloque A1 — se exporta explícitamente para que
+  // `ConciergeAuthGuard` (digital-concierge) pueda inyectarlo por
+  // constructor y componerlo con `HubAuthGuard` (OR de transporte: hub O
+  // sesión humana). Antes solo se usaba vía `@UseGuards(AuthGuard)` (21
+  // usos, instanciación ad-hoc de Nest para guards referenciados por clase);
+  // exportarlo no cambia ese comportamiento existente, solo lo formaliza
+  // como provider inyectable para consumidores nuevos.
+  exports: [AuthorizationGuard, AuthEmailService, AuthGuard],
 })
 export class AuthModule {}

@@ -21,6 +21,7 @@
     "create-ingress": "node scripts/create_ingress.mjs"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^4.0.11",
     "@better-auth/api-key": "^1.6.23",
     "@nestjs-modules/mailer": "^2.0.2",
     "@nestjs/axios": "^4.0.1",
@@ -37,6 +38,7 @@
     "@nestjs/typeorm": "^11.0.0",
     "@nestjs/websockets": "^11.1.8",
     "@thallesp/nestjs-better-auth": "^2.4.0",
+    "ai": "^7.0.22",
     "axios": "^1.12.2",
     "bcrypt": "^6.0.0",
     "better-auth": "^1.6.23",
@@ -52,7 +54,8 @@
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "socket.io": "^4.8.1",
-    "typeorm": "^0.3.26"
+    "typeorm": "^0.3.26",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",
@@ -99,7 +102,10 @@
     "coverageDirectory": "../coverage",
     "testEnvironment": "node",
     "moduleNameMapper": {
-      "^src/(.*)$": "<rootDir>/$1"
+      "^src/(.*)$": "<rootDir>/$1",
+      "^better-auth/node$": "<rootDir>/test-utils/mocks/better-auth-node.mock.ts",
+      "^better-auth/plugins$": "<rootDir>/test-utils/mocks/better-auth-plugins.mock.ts",
+      "^better-auth/api$": "<rootDir>/test-utils/mocks/better-auth-api.mock.ts"
     }
   }
 }

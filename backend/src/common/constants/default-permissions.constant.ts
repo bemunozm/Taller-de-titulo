@@ -29,6 +29,14 @@ export const DEFAULT_PERMISSIONS: PermissionDefinition[] = [
   // "Administrador" (ese rol está acotado a SU condominio).
   // ============================================
   { name: 'platform.manage-organizations', description: 'Crear condominios (organizaciones) y su administrador', module: 'platform', action: 'manage-organizations' },
+  // Fase 1, Bloque A1.1 (docs/modulos/agente-cerebro.md §7/§11 — H1): provisionar
+  // hubs físicos (secret propio + organizationId) — mismo criterio exclusivo
+  // de plataforma que 'platform.manage-organizations'. En ambientes que ya
+  // bootstrapearon roles antes de esta tarea, la migración
+  // AddPlatformManageHubsPermission asigna este permiso a "Super Administrador"
+  // directamente (ver su docstring — DataInitializationService no reasigna
+  // permisos a roles que ya tienen alguno).
+  { name: 'platform.manage-hubs', description: 'Provisionar y gestionar hubs físicos (citófono)', module: 'platform', action: 'manage-hubs' },
 
   // ============================================
   // GESTIÓN DE USUARIOS
