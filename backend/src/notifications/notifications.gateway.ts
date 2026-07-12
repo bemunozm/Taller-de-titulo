@@ -9,6 +9,8 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
+import { fromNodeHeaders } from 'better-auth/node';
+import { AuthService as BetterAuthService } from '@thallesp/nestjs-better-auth';
 
 @WebSocketGateway({
   cors: {
@@ -22,13 +24,23 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
   private logger = new Logger('NotificationsGateway');
   private userSockets: Map<string, string[]> = new Map(); // userId -> socketIds[]
 
+  constructor(private readonly betterAuthService: BetterAuthService) {}
+
   handleConnection(client: Socket) {
     this.logger.log(`Cliente conectado: ${client.id}`);
+    // NOTA: no se resuelve la sesión acá. `handleConnection` es async por
+    // naturaleza (I/O contra better-auth) pero socket.io NO espera a que
+    // resuelva antes de entregarle 'connect' al cliente ni antes de
+    // despachar sus siguientes mensajes — un cliente legítimo que emite
+    // 'register' inmediatamente después de conectar ganaría la carrera
+    // contra una validación cacheada acá. La sesión se valida de forma
+    // síncrona-al-mensaje dentro de `handleRegister`, que es el único punto
+    // donde realmente importa (ahí se decide el mapeo socket -> userId).
   }
 
   handleDisconnect(client: Socket) {
     this.logger.log(`Cliente desconectado: ${client.id}`);
-    
+
     // Remover el socket de todos los usuarios
     for (const [userId, socketIds] of this.userSockets.entries()) {
       const index = socketIds.indexOf(client.id);
@@ -42,23 +54,55 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
     }
   }
 
+  /** Resuelve la sesión de better-auth desde la cookie httpOnly del handshake. */
+  private async resolveSessionUserId(client: Socket): Promise<string | null> {
+    try {
+      const session = await this.betterAuthService.api.getSession({
+        headers: fromNodeHeaders(client.handshake.headers),
+      });
+      return session?.user?.id ?? null;
+    } catch (error) {
+      this.logger.debug(`No se pudo resolver sesión better-auth en handshake: ${error}`);
+      return null;
+    }
+  }
+
   @SubscribeMessage('register')
-  handleRegister(
+  async handleRegister(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { userId: string },
   ) {
     const { userId } = data;
-    
+    // Fuente de verdad: la sesión better-auth resuelta desde la cookie del
+    // handshake — NUNCA el `userId` que manda el cliente en el body. Se
+    // valida acá (no en `handleConnection`) para evitar la carrera descrita
+    // arriba y porque este es el único punto donde el resultado importa.
+    const sessionUserId = await this.resolveSessionUserId(client);
+
+    if (!sessionUserId) {
+      this.logger.warn(
+        `Socket ${client.id} intentó registrarse como ${userId} sin sesión válida — rechazado`,
+      );
+      return { success: false, message: 'No autorizado: sesión inválida o inexistente' };
+    }
+
+    if (sessionUserId !== userId) {
+      this.logger.warn(
+        `Socket ${client.id} (sesión ${sessionUserId}) intentó registrarse como ${userId} — rechazado`,
+      );
+      return { success: false, message: 'No autorizado: el userId no coincide con la sesión' };
+    }
+
     if (!this.userSockets.has(userId)) {
       this.userSockets.set(userId, []);
     }
-    
+
     const sockets = this.userSockets.get(userId)!;
     if (!sockets.includes(client.id)) {
       sockets.push(client.id);
       this.logger.log(`Usuario ${userId} registrado con socket ${client.id}`);
     }
-    
+
     return { success: true, message: 'Registrado exitosamente' };
   }
 
