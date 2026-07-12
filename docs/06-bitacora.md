@@ -4,6 +4,15 @@ Registro cronológico de conversaciones, decisiones y avances. Lo más reciente 
 
 ---
 
+## 2026-07-11 (cont. 8) — Fase 0 #19: multi-tenant ✅
+- Delegado a senior-backend-engineer, revisado y verificado por Nova (test de aislamiento independiente).
+- organization=condominio; tenant desde membresía; TenantInterceptor + helpers de scoping (super-admin bypass); `organizationId` en 10 entidades núcleo; módulo onboarding (condominios + members).
+- Verificado: 2 condominios aislados (cada admin ve solo su data), super-admin cross-tenant, RBAC 403, login legacy+módulos 200.
+- **Fase 0: 5/7 (#15–#19). Falta #20 (frontend→cookies, ver acoplamiento §16) y #21 (cleanup+seguridad+tests).**
+- Detalle en [modulos/auth-multitenant.md §15](modulos/auth-multitenant.md#15-tarea-19--multi-tenant-organizationcondominio--2026-07-11-verificado).
+
+---
+
 ## 2026-07-11 (cont. 7) — Fase 0 #18: flujos + apiKey + disableSignUp ✅
 - Delegado a senior-backend-engineer, revisado y verificado por Nova.
 - Sign-up cerrado (`disableSignUp`), flujos forgot/reset/confirm migrados a better-auth, emails re-cableados, bridge `user.password` que mantiene el login legacy vivo, service-token vía apiKey.

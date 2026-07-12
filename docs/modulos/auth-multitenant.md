@@ -135,5 +135,16 @@ El `user` de better-auth es la fuente de verdad (opción C). **Una sola tabla `u
 - Verificado por Nova: build limpio, login legacy + módulos 200, sign-up 400, apiKey 201.
 - 🟠 **Deuda (para #21):** `DataInitializationService` NO retro-asigna permisos nuevos a roles ya sembrados (solo si `role.permissions.length===0`) — Super Admin sí (dinámico), pero Administrador/Desarrollador no reciben `auth.manage-service-tokens` en re-seed. Falta un backfill/migration para permisos nuevos.
 
+## 15. Tarea #19 — Multi-tenant (organization=condominio) ✅ (2026-07-11, verificado)
+- `organization` plugin (`allowUserToCreateOrganization:false`); tenant resuelto desde la **membresía** del `request.user` (tabla `member`), NO desde `session.activeOrganizationId` → funciona con JWT legacy y sesión better-auth por igual.
+- Mecanismo reutilizable en `src/common/tenant/`: `TenantInterceptor` (global) + `TenantContextService` (request-scoped) + helpers `scopeWhere`/`applyTenantFilter`/`stampOrganizationId` (SQL parametrizado, **super-admin bypass**).
+- `organizationId` en 10 entidades núcleo; stamp+filter en cameras/units/families/vehicles; stamp resource-derived en detections/anomalies/notifications.
+- Onboarding (`src/onboarding/`): `POST /onboarding/condominiums` (super-admin: crea condominio+admin) + `POST /onboarding/members` (admin: crea residentes/conserjes en su org). §7b materializado.
+- Verificado por Nova (test independiente): 2 condominios, **cada admin ve SOLO su data**, super-admin cross-tenant, RBAC 403, login legacy+módulos 200. Build limpio.
+- 🟠 **Pendiente para #21:** filtrado de `Visits`, filtrado de lectura en `detections`/`anomalies` (ya estampados), `Hub` (sin CRUD REST hoy).
+
+## 16. Tarea #20 — Frontend a cookies: acoplamiento a resolver
+Al cutear el frontend de JWT/localStorage a cookies de better-auth, el login del navegador pasa a `POST /api/auth/sign-in/email` — que exige que el usuario tenga una **cuenta better-auth** (fila `account` con hash). Hoy: los usuarios de onboarding la obtienen al activar (reset flow crea el account); pero el `seed-admin` solo setea `user.password` (legacy). Antes/durante #20 hay que **darle al admin de dev una cuenta better-auth** (actualizar seed-admin) para que pueda loguear por cookie. El guard dual-mode ya soporta ambos, así que el backend no se rompe.
+
 ## Fuentes
 Ver informe completo en la bitácora / memoria del research (`agent-memory/deep-web-researcher/better-auth-nestjs-migration-2026.md`). Docs oficiales: better-auth.com (NestJS integration, Organization, Admin, Database, Auth0 migration, Security update June 2026), repo `ThallesP/nestjs-better-auth`, skills.sh/better-auth.
