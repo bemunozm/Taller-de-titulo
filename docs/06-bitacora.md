@@ -4,6 +4,15 @@ Registro cronológico de conversaciones, decisiones y avances. Lo más reciente 
 
 ---
 
+## 2026-07-12 — Fase 0 #20: frontend a cookies ✅ → FASE 0 COMPLETA (7/7)
+- Delegado a frontend-senior-dev, más fixes de regresión (CameraPlayer/useNotifications/WebSocketService) y verificación en navegador por Nova.
+- Cutover a cookies httpOnly de better-auth: axios withCredentials, login/logout/getUser por cookie, vistas reset/confirm con token opaco. `seed-admin` provisiona la cuenta better-auth (prereq). Cero `AUTH_TOKEN` en el frontend.
+- Verificado (navegador): login `ben.munozm` → dashboard con RBAC por cookie, cookie httpOnly, sin `AUTH_TOKEN` en localStorage, sin errores de consola.
+- **FASE 0 (auth robusta + multi-tenant) COMPLETA.** Detalle en [modulos/auth-multitenant.md §16](modulos/auth-multitenant.md#16-tarea-20--frontend-a-cookies-httponly--2026-07-12-verificado).
+- Pendientes antes de mergear/prod: rotar secretos de `lpr/.env`; ~11 errores tsc preexistentes del frontend (bloquean build prod); gateway de notificaciones sin validar sesión; Jest/ESM.
+
+---
+
 ## 2026-07-11 (cont. 9) — Fase 0 #21: review de seguridad + hardening ✅
 - Auditoría del cybersecurity-engineer (2🔴/3🟠/3🟡/5🔵) + fixes por senior-backend-engineer, revisado y verificado por Nova.
 - **Cerrado el riesgo #1**: los endpoints de ingesta que abrían el portón sin auth ahora exigen `apiKey` (ServiceApiKeyGuard) — verificado 401 sin key. Worker LPR cablea la key.

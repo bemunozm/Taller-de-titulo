@@ -151,8 +151,15 @@ Auditoría del cybersecurity-engineer (2🔴 · 3🟠 · 3🟡 · 5🔵) + fixes
 - 🟡/🔵 Anti-enumeración en login legacy, `useSecureCookies`+https en prod, `helmet`, CORS validado, sin logs de PII.
 - **Deuda:** `lpr/.env` estaba trackeado con secretos (JWT legacy + `WORKER_MANAGER_SECRET`) → **desregistrado**, pero siguen en el historial de git → **ROTAR esos secretos**. Diferido: cajón `null` de tenant, Jest/ESM (bloquea tests), ~880 issues ESLint preexistentes.
 
-## 16. Tarea #20 — Frontend a cookies: acoplamiento a resolver
-Al cutear el frontend de JWT/localStorage a cookies de better-auth, el login del navegador pasa a `POST /api/auth/sign-in/email` — que exige que el usuario tenga una **cuenta better-auth** (fila `account` con hash). Hoy: los usuarios de onboarding la obtienen al activar (reset flow crea el account); pero el `seed-admin` solo setea `user.password` (legacy). Antes/durante #20 hay que **darle al admin de dev una cuenta better-auth** (actualizar seed-admin) para que pueda loguear por cookie. El guard dual-mode ya soporta ambos, así que el backend no se rompe.
+## 16. Tarea #20 — Frontend a cookies httpOnly ✅ (2026-07-12, verificado)
+Cutover del frontend de JWT/localStorage a **cookies httpOnly de better-auth**.
+- **Prerequisito resuelto:** `seed-admin.js` ahora provisiona la cuenta better-auth (`account` credential) además de `user.password`, para que el admin de dev loguee por cookie. Los usuarios de onboarding la obtienen al activarse (reset flow).
+- **Frontend:** `axios` con `withCredentials` (sin Bearer/localStorage); login → `POST /api/auth/sign-in/email` (cookie); logout → `sign-out`; `getUser` por `/api/v1/auth/user` (cookie vía guard dual-mode); vistas reset/confirm leen el token opaco de la URL. `usePermissions`/`ProtectedRoute` intactos.
+- **Regresión arreglada:** `CameraPlayer` (WHEP) y `useNotifications`/`WebSocketService` ya no usan `AUTH_TOKEN` — van por cookie (`withCredentials`). Cero usos de `AUTH_TOKEN` en el frontend.
+- **Verificado por Nova en el navegador:** login `ben.munozm` → redirige (sin `AUTH_TOKEN` en localStorage, cookie httpOnly no legible por JS) → `/dashboard` ("Dashboard Ejecutivo") carga con RBAC por cookie, sin errores en consola.
+- **Deuda (fuera de #20):** el frontend tiene ~11 errores `tsc` PREEXISTENTES (NotificationDetailModal `user` no definido, UserForm, useAuditLogs, etc.) que bloquean `vite build` de producción — corre en dev igual. El gateway de notificaciones NO valida la sesión (registra por `userId` del cliente) — hueco pre-existente a cerrar. `.claude/launch.json` creado (local) para el preview.
+
+## 🏁 Fase 0 COMPLETA (7/7): #15 POC · #16 User unificado · #17 guard dual-mode · #18 flujos+apiKey · #19 multi-tenant · #20 frontend cookies · #21 hardening. Mejor migrarlo antes de mergear: rotar los secretos de `lpr/.env` (estaban en git).
 
 ## Fuentes
 Ver informe completo en la bitácora / memoria del research (`agent-memory/deep-web-researcher/better-auth-nestjs-migration-2026.md`). Docs oficiales: better-auth.com (NestJS integration, Organization, Admin, Database, Auth0 migration, Security update June 2026), repo `ThallesP/nestjs-better-auth`, skills.sh/better-auth.
