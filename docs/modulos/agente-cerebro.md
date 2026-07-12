@@ -154,3 +154,36 @@ Se documenta y ejecuta por módulo. Orden sugerido:
 **Aún por confirmar:**
 - **`X-Hub-Secret` a medio camino:** ¿fue olvido o intención? Definir el mecanismo de auth de los clientes-transporte (hub por secret; web por sesión de usuario).
 - **Política de autonomía por acción**: ¿qué puede hacer el agente solo (abrir a un residente identificado) vs. qué escala a humano? Probablemente **configurable por condominio**.
+
+## 12. Fase 2 — diseño
+
+### 12.1 Decisiones tomadas (Benjamin)
+
+- **Apertura física autónoma con reglas**: el agente puede abrir el portón/puerta **solo** cuando el visitante queda identificado con certeza (residente reconocido, visita pre-aprobada válida) — cualquier caso dudoso **escala** al residente/conserje humano en vez de decidir. El criterio "autónomo vs. escala" se implementa **por-tool** (F2.2, `abrir_porton`), no acá — F2.1 deja listo el **mecanismo genérico** que ese criterio va a usar.
+- **"Llamar a residencia" = solo notificar**: no se agrega un canal de voz nuevo cliente↔residente. "Llamar" en el vocabulario del citófono se traduce a notificación (push/WS) al residente — ya existe (`notificar_residente`, Fase 1) y se reusa, no se reinventa.
+- **Voz realtime (D2)** ya se logró en F1 (el core del agente vive en el backend; el transporte de audio sigue siendo delgado en los clientes) — F2 solo consolida ese transporte, no es un rediseño.
+- **Arranque de F2** = tools de consulta (read, sin riesgo) **+** activar el mecanismo de autonomía que el contrato `VigiliaTool.requiresApproval` prometía desde Fase 1 pero que ningún consumidor leía todavía.
+
+### 12.2 Secuencia F2.1 → F2.4
+
+1. **F2.1 (este bloque)**: 3 tools de consulta (`consultar_vehiculo`, `consultar_visitas`, `consultar_accesos_recientes`) + mecanismo de autonomía/aprobación genérico (`PendingAction` + escalamiento + aprobación idempotente) — sin ninguna tool todavía usando `requiresApproval: true` en producción.
+2. **F2.2**: `abrir_porton`/`abrir_puerta` con el criterio "autónomo vs. escala" real (residente identificado/visita pre-aprobada → autónomo; dudoso → `requiresApproval: true`, usa el mecanismo de F2.1).
+3. **F2.3**: orquestación event-driven (patente LPR / citófono / anomalía → decisión del agente) sobre el catálogo ya expandido.
+4. **F2.4**: consolidación del transporte de voz realtime (RPi como puente delgado) + cierre de Fase 2.
+
+### 12.3 Mecanismo de autonomía — diseño
+
+**Problema que resuelve**: desde Fase 1, `VigiliaTool.requiresApproval` (§5) existía en el contrato pero `ToolDispatcherService` lo ignoraba — toda tool se ejecutaba directo. F2.1 activa ese campo.
+
+**Piezas:**
+
+- **`PendingAction`** (`backend/src/agent/entities/pending-action.entity.ts`, migración `1783890290995-CreatePendingActions.ts`): `tenantId`/`sessionId` (nullable, mismo "cajón sin condominio" que el resto del sistema), `toolName`, `input` (ya validado por Zod, no el `rawInput` del modelo), `requestId` (correlación de auditoría), `status` (`pending` → `approved` → `executed`, o `rejected` como terminal alternativo), `contextSnapshot` (el `AuthorizedContext` completo que autorizó la escalada — necesario para poder re-invocar `tool.execute()` con fidelidad en un turno HTTP distinto, el de la aprobación), `result` (salida ya validada por `outputSchema`, para servirla sin re-ejecutar), `resolvedBy`/`resolvedAt`.
+- **`ToolDispatcherService.execute`** (`tool-dispatcher.service.ts`): scopes → Zod-in (sin cambios) → **si `tool.requiresApproval`**, delega en `PendingActionsService.create` (crea + notifica) y devuelve el envelope fijo `{ pendiente: true, pendingActionId, mensaje }` (NO se valida contra `tool.outputSchema`, que describe la tool ya ejecutada) → si no, ejecuta directo como en Fase 1. Ambos caminos auditan con la MISMA función (`tool-audit.util.ts`, extraída de la lógica que antes vivía solo en el dispatcher) — regla dura #4 del §5 se mantiene en los dos caminos.
+- **Escalamiento**: `PendingActionsService.notifyEscalation` usa `NotificationsService.notifyByRole('Conserje', ...)` con `requiresAction: true` — mismo patrón que ya usa `DetectionsService.createPendingDetectionForConcierge` para detecciones pendientes de aprobación.
+- **Endpoint de aprobación** (`PendingActionsController`, `POST /concierge/pending-actions/:id/{approve,reject}`): `AuthGuard` (sesión humana, NO hub — un hub escala, un humano decide) + `RequirePermissions('digital-concierge.manage')`. Verifica tenant vía `PendingActionsService.findForTenant` (mismo patrón `findSessionForTenant` de `DigitalConciergeService`).
+- **Idempotencia de la ejecución**: NO se basa en comparar `requestId`, sino en una actualización atómica condicionada (`repo.update({ id, status: Not('executed') }, ...)`): si dos aprobaciones llegan concurrentes, solo una transiciona el estado y ejecuta la tool; la otra observa `affected === 0`, relee el estado final (`executed`) y devuelve el `result` ya calculado sin volver a invocar `tool.execute`.
+
+### 12.4 Deuda conocida (heredada, no introducida por F2.1)
+
+- `NotificationsService.notifyByRole`/`UsersService.findByRole` no filtran por tenant — la notificación de escalamiento llega a conserjes de **todos** los condominios, no solo el de la `PendingAction`. Mismo gap que ya tenía `DetectionsService.createPendingDetectionForConcierge` (no es una regresión de este bloque).
+- `Visit.organizationId` existe en el schema pero `VisitsService` no lo estampa ni lo filtra todavía (fix vive en el PR #50) — `consultar_visitas` deriva el tenant exclusivamente desde `FamiliesService` (sí tenant-scoped), nunca confía en la columna de `Visit`.

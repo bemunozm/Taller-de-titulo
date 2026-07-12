@@ -32,12 +32,23 @@ export interface VigiliaTool<TInput = unknown, TOutput = unknown> {
   readonly access: 'read' | 'write';
 
   /**
-   * Si `true`, ejecutar esta tool requiere aprobación humana explícita
-   * (política de autonomía, §6 del doc). En A2a ninguna tool la usa todavía
-   * (solo hay tools `read`) — el dispatcher deja el campo listo para cuando
-   * Fase 2 agregue writes sensibles (portón/puerta).
+   * Política de autonomía (§6 del doc). En A2a/F2.1 todas las tools usaban un
+   * `boolean` fijo. Fase 2, Bloque F2.2 (docs/modulos/agente-cerebro.md §12):
+   * se admite además una función — necesaria para tools como `abrir_acceso`,
+   * donde la necesidad de aprobación depende del INPUT/contexto de CADA
+   * llamada (¿el visitante de ESTA sesión tiene una visita pre-aprobada
+   * vigente?), no de la tool en abstracto. `true`/resuelve a `true` => se
+   * escala (ver `ToolDispatcherService.escalateForApproval`); `false`/resuelve
+   * a `false` => se ejecuta directo.
+   *
+   * Retrocompatible: las tools existentes (`buscar_residente`,
+   * `finalizar_llamada`, etc.) siguen declarando el `boolean` literal tal
+   * cual — `ToolDispatcherService` distingue el caso en runtime con
+   * `typeof tool.requiresApproval === 'function'`.
    */
-  readonly requiresApproval: boolean;
+  readonly requiresApproval:
+    | boolean
+    | ((ctx: AuthorizedContext, input: TInput) => boolean | Promise<boolean>);
 
   /** Permisos (nombres `module.action` de DEFAULT_PERMISSIONS) requeridos para ejecutar. */
   readonly requiredScopes: Permission[];

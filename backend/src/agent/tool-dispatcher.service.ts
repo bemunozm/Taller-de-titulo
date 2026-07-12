@@ -4,16 +4,26 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { ZodError } from 'zod';
-import {
-  LogLevel,
-  LogType,
-  ServiceName,
-} from '../logs/entities/system-log.entity';
-import { LogsService } from '../logs/logs.service';
+import { PendingActionsService } from './pending-actions.service';
 import { ToolRegistryService } from './tool-registry.service';
+import { auditToolCall } from './tool-audit.util';
 import type { AuthorizedContext } from './types/authorized-context.type';
 import type { VigiliaTool } from './types/vigilia-tool.type';
+import { LogsService } from '../logs/logs.service';
+
+/**
+ * Forma fija que el agente recibe cuando una tool con `requiresApproval:
+ * true` escala en vez de ejecutar (Fase 2, Bloque F2.1 —
+ * docs/modulos/agente-cerebro.md §12). Deliberadamente NO se valida contra
+ * `tool.outputSchema` (ese schema describe la salida de la tool YA
+ * ejecutada, no este sobre "quedó pendiente") — es un envelope distinto,
+ * fijo para todo el catálogo.
+ */
+export interface PendingApprovalResult {
+  pendiente: true;
+  pendingActionId: string;
+  mensaje: string;
+}
 
 /**
  * Dispatcher del catálogo de tools (Fase 1, Bloque A2a —
@@ -31,6 +41,14 @@ import type { VigiliaTool } from './types/vigilia-tool.type';
  * feedback de validación (forma/tipos esperados del input) antes de enterarse
  * de que ni siquiera tiene permiso para llamar la tool.
  *
+ * Fase 2, Bloque F2.1 (§12 del diseño): activa la política de autonomía que
+ * el contrato `VigiliaTool.requiresApproval` prometía desde Fase 1 pero que
+ * nadie leía. Si `tool.requiresApproval === true`, el input ya validado
+ * (Zod) NO se ejecuta acá — se delega en `PendingActionsService.create`, que
+ * persiste una `PendingAction` y escala (notifica). El dispatcher sigue
+ * siendo el único punto de auditoría: ambos caminos (ejecución directa y
+ * escalada) llaman a `auditToolCall` con la MISMA forma.
+ *
  * El Agent Runner (AI SDK) NO llama `tool.execute` directamente: siempre pasa
  * por acá, tanto si la tool se invoca vía el loop del agente (adaptador en
  * `agent-runner.service.ts`) como si en el futuro se expone también por MCP u
@@ -44,6 +62,7 @@ export class ToolDispatcherService {
   constructor(
     private readonly registry: ToolRegistryService,
     private readonly logsService: LogsService,
+    private readonly pendingActionsService: PendingActionsService,
   ) {}
 
   /**
@@ -64,9 +83,10 @@ export class ToolDispatcherService {
 
   /**
    * Ejecuta una tool ya resuelta: evalúa scopes → valida input (Zod) →
-   * ejecuta → valida output (Zod) → audita. Cualquier fallo en estos pasos
-   * también se audita (para que un intento denegado o un input inválido
-   * quede trazado, no solo las ejecuciones exitosas).
+   * ejecuta (o escala, si `requiresApproval`) → valida output (Zod, solo en
+   * el camino directo) → audita. Cualquier fallo en estos pasos también se
+   * audita (para que un intento denegado o un input inválido quede trazado,
+   * no solo las ejecuciones exitosas).
    *
    * Orden deliberado (FIX de revisión de calidad — antes se validaba Zod
    * primero): los scopes se chequean ANTES que el input, para que un caller
@@ -85,7 +105,8 @@ export class ToolDispatcherService {
       const error = new ForbiddenException(
         `El contexto autorizado no tiene los permisos requeridos por "${tool.name}" (${tool.requiredScopes.join(', ')})`,
       );
-      await this.audit(
+      await auditToolCall(
+        this.logsService,
         tool,
         ctx,
         rawInput,
@@ -102,7 +123,8 @@ export class ToolDispatcherService {
     try {
       parsedInput = tool.inputSchema.parse(rawInput);
     } catch (error) {
-      await this.audit(
+      await auditToolCall(
+        this.logsService,
         tool,
         ctx,
         rawInput,
@@ -114,20 +136,24 @@ export class ToolDispatcherService {
       throw error;
     }
 
+    // Fase 2, Bloque F2.2 (§12 del diseño): `requiresApproval` puede ser un
+    // `boolean` fijo (tools de F2.1) o una función (autonomía condicional al
+    // input/contexto de ESTA llamada, p.ej. `abrir_acceso` — ¿el visitante de
+    // esta sesión tiene una visita pre-aprobada vigente?). Se evalúa DESPUÉS
+    // de Zod (mismo orden que antes: nunca se decide autonomía sobre un input
+    // sin validar) y se audita si la evaluación misma lanza (p.ej. la tool
+    // consulta una `ConciergeSession` inexistente/cross-tenant) — mismo
+    // criterio de auditoría que el resto de pasos de este método.
+    let needsApproval: boolean;
+
     try {
-      const rawOutput = await tool.execute(ctx, parsedInput);
-      const output = tool.outputSchema.parse(rawOutput);
-      await this.audit(
-        tool,
-        ctx,
-        parsedInput,
-        output,
-        true,
-        Date.now() - startedAt,
-      );
-      return output;
+      needsApproval =
+        typeof tool.requiresApproval === 'function'
+          ? await tool.requiresApproval(ctx, parsedInput)
+          : tool.requiresApproval;
     } catch (error) {
-      await this.audit(
+      await auditToolCall(
+        this.logsService,
         tool,
         ctx,
         parsedInput,
@@ -138,6 +164,74 @@ export class ToolDispatcherService {
       );
       throw error;
     }
+
+    if (needsApproval) {
+      return this.escalateForApproval(tool, ctx, parsedInput, startedAt);
+    }
+
+    try {
+      const rawOutput = await tool.execute(ctx, parsedInput);
+      const output = tool.outputSchema.parse(rawOutput);
+      await auditToolCall(
+        this.logsService,
+        tool,
+        ctx,
+        parsedInput,
+        output,
+        true,
+        Date.now() - startedAt,
+      );
+      return output;
+    } catch (error) {
+      await auditToolCall(
+        this.logsService,
+        tool,
+        ctx,
+        parsedInput,
+        undefined,
+        false,
+        Date.now() - startedAt,
+        error,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Camino de escalada (Fase 2, Bloque F2.1): crea la `PendingAction`
+   * (`PendingActionsService.create` ya notifica) y devuelve el envelope fijo
+   * `{ pendiente: true, ... }` para que Sofía le diga al visitante que está
+   * consultando en vez de confirmar una acción que todavía no ocurrió.
+   */
+  private async escalateForApproval(
+    tool: VigiliaTool<unknown, unknown>,
+    ctx: AuthorizedContext,
+    parsedInput: unknown,
+    startedAt: number,
+  ): Promise<PendingApprovalResult> {
+    const pendingAction = await this.pendingActionsService.create(
+      tool,
+      ctx,
+      parsedInput,
+    );
+
+    const result: PendingApprovalResult = {
+      pendiente: true,
+      pendingActionId: pendingAction.id,
+      mensaje: `Tu solicitud ("${tool.name}") quedó pendiente de aprobación de un residente o conserje.`,
+    };
+
+    await auditToolCall(
+      this.logsService,
+      tool,
+      ctx,
+      parsedInput,
+      result,
+      true,
+      Date.now() - startedAt,
+    );
+
+    return result;
   }
 
   /**
@@ -158,52 +252,5 @@ export class ToolDispatcherService {
       return true;
     }
     return tool.requiredScopes.some((scope) => ctx.scopes.includes(scope));
-  }
-
-  private async audit(
-    tool: VigiliaTool<unknown, unknown>,
-    ctx: AuthorizedContext,
-    input: unknown,
-    output: unknown,
-    success: boolean,
-    durationMs: number,
-    error?: unknown,
-  ): Promise<void> {
-    const isValidationError = error instanceof ZodError;
-
-    await this.logsService.log({
-      level: success ? LogLevel.INFO : LogLevel.WARN,
-      type: LogType.AGENT_TOOL_CALL,
-      service: ServiceName.BACKEND,
-      message: `agent-tool ${tool.name}: ${success ? 'ok' : 'denegado/error'} (${durationMs}ms)`,
-      responseTime: durationMs,
-      correlationId: ctx.requestId,
-      errorMessage: error ? this.describeError(error) : undefined,
-      metadata: {
-        toolName: tool.name,
-        access: tool.access,
-        requiredScopes: tool.requiredScopes,
-        tenantId: ctx.tenantId,
-        userId: ctx.userId ?? null,
-        role: ctx.role,
-        success,
-        validationError: isValidationError,
-        input,
-        output,
-      },
-    });
-
-    if (!success) {
-      this.logger.warn(
-        `Tool "${tool.name}" no se ejecutó (ctx.requestId=${ctx.requestId}): ${this.describeError(error)}`,
-      );
-    }
-  }
-
-  private describeError(error: unknown): string {
-    if (error instanceof Error) {
-      return error.message;
-    }
-    return String(error);
   }
 }
