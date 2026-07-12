@@ -35,9 +35,14 @@ Gateway de WebSocket que maneja las conexiones de los hubs físicos.
 
 **Namespace**: `/hub`
 
-**Autenticación**: 
+**Autenticación** (Fase 1, Bloque A1.1 — docs/modulos/agente-cerebro.md §7/§11,
+hallazgo H1: antes esto era un `HUB_SECRET` global COMPARTIDO por todos los
+hubs, lo que permitía a un hub suplantar el `hubId` de otro condominio):
 - `hubId`: Identificador único del hub (ej: `hub-001`)
-- `hubSecret`: Secret compartido (variable `HUB_SECRET` en .env)
+- `hubSecret`: Secret **propio de este hub** (generado por `POST /hubs` al
+  provisionarlo, se muestra en texto plano UNA sola vez; el backend solo
+  guarda su hash bcrypt en `hubs.secretHash`). Se valida contra ESE hash
+  específico, no contra un valor global.
 
 **Eventos Recibidos del Hub**:
 
@@ -60,7 +65,13 @@ Gateway de WebSocket que maneja las conexiones de los hubs físicos.
 // Enviar mensaje a un hub específico
 sendToHub(hubId: string, event: string, data: any): boolean
 
-// Broadcast a todos los hubs
+// Enviar mensaje a todos los hubs de UN condominio (Fase 1, Bloque A1.1 —
+// hallazgo H2: usar esto para eventos sensibles como hub:door_open, NUNCA
+// broadcastToAllHubs, que cruzaría el aislamiento entre condominios)
+sendToOrganization(organizationId: string | null, event: string, data: any): number
+
+// Broadcast a TODOS los hubs conectados (de cualquier condominio) — solo
+// para eventos genuinamente globales, no para acciones físicas dirigidas
 broadcastToAllHubs(event: string, data: any): void
 
 // Verificar si un hub está conectado
@@ -79,7 +90,9 @@ Entidad que representa un dispositivo hub registrado.
 | Campo | Tipo | Descripción |
 |-------|------|-------------|
 | `id` | uuid | ID interno |
+| `organizationId` | uuid \| null | Condominio al que sirve este hub (Fase 1, Bloque A1.1 — "un hub sirve a UN condominio") |
 | `hubId` | string | Identificador único (ej: `hub-001`) |
+| `secretHash` | string \| null | Hash bcrypt del secret propio del hub — nunca se expone en texto plano tras el provisioning |
 | `location` | string | Ubicación física (ej: "Edificio A - Panel Principal") |
 | `description` | string | Descripción opcional |
 | `active` | boolean | Estado del hub |
@@ -87,6 +100,21 @@ Entidad que representa un dispositivo hub registrado.
 | `config` | jsonb | Configuración (pines GPIO, dispositivo audio, etc.) |
 | `lastSeen` | timestamp | Última vez que se conectó |
 | `ipAddress` | string | IP del hub |
+
+### 2.1 Provisioning de hubs (`hub.controller.ts` / `hub.service.ts`)
+
+Fase 1, Bloque A1.1 — antes NO existía forma de crear un hub ni de asignarle
+`organizationId` (la columna existía pero nunca se poblaba). Exclusivo de
+plataforma (permiso `platform.manage-hubs`, solo "Super Administrador" por
+defecto — mismo criterio que `platform.manage-organizations`).
+
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| POST | `/hubs` | Provisiona un hub nuevo. Genera el secret y lo devuelve **en texto plano una única vez**. |
+| GET | `/hubs` | Lista los hubs (sin `secretHash`). |
+| GET | `/hubs/:hubId` | Detalle de un hub. |
+| PATCH | `/hubs/:hubId` | Actualiza ubicación/descripción/organización/estado activo. |
+| POST | `/hubs/:hubId/rotate-secret` | Invalida el secret anterior y genera uno nuevo (p.ej. ante sospecha de compromiso). |
 
 ### 3. Endpoint de Sincronización de Cache
 
@@ -175,14 +203,19 @@ socket.emit('hub:heartbeat', {
 
 ## Variables de Entorno
 
-Agregar al archivo `.env`:
+Fase 1, Bloque A1.1: ya **no existe** un `HUB_SECRET` global en el `.env` del
+backend — cada hub recibe su propio secret al provisionarse (`POST /hubs`).
+El secret se configura en el `.env` **del hub físico** (`vigilia-hub/.env`):
 
 ```env
-# Hub Configuration (Raspberry Pi)
-HUB_SECRET=tu_super_secreto_cambiar_en_produccion_12345
+# En vigilia-hub/.env (Raspberry Pi) — valores devueltos por POST /hubs
+HUB_ID=hub-001
+HUB_SECRET=<secret devuelto una única vez al provisionar>
 ```
 
-⚠️ **IMPORTANTE**: Cambiar el secret en producción por un valor aleatorio seguro.
+⚠️ **IMPORTANTE**: el secret solo se muestra una vez en la respuesta de
+`POST /hubs` (o de `POST /hubs/:hubId/rotate-secret`) — si se pierde, hay que
+rotarlo (invalida el anterior).
 
 ## Migración de Base de Datos
 
@@ -204,32 +237,35 @@ Esto creará:
 
 Los hubs se autentican mediante:
 - **hubId**: Identificador único (no es secreto)
-- **hubSecret**: Secret compartido (DEBE ser confidencial)
+- **hubSecret**: Secret **propio de este hub** (DEBE ser confidencial;
+  Fase 1, Bloque A1.1 — ya no es un valor compartido entre hubs)
 
-El secret se valida en:
-- Conexión WebSocket al HubGateway
-- Llamada HTTP a `/units/ai-enabled`
+El secret se valida (contra el `secretHash` de ESE hub específico, `Hub.hubId`) en:
+- Conexión WebSocket al HubGateway (`hub.gateway.ts`)
+- Llamada HTTP a `/units/ai-enabled` y `/concierge/*` (`HubAuthGuard`)
 
 ### 2. Recomendaciones
 
 ✅ **Hacer**:
 - Usar HTTPS/WSS en producción
-- Cambiar `HUB_SECRET` por valor aleatorio fuerte
-- Rotar el secret periódicamente
-- Monitorear intentos de conexión fallidos
+- Provisionar cada hub con `POST /hubs` (secret único, generado por el backend)
+- Rotar el secret de un hub con `POST /hubs/:hubId/rotate-secret` ante sospecha de compromiso
+- Monitorear intentos de conexión fallidos (`HubAuthGuard`/`HubGateway` los loguean con `logger.warn`)
 
 ❌ **No hacer**:
 - Hardcodear el secret en el código del hub
 - Exponer el secret en logs
-- Usar el mismo secret en desarrollo y producción
+- Reutilizar el secret de un hub en otro (cada hub = su propio secret, generado por `POST /hubs`)
 
 ## Testing
 
 ### 1. Simular Hub con cURL
 
 ```bash
-# Test del endpoint de cache
+# Test del endpoint de cache (Fase 1, Bloque A1.1: ahora requiere X-Hub-Id
+# además de X-Hub-Secret — el secret se valida contra ESE hub específico)
 curl -H "X-Hub-Secret: tu_secret_aqui" \
+  -H "X-Hub-Id: hub-001" \
   http://localhost:3000/units/ai-enabled
 ```
 
@@ -285,7 +321,7 @@ getConnectedHubs() {
 
 ### Hub no se conecta
 
-1. Verificar que `HUB_SECRET` sea el mismo en backend y hub
+1. Verificar que el `HUB_SECRET` del `.env` del hub coincida con el secret vigente de ESE `hubId` (si se rotó, el hub necesita el valor nuevo)
 2. Verificar conectividad de red (`ping backend.com`)
 3. Ver logs del backend: `npm run start:dev`
 4. Ver logs del hub: `sudo journalctl -u vigilia-hub -f`

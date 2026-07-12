@@ -8,6 +8,20 @@ interface ToolCallRequest {
   toolArgs: Record<string, any>;
 }
 
+/**
+ * Espejo local de `ToolResultDto`
+ * (backend/src/digital-concierge/dto/execute-tool.dto.ts) — contrato que
+ * `POST /concierge/session/:id/execute-tool` ya devuelve hoy para
+ * CUALQUIER tool del catálogo (Fase 1, Bloque A2b), incluida
+ * `finalizar_llamada` (Bloque C: `data.finalizada === true` es la señal de
+ * fin de llamada que interpreta `ConciergeClientService`).
+ */
+export interface ToolExecutionResult {
+  success: boolean;
+  data?: unknown;
+  error?: string;
+}
+
 export class WebSocketClientService {
   private readonly logger = new Logger(WebSocketClientService.name);
   private io: any; // socket.io-client
@@ -161,13 +175,24 @@ export class WebSocketClientService {
   }
 
   /**
+   * Credenciales del hub para autenticar llamadas HTTP a `/api/v1/concierge/*`
+   * (Fase 1, Bloque A1 — backend/src/hub/guards/hub-auth.guard.ts). Mismo
+   * hubId/hubSecret usados para el WebSocket `/hub`, expuestos acá porque
+   * `ConciergeClientService` también hace llamadas HTTP propias
+   * (session/start, context, session/:id/end) que necesitan autenticarse.
+   */
+  getHubCredentials(): { hubId: string; hubSecret: string } {
+    return { hubId: this.hubId, hubSecret: this.hubSecret };
+  }
+
+  /**
    * Ejecuta una tool del backend vía HTTP (no por WebSocket para evitar latencia)
    */
-  async executeTool(toolName: string, toolArgs: Record<string, any>, sessionId: string): Promise<any> {
+  async executeTool(toolName: string, toolArgs: Record<string, unknown>, sessionId: string): Promise<ToolExecutionResult> {
     try {
       this.logger.log(`🔧 Ejecutando tool: ${toolName}`);
-      
-      const response = await axios.post(
+
+      const response = await axios.post<ToolExecutionResult>(
         `${this.backendUrl}/api/v1/concierge/session/${sessionId}/execute-tool`,
         {
           toolName,
@@ -176,7 +201,11 @@ export class WebSocketClientService {
         {
           headers: {
             'Content-Type': 'application/json',
-            'X-Hub-Secret': this.hubSecret
+            'X-Hub-Secret': this.hubSecret,
+            // Fase 1, Bloque A1: el backend ya validaba (a partir de ahora)
+            // X-Hub-Secret pero no sabía QUÉ hub llamaba — X-Hub-Id resuelve
+            // el tenant (organizationId) desde Hub.organizationId.
+            'X-Hub-Id': this.hubId
           },
           timeout: 10000
         }

@@ -7,11 +7,11 @@ export class ExecuteToolDto {
 
   @IsNotEmpty()
   @IsObject()
-  parameters: Record<string, any>;
+  parameters: Record<string, unknown>;
 }
 
 export class ToolResultDto {
   success: boolean;
-  data?: any;
+  data?: unknown;
   error?: string;
 }

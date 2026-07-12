@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { RealtimeAgent, RealtimeSession, tool } from '@openai/agents/realtime';
-import { z } from 'zod';
-import { ConciergeAPI } from '@/api/ConciergeAPI';
+import { ConciergeAPI, type RealtimeToolDefinition, type ToolExecutionResponse } from '@/api/ConciergeAPI';
 import { webSocketService } from '@/services/WebSocketService';
 import { ConversationStatus, type ConversationState } from '@/components/concierge/ConversationStatus';
 import { CollectedDataPanel, type CollectedData } from '@/components/concierge/CollectedDataPanel';
@@ -9,10 +8,57 @@ import { AudioVisualizer } from '@/components/concierge/AudioVisualizer';
 import { TranscriptDisplay, type TranscriptMessage } from '@/components/concierge/TranscriptDisplay';
 import { DialPad } from '@/components/concierge/DialPad';
 import { PhoneXMarkIcon, ExclamationCircleIcon } from '@heroicons/react/24/outline';
-import { formatRUT, isValidRUT, looksLikeRUT } from '../helpers';
 import { Subheading } from '@/components/ui/Heading';
 import { Text } from '@/components/ui/Text';
 import { Button } from '@/components/ui/Button';
+
+/**
+ * Forma mínima de JSON Schema "object" que satisface `ToolInputParameters`
+ * del SDK de Realtime (`JsonObjectSchemaNonStrict` no se exporta públicamente
+ * desde `@openai/agents-core`/`@openai/agents-realtime`, así que no se puede
+ * importar por nombre). Es solo una anotación de compilación: el valor real
+ * en tiempo de ejecución sigue siendo `definition.parameters`, el JSON Schema
+ * que el backend deriva de cada `VigiliaTool.inputSchema` (única fuente de
+ * verdad — ver `buildRealtimeToolDefinitions` en el backend).
+ */
+interface RealtimeToolParametersSchema {
+  type: 'object';
+  properties: Record<string, unknown>;
+  required: string[];
+  additionalProperties: true;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+/**
+ * Construye una tool "delgada" para el SDK de Realtime a partir de la
+ * definición que sirve el backend: NO ejecuta lógica de negocio localmente,
+ * solo reenvía la llamada a `POST /concierge/session/:id/execute-tool` y
+ * devuelve el resultado tal cual al modelo.
+ */
+function buildRealtimeTool(
+  definition: RealtimeToolDefinition,
+  sessionId: string,
+  onResult: (toolName: string, result: ToolExecutionResponse) => void,
+) {
+  return tool({
+    name: definition.name,
+    description: definition.description,
+    parameters: definition.parameters as unknown as RealtimeToolParametersSchema,
+    strict: false,
+    async execute(input) {
+      const parameters = isRecord(input) ? input : {};
+      console.log(`[TOOL] ${definition.name}:`, parameters);
+
+      const result = await ConciergeAPI.executeTool(sessionId, definition.name, parameters);
+      onResult(definition.name, result);
+
+      return JSON.stringify(result.success ? (result.data ?? {}) : { error: result.error });
+    },
+  });
+}
 
 export function DigitalConciergeView() {
   // Estado de la sesión
@@ -24,7 +70,7 @@ export function DigitalConciergeView() {
 
   // Datos recolectados
   const [collectedData, setCollectedData] = useState<CollectedData>({});
-  
+
   // Ref para mantener el estado actualizado en closures (evita stale state)
   const collectedDataRef = useRef<CollectedData>({});
 
@@ -34,11 +80,78 @@ export function DigitalConciergeView() {
   // Referencias
   const sessionRef = useRef<RealtimeSession | null>(null);
   const isSpeakingRef = useRef<boolean>(false); // Track si el agente está reproduciendo audio
-  
+
   // Sincronizar ref con estado
   useEffect(() => {
     collectedDataRef.current = collectedData;
   }, [collectedData]);
+
+  /**
+   * Sincroniza los paneles de UI (datos recolectados / transcript / fin de
+   * llamada) con el resultado de una tool ejecutada en el backend. Es lógica
+   * de presentación, no de agente — el backend no sabe (ni le importa) que
+   * estos paneles existen; solo devuelve `{ success, data, error }` por cada
+   * tool y el cliente decide qué mostrar.
+   */
+  const applyToolResultToUi = (toolName: string, result: ToolExecutionResponse) => {
+    if (!result.success || !isRecord(result.data)) {
+      if (!result.success) {
+        console.warn(`[TOOL] ${toolName} falló:`, result.error);
+      }
+      return;
+    }
+
+    const data = result.data;
+
+    switch (toolName) {
+      case 'guardar_datos_visitante': {
+        if (!isRecord(data.saved)) break;
+        const saved = data.saved;
+        setCollectedData((prev) => ({
+          ...prev,
+          visitorName: typeof saved.nombre === 'string' ? saved.nombre : prev.visitorName,
+          visitorRut: typeof saved.rut === 'string' ? saved.rut : prev.visitorRut,
+          visitorPhone: typeof saved.telefono === 'string' ? saved.telefono : prev.visitorPhone,
+          vehiclePlate: typeof saved.patente === 'string' ? saved.patente : prev.vehiclePlate,
+          visitReason: typeof saved.motivo === 'string' ? saved.motivo : prev.visitReason,
+          destinationHouse: typeof saved.casa === 'string' ? saved.casa : prev.destinationHouse,
+        }));
+        break;
+      }
+      case 'buscar_residente': {
+        if (data.encontrado === true && Array.isArray(data.residentes)) {
+          const residentNames = data.residentes
+            .filter(isRecord)
+            .map((resident) => (typeof resident.nombre === 'string' ? resident.nombre : ''))
+            .filter((nombre) => nombre.length > 0)
+            .join(', ');
+
+          if (residentNames) {
+            setCollectedData((prev) => ({ ...prev, residentName: residentNames }));
+          }
+        }
+        break;
+      }
+      case 'notificar_residente': {
+        setCollectedData((prev) => ({ ...prev, residentResponse: 'pending' }));
+        break;
+      }
+      case 'finalizar_llamada': {
+        if (data.finalizada === true) {
+          console.log('[TOOL] finalizar_llamada - Esperando a que termine el audio...');
+          // Dar tiempo suficiente para que el audio de despedida se reproduzca
+          // completamente antes de cortar la sesión (el agente tarda ~3-5s).
+          setTimeout(() => {
+            console.log('[SESSION] ✅ Finalizando llamada por solicitud del agente...');
+            disconnectSession();
+          }, 8000);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  };
 
   /**
    * Inicializa y conecta la sesión del conserje digital
@@ -70,7 +183,7 @@ export function DigitalConciergeView() {
       // 2. Obtener token efímero del backend y pasar el socketId para notificaciones
       const currentSocketId = webSocketService.getSocketId();
       console.log('[SESSION] 🔌 Socket ID actual:', currentSocketId);
-      
+
       const { sessionId: newSessionId, ephemeralToken } = await ConciergeAPI.startSession(currentSocketId);
       setSessionId(newSessionId);
       console.log('[SESSION] 🆔 SessionId establecido:', newSessionId);
@@ -80,308 +193,25 @@ export function DigitalConciergeView() {
       setCollectedData({ destinationHouse: houseNumber });
       console.log('[SESSION] 📋 Casa de destino pre-cargada en collectedData');
 
-      // 4. Definir herramientas (function calling)
-      const guardarDatosTool = tool({
-        name: 'guardar_datos_visitante',
-        description: 'Guarda y formatea automáticamente los datos del visitante. El RUT se formatea a XX.XXX.XXX-X, el teléfono se limpia de caracteres especiales, y la patente se normaliza a mayúsculas.',
-        parameters: z.object({
-          nombre: z.string().optional().describe('Nombre completo del visitante tal como lo dijo'),
-          rut: z.string().optional().describe('RUT o pasaporte del visitante en cualquier formato (números, con/sin puntos o guión)'),
-          telefono: z.string().optional().describe('Teléfono del visitante en cualquier formato'),
-          patente: z.string().optional().describe('Patente del vehículo en cualquier formato'),
-          motivo: z.string().optional().describe('Motivo de la visita'),
-          casa: z.string().optional().describe('Número de casa/departamento de destino'),
-        }),
-        async execute(params) {
-          console.log('[TOOL] guardar_datos_visitante (raw):', params);
-          
-          // Formatear y validar los datos
-          const formattedData: any = {};
-          let validationMessage = '';
-          
-          // Formatear nombre (capitalizar)
-          if (params.nombre) {
-            formattedData.nombre = params.nombre
-              .split(' ')
-              .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-              .join(' ');
-          }
-          
-          // Formatear y validar RUT
-          if (params.rut) {
-            const cleanRut = params.rut.replace(/\s/g, '');
-            
-            // Verificar si parece un RUT chileno
-            if (looksLikeRUT(cleanRut)) {
-              // Validar RUT chileno
-              if (isValidRUT(cleanRut)) {
-                formattedData.rut = formatRUT(cleanRut);
-                validationMessage += `RUT validado y formateado correctamente a ${formattedData.rut}. `;
-              } else {
-                // RUT inválido - pedir confirmación
-                return JSON.stringify({
-                  error: true,
-                  mensaje: `El RUT "${params.rut}" no parece ser válido. Por favor, pídele al visitante que lo repita nuevamente. Asegúrate de escuchar bien cada dígito y el dígito verificador.`,
-                  accion_requerida: 'pedir_rut_nuevamente',
-                });
-              }
-            } else {
-              // No parece RUT, asumir pasaporte/DNI extranjero
-              formattedData.rut = cleanRut.toUpperCase();
-              validationMessage += `Identificación registrada como pasaporte/DNI extranjero: ${formattedData.rut}. `;
-            }
-          }
-          
-          // Formatear teléfono (limpiar y validar)
-          if (params.telefono) {
-            // Limpiar todo excepto números y +
-            let cleanPhone = params.telefono.replace(/[^\d+]/g, '');
-            
-            // Remover + inicial si existe para procesar
-            const hasPlus = cleanPhone.startsWith('+');
-            if (hasPlus) {
-              cleanPhone = cleanPhone.substring(1);
-            }
-            
-            // Casos de formato para teléfonos chilenos:
-            // 1. +56964760511 (11 dígitos con código país)
-            // 2. 56964760511 (11 dígitos sin +)
-            // 3. 964760511 (9 dígitos - móvil con 9)
-            // 4. 64760511 (8 dígitos - móvil sin 9)
-            
-            if (cleanPhone.startsWith('56')) {
-              // Ya tiene código de país Chile (56)
-              if (cleanPhone.length === 11) {
-                // +56964760511 o 56964760511
-                formattedData.telefono = `+${cleanPhone}`;
-              } else if (cleanPhone.length === 10) {
-                // 5664760511 (falta el 9)
-                formattedData.telefono = `+569${cleanPhone.substring(2)}`;
-              } else {
-                // Formato inválido, guardar como está
-                formattedData.telefono = `+${cleanPhone}`;
-              }
-            } else if (cleanPhone.startsWith('9') && cleanPhone.length === 9) {
-              // 964760511 - móvil completo sin código país
-              formattedData.telefono = `+56${cleanPhone}`;
-            } else if (cleanPhone.length === 8) {
-              // 64760511 - móvil sin el 9 inicial
-              formattedData.telefono = `+569${cleanPhone}`;
-            } else if (cleanPhone.length === 9 && !cleanPhone.startsWith('9')) {
-              // Número de 9 dígitos que no empieza con 9 (formato antiguo o error)
-              formattedData.telefono = `+56${cleanPhone}`;
-            } else {
-              // Cualquier otro caso, agregar código país
-              formattedData.telefono = `+56${cleanPhone}`;
-            }
-            
-            validationMessage += `Teléfono formateado a ${formattedData.telefono}. `;
-          }
-          
-          // Formatear patente (mayúsculas, sin espacios)
-          if (params.patente) {
-            formattedData.patente = params.patente
-              .replace(/\s/g, '')
-              .toUpperCase()
-              .replace(/[^A-Z0-9]/g, '');
-            
-            validationMessage += `Patente registrada: ${formattedData.patente}. `;
-          }
-          
-          // Otros campos sin formateo especial
-          if (params.motivo) formattedData.motivo = params.motivo;
-          if (params.casa) formattedData.casa = params.casa;
-          
-          console.log('[TOOL] guardar_datos_visitante (formatted):', formattedData);
-          
-          // Actualizar datos locales
-          setCollectedData((prev: CollectedData) => ({
-            ...prev,
-            visitorName: formattedData.nombre || prev.visitorName,
-            visitorRut: formattedData.rut || prev.visitorRut,
-            visitorPhone: formattedData.telefono || prev.visitorPhone,
-            vehiclePlate: formattedData.patente || prev.vehiclePlate,
-            visitReason: formattedData.motivo || prev.visitReason,
-            destinationHouse: formattedData.casa || prev.destinationHouse,
-          }));
+      // 4. Obtener configuración del agente desde el backend (prompt + tools)
+      //    Única fuente de verdad — el cliente ya no hardcodea ninguno de los dos.
+      const { instructions, tools: toolDefinitions } = await ConciergeAPI.getAgentConfig(houseNumber);
+      console.log('[SESSION] 🧠 Config de agente obtenida del backend:', toolDefinitions.map((t) => t.name));
 
-          // Llamar al backend con datos formateados
-          const result = await ConciergeAPI.executeTool(newSessionId, 'guardar_datos_visitante', formattedData);
-          
-          // Retornar confirmación con datos formateados
-          return JSON.stringify({
-            ...result.data,
-            mensaje: validationMessage || 'Datos guardados correctamente',
-            datos_formateados: formattedData,
-          });
-        },
-      });
+      // 5. Construir tools "delgadas": cada una reenvía la llamada a
+      //    execute-tool y aplica el resultado a la UI (paneles/transcript).
+      //    La ejecución real (formateo, validaciones, side-effects) vive en
+      //    el backend (VigiliaTool + ToolDispatcherService) — el cliente ya
+      //    no ejecuta ninguna lógica de negocio localmente.
+      const realtimeTools = toolDefinitions.map((definition) =>
+        buildRealtimeTool(definition, newSessionId, applyToolResultToUi),
+      );
 
-      const buscarResidenteTool = tool({
-        name: 'buscar_residente',
-        description: 'Busca un residente por número o código de casa/departamento. Acepta múltiples formatos: números solos ("15"), con prefijos ("Casa 15"), o códigos alfanuméricos ("A-1234", "B-201"). Devuelve TODOS los residentes de la familia.',
-        parameters: z.object({
-          casa: z.string().describe('Número, código o nombre de casa/departamento tal como lo dijo el visitante'),
-        }),
-        async execute(params) {
-          console.log('[TOOL] buscar_residente:', params);
-          const result = await ConciergeAPI.executeTool(newSessionId, 'buscar_residente', params);
-          
-          if (result.data?.encontrado && result.data?.residentes) {
-            // Guardar nombres de todos los residentes encontrados
-            const residentNames = result.data.residentes.map((r: any) => r.nombre).join(', ');
-            setCollectedData((prev: CollectedData) => ({
-              ...prev,
-              residentName: residentNames,
-            }));
-          }
-          
-          return JSON.stringify(result.data);
-        },
-      });
-
-      const notificarResidenteTool = tool({
-        name: 'notificar_residente',
-        description: 'Envía una notificación push a TODOS los residentes de la familia para que aprueben o rechacen la visita',
-        parameters: z.object({
-          residentes_ids: z.array(z.string()).describe('Array con los IDs de TODOS los residentes a notificar (todos los miembros de la familia)'),
-        }),
-        async execute(params) {
-          console.log('[TOOL] notificar_residente:', params);
-          
-          setCollectedData((prev: CollectedData) => ({
-            ...prev,
-            residentResponse: 'pending',
-          }));
-
-          const result = await ConciergeAPI.executeTool(newSessionId, 'notificar_residente', params);
-          return JSON.stringify(result.data);
-        },
-      });
-
-
-
-
-
-      const finalizarLlamadaTool = tool({
-        name: 'finalizar_llamada',
-        description: 'Finaliza la llamada con el visitante. Usa esta herramienta SOLO después de despedirte completamente. NO menciones que estás finalizando la llamada, solo despídete naturalmente.',
-        parameters: z.object({}),
-        async execute() {
-          console.log('[TOOL] finalizar_llamada - Esperando a que termine el audio...');
-          
-          // Dar tiempo suficiente para que el audio de despedida se reproduzca completamente
-          // El agente tarda ~3-5 segundos en decir una despedida completa
-          setTimeout(() => {
-            console.log('[SESSION] ✅ Finalizando llamada por solicitud del agente...');
-            disconnectSession();
-          }, 8000); // 8 segundos para que termine de hablar
-          
-          return JSON.stringify({
-            finalizada: true,
-            mensaje: 'OK. La llamada se cerrará automáticamente.',
-          });
-        },
-      });
-
-      // 5. Configurar el agente con instrucciones y herramientas
       const agent = new RealtimeAgent({
         name: 'Conserje Digital',
-        instructions: `Eres Sofía, la conserje del Condominio San Lorenzo. Eres amable, cálida y conversacional. Tu trabajo es ayudar a los visitantes a ingresar al condominio de manera eficiente pero siempre con una sonrisa en la voz.
-
-INFORMACIÓN INICIAL:
-- El visitante ya marcó la casa de destino: ${houseNumber}
-- YA conoces a dónde va, NO preguntes por la casa/departamento nuevamente
-
-PERSONALIDAD:
-- Habla de manera natural y amigable, como si conversaras con un vecino
-- Usa expresiones chilenas cotidianas: "¿Cómo estás?", "Perfecto", "Genial", "Súper"
-- Sé paciente y empática, especialmente si el visitante parece confundido
-- Haz que la conversación fluya naturalmente, no como un formulario robótico
-
-FLUJO DE CONVERSACIÓN (SIGUE ESTE ORDEN ESTRICTAMENTE):
-
-1. SALUDO INICIAL (di esto EXACTAMENTE una sola vez):
-   "¡Hola! Bienvenido al Condominio San Lorenzo. Mi nombre es Sofía y soy la conserje. Veo que deseas visitar la casa ${houseNumber}. ¿Cómo te llamas?"
-
-2. RECOPILACIÓN DE DATOS (UNO POR UNO, en este orden):
-   
-   a) Nombre:
-      - Espera la respuesta
-      - Guarda con guardar_datos_visitante(nombre: "...")
-      - Di: "Encantada [nombre]. ¿Me podrías dar tu RUT o pasaporte por favor?"
-   
-   b) RUT/Pasaporte:
-      - Espera la respuesta
-      - Guarda con guardar_datos_visitante(rut: "...")
-      - Si el sistema responde con error (RUT inválido):
-        * Di amablemente: "Disculpa, el RUT que escuché no parece ser válido. ¿Me lo podrías repetir por favor? Dilo dígito por dígito si es necesario."
-        * Vuelve a intentar guardar el RUT
-      - Si se guarda correctamente, di: "Perfecto. ¿Y un número de teléfono de contacto?"
-   
-   c) Teléfono:
-      - Espera la respuesta
-      - Guarda con guardar_datos_visitante(telefono: "...")
-      - Di: "Genial. ¿Vienes en vehículo?"
-   
-   d) Vehículo (PREGUNTA PRIMERO):
-      - Si dice SÍ: "¿Me podrías decir la patente del vehículo?"
-        * Espera la respuesta
-        * Guarda con guardar_datos_visitante(patente: "...")
-      - Si dice NO: "Vale, sin problema."
-        * NO preguntes por patente
-        * NO llames a guardar_datos_visitante con el campo patente
-        * Simplemente omite este dato y continúa
-      - Luego di: "¿Cuál es el motivo de tu visita?"
-   
-   e) Motivo:
-      - Espera la respuesta
-      - Guarda con guardar_datos_visitante(motivo: "...")
-      - Di: "Excelente, déjame buscar al residente."
-
-3. BÚSQUEDA Y NOTIFICACIÓN:
-   - Llama buscar_residente(casa: "${houseNumber}")
-   - Si encuentra residentes:
-     * El sistema devuelve un array "residentes" con TODOS los miembros de la familia
-     * Extrae los IDs de TODOS los residentes del array
-     * Llama notificar_residente(residentes_ids: ["id1", "id2", ...]) con TODOS los IDs
-     * IMPORTANTE: Al llamar notificar_residente, la visita se crea AUTOMÁTICAMENTE en estado pendiente
-     * Si hay múltiples residentes, di: "Perfecto, le he enviado una notificación a todos los residentes de la casa. Estoy esperando su respuesta."
-     * Si hay un solo residente, di: "Perfecto, le he enviado una notificación a [nombre del residente]. Estoy esperando su respuesta."
-   - Si NO encuentra:
-     * Di: "Lo siento, no encuentro registrado a ningún residente en la casa ${houseNumber}. ¿Estás seguro del número?"
-
-4. ESPERA DE RESPUESTA:
-   - Después de decir que estás esperando, NO digas NADA más
-   - NO menciones palabras como "silencio", "espera en silencio", etc.
-   - Simplemente DETENTE y espera
-   - El SISTEMA te enviará automáticamente un mensaje cuando el residente responda
-
-5. RESPUESTA DEL RESIDENTE (cuando recibas la notificación del sistema):
-   - Si APROBÓ:
-     * La visita YA FUE CREADA y ahora está ACTIVA automáticamente
-     * NO necesitas llamar ninguna herramienta adicional
-     * Di con entusiasmo: "¡Buenas noticias [nombre]! El residente ha aprobado tu visita. Puedes ingresar al condominio. ¡Que tengas un excelente día!"
-     * INMEDIATAMENTE después de este mensaje, llama finalizar_llamada()
-   - Si RECHAZÓ:
-     * La visita fue automáticamente marcada como RECHAZADA
-     * NO necesitas llamar ninguna herramienta adicional
-     * Di con empatía: "Lo lamento [nombre], pero el residente no puede recibirte en este momento. Te sugiero contactarlo directamente. Que tengas buen día."
-     * INMEDIATAMENTE después de este mensaje, llama finalizar_llamada()
-
-IMPORTANTE: Después de dar el mensaje de aprobación o rechazo, DEBES llamar a finalizar_llamada() sin decir nada más. No esperes respuesta del visitante.
-
-REGLAS IMPORTANTES:
-- NO te saltes pasos del flujo
-- NO repitas preguntas que ya hiciste
-- Espera la respuesta del visitante antes de continuar
-- Guarda cada dato INMEDIATAMENTE después de recibirlo
-- SIEMPRE incluye casa: "${houseNumber}" al guardar datos
-- NO inventes respuestas del residente
-- Después de notificar, espera EN SILENCIO (no digas que estás en silencio)
-- Acepta datos en cualquier formato (el sistema los formatea automáticamente)`,
+        instructions,
         voice: 'sage',
-        tools: [guardarDatosTool, buscarResidenteTool, notificarResidenteTool, finalizarLlamadaTool],
+        tools: realtimeTools,
       });
 
       // 6. Crear sesión de Realtime con WebRTC (por defecto)
@@ -407,27 +237,27 @@ REGLAS IMPORTANTES:
       });
 
       // 7. Escuchar eventos de la sesión
-      
+
       // Evento para actualizaciones del historial de conversación
       session.on('history_updated', (history: any[]) => {
         console.log('[SESSION] Historial actualizado:', history.length, 'items');
-        
+
         // DEBUG: Ver estructura de los items
         if (history.length > 0) {
           console.log('[DEBUG] Primer item del historial:', JSON.stringify(history[0], null, 2));
           console.log('[DEBUG] Último item del historial:', JSON.stringify(history[history.length - 1], null, 2));
         }
-        
+
         // Actualizar transcript con los mensajes del historial
         const messages: TranscriptMessage[] = history
           .filter((item: any) => item.type === 'message' && item.role)
           .map((item: any) => {
             let messageText = '';
-            
+
             // La estructura real es: item.content[0].transcript
             if (Array.isArray(item.content) && item.content.length > 0) {
               const contentItem = item.content[0];
-              
+
               // Para mensajes del usuario (input_audio)
               // Las transcripciones están incluidas en el precio base de Realtime API
               if (contentItem.type === 'input_audio') {
@@ -442,12 +272,12 @@ REGLAS IMPORTANTES:
                 messageText = contentItem.text || '';
               }
             }
-            
+
             // Incluir mensajes del asistente y placeholder para usuario
             if (!messageText) {
               return null;
             }
-            
+
             return {
               id: `msg-${item.itemId}`,
               role: item.role,
@@ -455,10 +285,10 @@ REGLAS IMPORTANTES:
               timestamp: new Date(),
             };
           })
-          .filter((msg: TranscriptMessage | null): msg is TranscriptMessage => 
+          .filter((msg: TranscriptMessage | null): msg is TranscriptMessage =>
             msg !== null && msg.content.trim() !== ''
           );
-        
+
         setTranscript(messages);
       });
 
@@ -606,7 +436,7 @@ REGLAS IMPORTANTES:
           console.error('[SESSION] Error en cleanup:', error);
         }
       }
-      
+
       // Desconectar WebSocket al salir de la vista
       console.log('[WEBSOCKET] Desconectando WebSocket del conserje digital...');
       webSocketService.disconnect();
@@ -616,7 +446,7 @@ REGLAS IMPORTANTES:
   // Escuchar respuesta del residente en tiempo real vía Socket.IO
   useEffect(() => {
     console.log('[SESSION] 👂 useEffect del listener ejecutándose, sessionId:', sessionId);
-    
+
     if (!sessionId) {
       console.warn('[SESSION] ⚠️ sessionId es null, listener NO se configurará');
       return;
@@ -628,7 +458,7 @@ REGLAS IMPORTANTES:
     const handleResidentResponse = (data: any) => {
       console.log('[SESSION] ✅ Respuesta del residente recibida:', data);
       console.log('[SESSION] Aprobado:', data.approved);
-      
+
       // Actualizar el estado de collectedData para que el agente sepa la respuesta
       setCollectedData((prev: CollectedData) => {
         const updated = {
@@ -641,12 +471,12 @@ REGLAS IMPORTANTES:
 
       // NUEVO: Inyectar mensaje del sistema al agente para que reaccione inmediatamente
       if (sessionRef.current) {
-        const systemMessage = data.approved 
+        const systemMessage = data.approved
           ? '🔔 NOTIFICACIÓN DEL SISTEMA: El residente ha APROBADO la visita. Procede inmediatamente a dar la bienvenida al visitante y llamar a finalizar_llamada().'
           : '🔔 NOTIFICACIÓN DEL SISTEMA: El residente ha RECHAZADO la visita. Informa amablemente al visitante que no puede ingresar, despídete y llama a finalizar_llamada().';
-        
+
         console.log('[SESSION] 📨 Inyectando mensaje del sistema al agente:', systemMessage);
-        
+
         // Enviar mensaje del sistema para que el agente reaccione
         sessionRef.current.sendMessage({
           type: 'message',
@@ -659,14 +489,14 @@ REGLAS IMPORTANTES:
       const responseMessage: TranscriptMessage = {
         id: `system-${Date.now()}`,
         role: 'assistant' as const,
-        content: data.approved 
-          ? '✅ El residente ha APROBADO la visita' 
+        content: data.approved
+          ? '✅ El residente ha APROBADO la visita'
           : '❌ El residente ha RECHAZADO la visita',
         timestamp: new Date(),
       };
 
       setTranscript((prev) => [...prev, responseMessage]);
-      
+
       console.log('[SESSION] Transcript actualizado con respuesta del residente');
 
       // TIMEOUT DE SEGURIDAD: Finalizar llamada automáticamente después de 25 segundos
@@ -680,11 +510,11 @@ REGLAS IMPORTANTES:
     };
 
     const eventName = `visitor:response:${sessionId}`;
-    
+
     // Función para registrar el listener
     const registerListener = () => {
       const socket = webSocketService.getSocket();
-      
+
       if (socket && socket.connected) {
         socket.on(eventName, handleResidentResponse);
         console.log(`[SESSION] ✅ Listener registrado para ${eventName}`);
@@ -696,10 +526,10 @@ REGLAS IMPORTANTES:
         return false;
       }
     };
-    
+
     // Intentar registrar inmediatamente
     let registered = registerListener();
-    
+
     // Si no se pudo registrar, intentar cada segundo hasta que el socket esté listo
     let retryInterval: NodeJS.Timeout | null = null;
     if (!registered) {
@@ -718,7 +548,7 @@ REGLAS IMPORTANTES:
       if (retryInterval) {
         clearInterval(retryInterval);
       }
-      
+
       const socket = webSocketService.getSocket();
       if (socket) {
         socket.off(eventName, handleResidentResponse);
@@ -749,7 +579,7 @@ REGLAS IMPORTANTES:
         {/* Vista: Teclado Numérico (cuando NO está conectado) */}
         {!isConnected && !targetHouse && (
           <div className="flex justify-center items-center">
-            <DialPad 
+            <DialPad
               onCall={connectSession}
               disabled={conversationState === 'processing'}
             />
@@ -763,15 +593,15 @@ REGLAS IMPORTANTES:
           <div className="space-y-6">
             {/* Estado de Conversación */}
             <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-xl border border-zinc-200 dark:border-zinc-800 p-8">
-              <ConversationStatus 
-                state={conversationState} 
-                isConnected={isConnected} 
+              <ConversationStatus
+                state={conversationState}
+                isConnected={isConnected}
               />
 
               {/* Visualizador de Audio */}
               <div className="mt-8">
-                <AudioVisualizer 
-                  isActive={conversationState === 'listening' || conversationState === 'speaking'} 
+                <AudioVisualizer
+                  isActive={conversationState === 'listening' || conversationState === 'speaking'}
                   state={conversationState === 'listening' ? 'listening' : conversationState === 'speaking' ? 'speaking' : 'idle'}
                 />
               </div>

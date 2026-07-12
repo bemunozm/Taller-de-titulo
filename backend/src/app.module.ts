@@ -33,6 +33,7 @@ import { HubModule } from './hub/hub.module';
 import { AnomaliesModule } from './anomalies/anomalies.module';
 import { TenantModule } from './common/tenant/tenant.module';
 import { OnboardingModule } from './onboarding/onboarding.module';
+import { AgentModule } from './agent/agent.module';
 
 @Module({
   imports: [
@@ -88,6 +89,7 @@ import { OnboardingModule } from './onboarding/onboarding.module';
   HubModule,
   AnomaliesModule,
   OnboardingModule,
+  AgentModule,
   ],
   controllers: [],
   providers: [DataInitializationService, ExpirationService],

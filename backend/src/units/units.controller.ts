@@ -8,8 +8,6 @@ import {
   Delete,
   Query,
   UseGuards,
-  Headers,
-  UnauthorizedException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiQuery, ApiHeader } from '@nestjs/swagger';
 import { UnitsService } from './units.service';
@@ -19,7 +17,7 @@ import { CreateBulkUnitsDto } from './dto/create-bulk-units.dto';
 import { AuthGuard } from '../auth/auth.guard';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
 import { Public } from '../auth/decorators/public.decorator';
-import { ConfigService } from '@nestjs/config';
+import { HubAuthGuard } from '../hub/guards/hub-auth.guard';
 
 @ApiTags('Units')
 @ApiBearerAuth()
@@ -28,7 +26,6 @@ import { ConfigService } from '@nestjs/config';
 export class UnitsController {
   constructor(
     private readonly unitsService: UnitsService,
-    private readonly configService: ConfigService,
   ) {}
 
   @Post()
@@ -85,19 +82,33 @@ export class UnitsController {
   }
 
   /**
-   * Endpoint para sincronización de cache del Hub (Raspberry Pi)
-   * Autenticación mediante X-Hub-Secret header
+   * Endpoint para sincronización de cache del Hub (Raspberry Pi).
+   *
+   * Fase 1, Bloque A1.1 (docs/modulos/agente-cerebro.md §7/§11 — hallazgo H1
+   * de la auditoría): antes validaba el header `X-Hub-Secret` a mano contra
+   * un `HUB_SECRET` global compartido (sin `X-Hub-Id`, así que ni siquiera
+   * sabía QUÉ hub llamaba). Ahora reusa `HubAuthGuard` — mismo mecanismo de
+   * credenciales por-hub que `/concierge/*` — para consistencia (un solo
+   * guard de credenciales de máquina de hub, no dos implementaciones
+   * distintas del mismo concepto). `@Public()` sigue siendo necesario para
+   * que el `AuthGuard` de clase (sesión humana) no bloquee esta ruta.
    */
   @Public()
+  @UseGuards(HubAuthGuard)
   @Get('ai-enabled')
   @ApiOperation({ summary: 'Obtener unidades con Conserje Digital habilitado (para Hub)' })
-  @ApiHeader({ 
-    name: 'X-Hub-Secret', 
-    description: 'Secret del Hub para autenticación',
-    required: true 
+  @ApiHeader({
+    name: 'X-Hub-Secret',
+    description: 'Secret propio del Hub (provisionado vía POST /hubs)',
+    required: true
   })
-  @ApiResponse({ 
-    status: 200, 
+  @ApiHeader({
+    name: 'X-Hub-Id',
+    description: 'Identificador del Hub físico',
+    required: true
+  })
+  @ApiResponse({
+    status: 200,
     description: 'Lista de unidades con IA habilitada',
     schema: {
       example: [
@@ -105,14 +116,8 @@ export class UnitsController {
       ]
     }
   })
-  @ApiResponse({ status: 401, description: 'Hub secret inválido o faltante' })
-  async getAIEnabledUnits(@Headers('x-hub-secret') hubSecret: string) {
-    const validSecret = this.configService.get<string>('HUB_SECRET');
-    
-    if (!hubSecret || hubSecret !== validSecret) {
-      throw new UnauthorizedException('Invalid hub secret');
-    }
-
+  @ApiResponse({ status: 401, description: 'Hub secret/hubId inválido o faltante' })
+  async getAIEnabledUnits() {
     return this.unitsService.findWithAIEnabled();
   }
 

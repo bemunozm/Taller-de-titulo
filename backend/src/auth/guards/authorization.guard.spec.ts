@@ -2,254 +2,185 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { ExecutionContext, ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 import { AuthorizationGuard } from './authorization.guard';
 import { User } from '../../users/entities/user.entity';
 
+/**
+ * Reescrito en Fase 1, Bloque A2t (arreglo de infra de tests): el guard NO
+ * llama a `userRepository.findOne` desde la tarea #17 de Fase 0 (lee
+ * `request.user` directo, poblado por `AuthGuard` — ver su docstring). Los
+ * 7 tests que mockeaban `userRepository.findOne(...)` para "armar" el
+ * usuario quedaron desalineados desde entonces: el guard nunca invoca ese
+ * mock, así que `request.user` llegaba sin `roles` a `canActivate` y varias
+ * aserciones de `result === true` fallaban.
+ *
+ * Ahora se mockea `request.user` directamente (la forma real que ve el
+ * guard en producción). `userRepository` se sigue proveyendo en el módulo
+ * de test SOLO para satisfacer la inyección por constructor — el guard no
+ * lo usa y ningún test hace aserciones sobre él.
+ */
 describe('AuthorizationGuard', () => {
   let guard: AuthorizationGuard;
-  let reflector: jest.Mocked<Reflector>;
-  let userRepository: jest.Mocked<Repository<User>>;
+  let reflector: jest.Mocked<Pick<Reflector, 'getAllAndOverride'>>;
 
-  const mockExecutionContext = {
-    switchToHttp: jest.fn().mockReturnValue({
-      getRequest: jest.fn(),
-    }),
-    getHandler: jest.fn(),
-    getClass: jest.fn(),
-  } as unknown as ExecutionContext;
+  function makeContext(user: unknown): ExecutionContext {
+    const request = { user };
+    return {
+      switchToHttp: () => ({ getRequest: () => request }),
+      getHandler: () => ({}),
+      getClass: () => ({}),
+    } as unknown as ExecutionContext;
+  }
 
   beforeEach(async () => {
-    const mockReflector = {
-      getAllAndOverride: jest.fn(),
-    };
-
-    const mockUserRepository = {
-      findOne: jest.fn(),
-    };
-
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthorizationGuard,
         {
           provide: Reflector,
-          useValue: mockReflector,
+          useValue: { getAllAndOverride: jest.fn() },
         },
         {
           provide: getRepositoryToken(User),
-          useValue: mockUserRepository,
+          useValue: { findOne: jest.fn() },
         },
       ],
     }).compile();
 
-    guard = module.get<AuthorizationGuard>(AuthorizationGuard);
+    guard = module.get(AuthorizationGuard);
     reflector = module.get(Reflector);
-    userRepository = module.get(getRepositoryToken(User));
-
-    // Reset mocks
-    jest.clearAllMocks();
   });
 
   it('should be defined', () => {
     expect(guard).toBeDefined();
   });
 
+  /** Encadena los dos `getAllAndOverride` que hace el guard: roles, luego permisos. */
+  function stubRequirements(
+    roles: string[] | undefined,
+    permissions: string[] | undefined,
+  ) {
+    reflector.getAllAndOverride
+      .mockReturnValueOnce(roles)
+      .mockReturnValueOnce(permissions);
+  }
+
   describe('canActivate', () => {
-    let mockRequest: any;
+    it('permite el acceso cuando no se requieren roles ni permisos', async () => {
+      stubRequirements(undefined, undefined);
+      const ctx = makeContext(undefined); // ni siquiera hace falta un usuario
 
-    beforeEach(() => {
-      mockRequest = {
-        user: { id: 'user-1' },
-      };
-      
-      (mockExecutionContext.switchToHttp().getRequest as jest.Mock).mockReturnValue(mockRequest);
+      await expect(guard.canActivate(ctx)).resolves.toBe(true);
     });
 
-    it('should allow access when no roles or permissions are required', async () => {
-      // Arrange
-      reflector.getAllAndOverride.mockReturnValueOnce(undefined); // No roles required
-      reflector.getAllAndOverride.mockReturnValueOnce(undefined); // No permissions required
+    it('lanza ForbiddenException("Usuario no autenticado") si no hay request.user', async () => {
+      stubRequirements(['admin'], undefined);
+      const ctx = makeContext(null);
 
-      // Act
-      const result = await guard.canActivate(mockExecutionContext);
-
-      // Assert
-      expect(result).toBe(true);
-      expect(userRepository.findOne).not.toHaveBeenCalled();
-    });
-
-    it('should throw ForbiddenException when user is not authenticated', async () => {
-      // Arrange
-      mockRequest.user = null;
-      reflector.getAllAndOverride.mockReturnValueOnce(['admin']); // Roles required
-
-      // Act & Assert
-      await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(
-        new ForbiddenException('Usuario no autenticado')
+      await expect(guard.canActivate(ctx)).rejects.toThrow(
+        new ForbiddenException('Usuario no autenticado'),
       );
     });
 
-    it('should throw ForbiddenException when user has no roles', async () => {
-      // Arrange
-      reflector.getAllAndOverride.mockReturnValueOnce(['admin']); // Roles required
-      reflector.getAllAndOverride.mockReturnValueOnce(undefined); // No permissions required
-      
-      const userWithNoRoles = {
-        id: 'user-1',
-        roles: [],
-      };
-      userRepository.findOne.mockResolvedValue(userWithNoRoles as any);
+    it('lanza ForbiddenException("Usuario sin roles asignados") si el usuario no tiene roles', async () => {
+      stubRequirements(undefined, ['users.read']);
+      const ctx = makeContext({ id: 'user-1', roles: [] });
 
-      // Act & Assert
-      await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(
-        new ForbiddenException('Usuario sin roles asignados')
+      await expect(guard.canActivate(ctx)).rejects.toThrow(
+        new ForbiddenException('Usuario sin roles asignados'),
       );
     });
 
-    it('should allow access when user has required role', async () => {
-      // Arrange
-      const userWithAdminRole = {
+    it('permite el acceso cuando el usuario tiene el rol requerido', async () => {
+      stubRequirements(['admin'], undefined);
+      const ctx = makeContext({
         id: 'user-1',
         roles: [{ name: 'admin', permissions: [] }],
-      };
-
-      reflector.getAllAndOverride.mockReturnValueOnce(['admin']); // Required roles
-      reflector.getAllAndOverride.mockReturnValueOnce(undefined); // No permissions required
-      userRepository.findOne.mockResolvedValue(userWithAdminRole as any);
-
-      // Act
-      const result = await guard.canActivate(mockExecutionContext);
-
-      // Assert
-      expect(result).toBe(true);
-      expect(userRepository.findOne).toHaveBeenCalledWith({
-        where: { id: 'user-1' },
-        relations: ['roles', 'roles.permissions'],
       });
+
+      await expect(guard.canActivate(ctx)).resolves.toBe(true);
     });
 
-    it('should deny access when user does not have required role', async () => {
-      // Arrange
-      const userWithUserRole = {
+    it('deniega cuando el usuario no tiene el rol requerido', async () => {
+      stubRequirements(['admin'], undefined);
+      const ctx = makeContext({
         id: 'user-1',
         roles: [{ name: 'user', permissions: [] }],
-      };
+      });
 
-      reflector.getAllAndOverride.mockReturnValueOnce(['admin']); // Required roles
-      reflector.getAllAndOverride.mockReturnValueOnce(undefined); // No permissions required
-      userRepository.findOne.mockResolvedValue(userWithUserRole as any);
-
-      // Act & Assert
-      await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(
-        new ForbiddenException('Acceso denegado. Se requiere: Roles: admin')
+      await expect(guard.canActivate(ctx)).rejects.toThrow(
+        new ForbiddenException('Acceso denegado. Se requiere: Roles: admin'),
       );
     });
 
-    it('should allow access when user has required permission', async () => {
-      // Arrange
-      const userWithPermission = {
+    it('permite el acceso cuando el usuario tiene el permiso requerido', async () => {
+      stubRequirements(undefined, ['users.read']);
+      const ctx = makeContext({
         id: 'user-1',
-        roles: [{ 
-          name: 'user', 
-          permissions: [{ name: 'read_users' }] 
-        }],
-      };
+        roles: [{ name: 'user', permissions: [{ name: 'users.read' }] }],
+      });
 
-      reflector.getAllAndOverride.mockReturnValueOnce(undefined); // No roles required
-      reflector.getAllAndOverride.mockReturnValueOnce(['read_users']); // Required permissions
-      userRepository.findOne.mockResolvedValue(userWithPermission as any);
-
-      // Act
-      const result = await guard.canActivate(mockExecutionContext);
-
-      // Assert
-      expect(result).toBe(true);
+      await expect(guard.canActivate(ctx)).resolves.toBe(true);
     });
 
-    it('should deny access when user does not have required permission', async () => {
-      // Arrange
-      const userWithWrongPermission = {
+    it('deniega cuando el usuario no tiene el permiso requerido', async () => {
+      stubRequirements(undefined, ['users.write']);
+      const ctx = makeContext({
         id: 'user-1',
-        roles: [{ 
-          name: 'user', 
-          permissions: [{ name: 'read_posts' }] 
-        }],
-      };
+        roles: [{ name: 'user', permissions: [{ name: 'users.read' }] }],
+      });
 
-      reflector.getAllAndOverride.mockReturnValueOnce(undefined); // No roles required
-      reflector.getAllAndOverride.mockReturnValueOnce(['write_users']); // Required permissions
-      userRepository.findOne.mockResolvedValue(userWithWrongPermission as any);
-
-      // Act & Assert
-      await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(
-        new ForbiddenException('Acceso denegado. Se requiere: Permisos: write_users')
+      await expect(guard.canActivate(ctx)).rejects.toThrow(
+        new ForbiddenException(
+          'Acceso denegado. Se requiere: Permisos: users.write',
+        ),
       );
     });
 
-    it('should allow access with either required role OR permission', async () => {
-      // Arrange
-      const userWithOnlyPermission = {
+    it('permite el acceso con rol O permiso — basta con uno de los dos', async () => {
+      stubRequirements(['admin'], ['users.write']);
+      const ctx = makeContext({
         id: 'user-1',
-        roles: [{ 
-          name: 'user', // Not admin role
-          permissions: [{ name: 'write_users' }] 
-        }],
-      };
+        roles: [{ name: 'user', permissions: [{ name: 'users.write' }] }], // no tiene el rol, sí el permiso
+      });
 
-      reflector.getAllAndOverride.mockReturnValueOnce(['admin']); // Required roles (don't have)
-      reflector.getAllAndOverride.mockReturnValueOnce(['write_users']); // Required permissions (have)
-      userRepository.findOne.mockResolvedValue(userWithOnlyPermission as any);
-
-      // Act
-      const result = await guard.canActivate(mockExecutionContext);
-
-      // Assert
-      expect(result).toBe(true);
+      await expect(guard.canActivate(ctx)).resolves.toBe(true);
     });
 
-    it('should handle scenarios where user without access tries to access protected resource', async () => {
-      // Arrange - Escenario: Usuario sin permisos trata de acceder a recurso protegido
-      const unauthorizedUser = {
+    it('deniega con el mensaje combinado cuando no tiene ni los roles ni los permisos', async () => {
+      stubRequirements(
+        ['admin', 'moderator'],
+        ['users.manage', 'users.delete'],
+      );
+      const ctx = makeContext({
         id: 'user-2',
-        roles: [{ 
-          name: 'guest', 
-          permissions: [] 
-        }],
-      };
+        roles: [{ name: 'guest', permissions: [] }],
+      });
 
-      reflector.getAllAndOverride.mockReturnValueOnce(['admin', 'moderator']); // Required roles
-      reflector.getAllAndOverride.mockReturnValueOnce(['manage_users', 'delete_users']); // Required permissions
-      userRepository.findOne.mockResolvedValue(unauthorizedUser as any);
-
-      // Act & Assert
-      await expect(guard.canActivate(mockExecutionContext)).rejects.toThrow(
-        new ForbiddenException('Acceso denegado. Se requiere: Roles: admin, moderator o Permisos: manage_users, delete_users')
+      await expect(guard.canActivate(ctx)).rejects.toThrow(
+        new ForbiddenException(
+          'Acceso denegado. Se requiere: Roles: admin, moderator o Permisos: users.manage, users.delete',
+        ),
       );
     });
 
-    it('should handle valid user with correct role accessing protected endpoint', async () => {
-      // Arrange - Escenario: Usuario con rol correcto accede a endpoint protegido
-      const validAdminUser = {
-        id: 'user-3',
-        roles: [{ 
-          name: 'admin', 
-          permissions: [
-            { name: 'read_users' },
-            { name: 'write_users' },
-            { name: 'delete_users' }
-          ] 
-        }],
-      };
+    /**
+     * Fase 1, Bloque A2a: `hasAnyPermission` (auth/utils/permissions.util.ts)
+     * se corrigió para que `required: []` DENIEGUE (antes devolvía `true`
+     * porque `[].some(...)` es `false` pero el bug estaba en el guard viejo
+     * tratando `[]` como "sin restricción"). `@RequirePermissions()` sin
+     * argumentos produce `[]` (truthy en JS) — el guard NO lo trata igual
+     * que `undefined` (esa rama de "sin restricción" solo dispara cuando el
+     * decorador no se usó), así que debe seguir exigiendo autorización real.
+     */
+    it('deniega con @RequirePermissions() vacío — [] no es "sin restricción"', async () => {
+      stubRequirements(undefined, []);
+      const ctx = makeContext({
+        id: 'user-1',
+        roles: [{ name: 'user', permissions: [{ name: 'users.read' }] }],
+      });
 
-      reflector.getAllAndOverride.mockReturnValueOnce(['admin']); // Required roles
-      reflector.getAllAndOverride.mockReturnValueOnce(undefined); // No specific permissions required
-      userRepository.findOne.mockResolvedValue(validAdminUser as any);
-
-      // Act
-      const result = await guard.canActivate(mockExecutionContext);
-
-      // Assert
-      expect(result).toBe(true);
+      await expect(guard.canActivate(ctx)).rejects.toThrow(ForbiddenException);
     });
   });
 });

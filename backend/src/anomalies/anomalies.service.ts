@@ -4,7 +4,7 @@ import { Repository } from 'typeorm';
 import { AnomalyEvent } from './entities/anomaly-event.entity';
 import { Camera } from '../cameras/entities/camera.entity';
 import { HubGateway } from '../hub/hub.gateway';
-import { OpenAITokenService } from '../digital-concierge/services/openai-token.service';
+import { VisionAnalysisService } from './services/vision-analysis.service';
 import { NotificationsGateway } from '../notifications/notifications.gateway';
 
 @Injectable()
@@ -17,7 +17,7 @@ export class AnomaliesService {
     @InjectRepository(Camera)
     private readonly cameraRepository: Repository<Camera>,
     private readonly hubGateway: HubGateway,
-    private readonly openAiTokenService: OpenAITokenService,
+    private readonly visionAnalysisService: VisionAnalysisService,
     private readonly notificationsGateway: NotificationsGateway,
   ) {}
 
@@ -51,7 +51,7 @@ export class AnomaliesService {
     // Evaluar con OpenAI Vision si hay foto adjunta
     if (meta.snapshot_jpeg_b64) {
       try {
-        const analysis = await this.openAiTokenService.analyzeAnomaly(meta.snapshot_jpeg_b64, payload.anomalyType);
+        const analysis = await this.visionAnalysisService.analyzeAnomaly(meta.snapshot_jpeg_b64, payload.anomalyType);
         suspicionLevel = analysis.suspicionLevel;
         reasoning = analysis.reasoning;
       } catch (error) {

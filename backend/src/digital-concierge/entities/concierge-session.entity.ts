@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 import { Visit } from '../../visits/entities/visit.entity';
 
@@ -57,6 +57,18 @@ export class ConciergeSession {
   // Origen de la sesión: 'web' (frontend) o 'hub' (Raspberry Pi)
   @Column({ type: 'varchar', length: 16, default: 'web' })
   source: 'web' | 'hub';
+
+  // Fase 1, Bloque A1 (docs/modulos/agente-cerebro.md §7): tenant de la
+  // sesión, derivado del Hub físico (`Hub.organizationId`, ver
+  // ConciergeAuthGuard/HubAuthGuard) o de la sesión de usuario humano
+  // (better-auth/JWT legacy). Mismo patrón que el resto de columnas
+  // `organizationId` de Fase 0 — ver docstring en
+  // src/cameras/entities/camera.entity.ts: nullable porque sesiones sin
+  // tenant resuelto (hub aún no asociado a un condominio) caen en el "cajón
+  // nulo" en vez de romper (stampOrganizationId).
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  organizationId: string | null;
 
   // Visita creada (si fue aprobada)
   @ManyToOne(() => Visit, { nullable: true })

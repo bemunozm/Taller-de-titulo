@@ -21,6 +21,10 @@ export enum LogType {
   NOTIFICATION = 'NOTIFICATION',
   SYSTEM = 'SYSTEM',
   EXCEPTION = 'EXCEPTION',
+  // Fase 1, Bloque A2a (docs/modulos/agente-cerebro.md §5, regla dura #4):
+  // cada ejecución de una VigiliaTool queda auditada con este tipo — ver
+  // ToolDispatcherService.
+  AGENT_TOOL_CALL = 'AGENT_TOOL_CALL',
 }
 
 export enum ServiceName {

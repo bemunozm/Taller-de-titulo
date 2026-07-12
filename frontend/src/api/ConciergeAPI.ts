@@ -1,6 +1,4 @@
-import axios from 'axios';
-
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+import api from '@/lib/axios';
 
 export interface ConciergeSessionResponse {
   sessionId: string;
@@ -10,13 +8,37 @@ export interface ConciergeSessionResponse {
 
 export interface ToolExecutionRequest {
   toolName: string;
-  parameters: Record<string, any>;
+  parameters: Record<string, unknown>;
 }
 
 export interface ToolExecutionResponse {
   success: boolean;
-  data?: any;
+  data?: unknown;
   error?: string;
+}
+
+/**
+ * Definición de una tool tal como la expone `POST /concierge/agent-config/:houseNumber`
+ * (backend/src/agent/tool-definitions.util.ts::RealtimeToolDefinition). El
+ * `parameters` es el JSON Schema derivado del `inputSchema` (zod) de cada
+ * `VigiliaTool` — el backend es la única fuente de verdad, el cliente solo
+ * lo reenvía tal cual al SDK de Realtime.
+ */
+export interface RealtimeToolDefinition {
+  type: 'function';
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+/**
+ * Respuesta de `POST /concierge/agent-config/:houseNumber` (Fase 1, Bloque
+ * A2b/"clientes delgados"): system prompt + definiciones de tools, ambos
+ * derivados del backend — el cliente deja de hardcodear cualquiera de los dos.
+ */
+export interface AgentConfigResponse {
+  instructions: string;
+  tools: RealtimeToolDefinition[];
 }
 
 export interface EndSessionRequest {
@@ -32,6 +54,23 @@ export interface EndSessionResponse {
 
 /**
  * API para el sistema de Conserje Digital
+ *
+ * Fase 1, Bloque A1 (docs/modulos/agente-cerebro.md §7): antes usaba una
+ * instancia `axios` "pelada" (sin `withCredentials`), así que la cookie de
+ * sesión httpOnly de better-auth NUNCA se enviaba — daba igual porque el
+ * backend no exigía sesión. Ahora que `ConciergeAuthGuard` la exige para el
+ * transporte "web" (sin header X-Hub-Secret), `respondToVisitor`/
+ * `checkSessionStatus` (llamados desde componentes de residentes YA
+ * autenticados: NotificationDetailModal, VisitorApprovalDialog) necesitan la
+ * instancia compartida `api` (withCredentials: true, mismo patrón que
+ * FamilyAPI/UnitAPI/etc.) o quedarían en 401 pese a que el residente sí tiene
+ * sesión.
+ *
+ * SUPUESTO PENDIENTE (reportado en la tarea): `startSession`/`executeTool`/
+ * `endSession` los llama también el kiosko `DigitalConciergeView.tsx`, que
+ * hoy es una ruta pública SIN login — para ese flujo, `withCredentials` no
+ * alcanza (no hay sesión que enviar) y seguirá en 401 hasta que se agregue
+ * un paso de autenticación al kiosko (cambio de frontend fuera de este bloque).
  */
 export class ConciergeAPI {
   /**
@@ -39,10 +78,21 @@ export class ConciergeAPI {
    * Retorna el sessionId y el token efímero para WebRTC
    */
   static async startSession(socketId?: string): Promise<ConciergeSessionResponse> {
-    const response = await axios.post(`${API_URL}/concierge/session/start`, {
+    const response = await api.post('/concierge/session/start', {
       metadata: navigator.userAgent, // Info del dispositivo
       socketId, // Socket ID para notificaciones en tiempo real
     });
+    return response.data;
+  }
+
+  /**
+   * Obtiene la configuración del agente (system prompt + definiciones de
+   * tools) para una casa/departamento de destino. Única fuente de verdad:
+   * el cliente ya NO hardcodea ni el prompt ni las tools (Fase 1, Bloque
+   * "clientes delgados").
+   */
+  static async getAgentConfig(houseNumber: string): Promise<AgentConfigResponse> {
+    const response = await api.post(`/concierge/agent-config/${houseNumber}`);
     return response.data;
   }
 
@@ -53,10 +103,10 @@ export class ConciergeAPI {
   static async executeTool(
     sessionId: string,
     toolName: string,
-    parameters: Record<string, any>
+    parameters: Record<string, unknown>
   ): Promise<ToolExecutionResponse> {
-    const response = await axios.post(
-      `${API_URL}/concierge/session/${sessionId}/execute-tool`,
+    const response = await api.post(
+      `/concierge/session/${sessionId}/execute-tool`,
       { toolName, parameters }
     );
     return response.data;
@@ -69,8 +119,8 @@ export class ConciergeAPI {
     sessionId: string,
     finalStatus?: 'completed' | 'cancelled' | 'timeout'
   ): Promise<EndSessionResponse> {
-    const response = await axios.post(
-      `${API_URL}/concierge/session/${sessionId}/end`,
+    const response = await api.post(
+      `/concierge/session/${sessionId}/end`,
       { finalStatus }
     );
     return response.data;
@@ -82,8 +132,8 @@ export class ConciergeAPI {
   static async checkSessionStatus(
     sessionId: string
   ): Promise<{ active: boolean; reason?: string }> {
-    const response = await axios.post(
-      `${API_URL}/concierge/session/${sessionId}/status`
+    const response = await api.post(
+      `/concierge/session/${sessionId}/status`
     );
     return response.data;
   }
@@ -96,8 +146,8 @@ export class ConciergeAPI {
     approved: boolean,
     residentId?: string
   ): Promise<{ success: boolean; message: string }> {
-    const response = await axios.post(
-      `${API_URL}/concierge/session/${sessionId}/respond`,
+    const response = await api.post(
+      `/concierge/session/${sessionId}/respond`,
       { approved, residentId }
     );
     return response.data;
