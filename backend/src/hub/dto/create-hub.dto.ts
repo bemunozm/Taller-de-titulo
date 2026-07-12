@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsOptional, IsUUID, MaxLength, Matches } from 'class-validator';
+import { IsString, IsOptional, IsUUID, IsEnum, MaxLength, Matches } from 'class-validator';
+import { HubType } from '../entities/hub.entity';
 
 // Fase 1, Bloque A1.1 (docs/modulos/agente-cerebro.md §7/§11 — H1): antes no
 // existía ningún CRUD para provisionar hubs (la columna `Hub.organizationId`
@@ -43,4 +44,14 @@ export class CreateHubDto {
   })
   @IsUUID()
   organizationId: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Tipo de dispositivo: "physical-hub" (Raspberry Pi con teclado/relés GPIO) o "web-kiosk" (totem web de /digital-concierge, sin control de relés). Default "physical-hub" si se omite (retrocompat).',
+    enum: HubType,
+    default: HubType.PHYSICAL_HUB,
+  })
+  @IsOptional()
+  @IsEnum(HubType, { message: 'type debe ser "physical-hub" o "web-kiosk"' })
+  type?: HubType;
 }

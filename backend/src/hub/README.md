@@ -96,8 +96,9 @@ Entidad que representa un dispositivo hub registrado.
 | `location` | string | Ubicación física (ej: "Edificio A - Panel Principal") |
 | `description` | string | Descripción opcional |
 | `active` | boolean | Estado del hub |
+| `type` | enum | `physical-hub` (default, retrocompat) \| `web-kiosk` — ver "Tipos de hub" abajo |
 | `firmwareVersion` | string | Versión del software del hub |
-| `config` | jsonb | Configuración (pines GPIO, dispositivo audio, etc.) |
+| `config` | jsonb | Configuración (pines GPIO, dispositivo audio, etc.) — hoy NO se expone en `CreateHubDto`/`UpdateHubDto`, así que ningún flujo de provisioning la exige; un `web-kiosk` simplemente la deja `null`, igual que cualquier hub sin config todavía |
 | `lastSeen` | timestamp | Última vez que se conectó |
 | `ipAddress` | string | IP del hub |
 
@@ -115,6 +116,44 @@ defecto — mismo criterio que `platform.manage-organizations`).
 | GET | `/hubs/:hubId` | Detalle de un hub. |
 | PATCH | `/hubs/:hubId` | Actualiza ubicación/descripción/organización/estado activo. |
 | POST | `/hubs/:hubId/rotate-secret` | Invalida el secret anterior y genera uno nuevo (p.ej. ante sospecha de compromiso). |
+
+### 2.2 Tipos de hub (`HubType`, `hub.entity.ts`)
+
+Tarea "kiosko web como device del condominio" (2026-07-12): el totem web de
+`/digital-concierge` (`DigitalConciergeView`) quedaba en 401 contra
+`ConciergeAuthGuard` por ser ruta pública sin auth. En vez de inventar un
+mecanismo de auth nuevo, se modela como un `Hub` más — mismo `secretHash`,
+mismo `HubAuthGuard`, mismo `POST /hubs` — pero con `type: 'web-kiosk'` en vez
+de `'physical-hub'`.
+
+- **`physical-hub`** (default, retrocompat — todo hub creado antes de esta
+  tarea quedó así): Raspberry Pi con teclado matricial + relés GPIO.
+- **`web-kiosk`**: totem web, sin control de relés. `Hub.config` (pines GPIO,
+  audio) no aplica — hoy tampoco se valida para NINGÚN tipo de hub, porque
+  `CreateHubDto`/`UpdateHubDto` no exponen ese campo (nunca se puebla vía API,
+  solo existiría si se escribe directo en BD), así que no hizo falta agregar
+  ninguna validación condicional por tipo.
+
+**Confirmado sin cambios de código** (`type` no participa en autenticación ni
+en resolución de tenant):
+- `HubAuthGuard` autentica por `hubId` + `secretHash` sin mirar `type` — un
+  `web-kiosk` se autentica exactamente igual que un `physical-hub`.
+- `ConciergeAuthGuard`/`AuthorizedContextFactory` (`src/agent/`) arman el
+  contexto del agente a partir de `request.hub: AuthenticatedHub` (solo
+  `hubId`/`organizationId`, sin `type`) — `startSession`/`execute-tool`/
+  `agent-config` funcionan igual para un `web-kiosk`.
+
+**Pendiente de decisión de producto (fuera de este alcance)**: si un
+`web-kiosk` debe o no poder disparar `hub:door_open` — hoy
+`HubGateway.sendToOrganization` (usado por `abrir-acceso.tool.ts` y
+`DigitalConciergeService.respondToVisitor`) envía el evento a TODOS los
+sockets conectados de la organización sin distinguir `type`, porque
+`ConnectedHubInfo` (mapa interno de `HubGateway`) no guarda el `type` del hub
+— solo `organizationId`. Si un totem físicamente junto a un portón debe abrir
+la reja igual que un hub físico, esto ya funciona tal cual; si NO debe, hace
+falta filtrar por `type` en `sendToOrganization`/`connectedHubs` — se deja
+documentado a propósito, sin implementarlo, porque es una decisión de
+comportamiento físico que le corresponde a Benjamin, no una corrección de bug.
 
 ### 3. Endpoint de Sincronización de Cache
 
