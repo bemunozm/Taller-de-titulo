@@ -1,10 +1,11 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, LessThan, MoreThan } from 'typeorm';
 import { Visit, VisitType, VisitStatus } from './entities/visit.entity';
 import { CreateVisitDto } from './dto/create-visit.dto';
 import { UpdateVisitDto } from './dto/update-visit.dto';
 import { UsersService } from '../users/users.service';
+import { User } from '../users/entities/user.entity';
 import { FamiliesService } from '../families/families.service';
 import { VehiclesService } from '../vehicles/vehicles.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -12,6 +13,7 @@ import { NotificationType } from '../notifications/entities/notification.entity'
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { TenantContextService } from '../common/tenant/tenant-context.service';
 import { scopeWhere, applyTenantFilter, stampOrganizationId } from '../common/tenant/tenant-context.util';
+import type { TenantContext } from '../common/tenant/tenant-context.types';
 import * as crypto from 'crypto';
 
 /**
@@ -81,6 +83,39 @@ export class VisitsService {
   }
 
   /**
+   * Fix de seguridad (follow-up post-auditoría Fase 0/1, ver
+   * docs/modulos/auth-multitenant.md): `UsersService.findOne` que resuelve el
+   * host NO está scopeado por tenant (a propósito — lo usan flujos internos
+   * de todo tipo). Sin esta validación, un admin del condominio A podía pasar
+   * un `hostId` de un usuario del condominio B y `create`/`update` terminaban
+   * atribuyendo el recurso a B (la familia del host manda sobre el
+   * organizationId, ver docstring de `create`).
+   *
+   * Mismo criterio que el "Fix M1" de
+   * `DigitalConciergeService` (comparar `host.family?.organizationId` contra
+   * el tenant del creador) — pero acá SOLO se aplica cuando hay un creador
+   * humano autenticado con organización concreta
+   * (`!ctx.isSuperAdmin && ctx.organizationId !== null`). Los flujos SIN
+   * sesión de usuario (Conserje Digital citofono, worker LPR) resuelven
+   * `TenantContextService.getContext()` como `EMPTY_TENANT_CONTEXT`
+   * (`organizationId: null`) — para ellos no hay "creador" que validar, el
+   * tenant se deriva enteramente del recurso (familia del host), así que la
+   * validación se salta sin romper esos call-sites.
+   */
+  private assertHostBelongsToCreatorTenant(host: User, ctx: TenantContext): void {
+    if (ctx.isSuperAdmin || ctx.organizationId === null) {
+      return;
+    }
+
+    const hostOrganizationId = host.family?.organizationId ?? null;
+    if (hostOrganizationId !== ctx.organizationId) {
+      throw new ForbiddenException(
+        'El anfitrión seleccionado pertenece a otro condominio',
+      );
+    }
+  }
+
+  /**
    * Crear una nueva visita (vehicular o peatonal)
    */
   async create(createVisitDto: CreateVisitDto): Promise<Visit> {
@@ -99,6 +134,11 @@ export class VisitsService {
     if (!host) {
       throw new NotFoundException(`Usuario anfitrión con ID ${hostId} no encontrado`);
     }
+
+    // Fix cross-tenant (ver docstring de assertHostBelongsToCreatorTenant):
+    // rechazar si el host resuelto no pertenece al condominio del creador.
+    const creatorCtx = await this.tenantContext.getContext();
+    this.assertHostBelongsToCreatorTenant(host, creatorCtx);
 
     // Asignar automáticamente la familia del anfitrión
     const family = host.family || null;
@@ -130,7 +170,7 @@ export class VisitsService {
     // `request.user`), así que la familia del host (que si vive en un
     // condominio ya tiene su `organizationId`, scopeado desde Fase 0) es la
     // única fuente confiable en ambos casos.
-    const ctx = await this.tenantContext.getContext();
+    const ctx = creatorCtx;
     stampOrganizationId(visit, { ...ctx, organizationId: family?.organizationId ?? ctx.organizationId });
 
     // Generar código QR único para TODAS las visitas (peatonales y vehiculares)
@@ -364,6 +404,14 @@ export class VisitsService {
       if (!host) {
         throw new NotFoundException(`Usuario anfitrión con ID ${updateVisitDto.hostId} no encontrado`);
       }
+
+      // Fix cross-tenant (ver docstring de assertHostBelongsToCreatorTenant):
+      // mismo criterio que en `create` — el único caller de `update` es
+      // VisitsController (autenticado), así que `ctx` siempre refleja al
+      // creador humano cuando corresponde validar.
+      const updaterCtx = await this.tenantContext.getContext();
+      this.assertHostBelongsToCreatorTenant(host, updaterCtx);
+
       visit.host = host;
 
       // Actualizar automáticamente la familia del nuevo anfitrión
