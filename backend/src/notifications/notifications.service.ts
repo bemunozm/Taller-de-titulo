@@ -1,15 +1,16 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, LessThan } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, In, LessThan, DataSource } from 'typeorm';
 import { NotificationsGateway } from './notifications.gateway';
-import { 
-  Notification, 
-  NotificationType, 
-  NotificationPriority 
+import {
+  Notification,
+  NotificationType,
+  NotificationPriority
 } from './entities/notification.entity';
 import { GetNotificationsDto } from './dto/get-notifications.dto';
 import { MarkAsReadDto } from './dto/mark-as-read.dto';
 import { UsersService } from '../users/users.service';
+import { resolveOrganizationIdForUser } from '../common/tenant/tenant-context.util';
 
 /**
  * Payload para envío de notificaciones en tiempo real (WebSocket)
@@ -47,6 +48,14 @@ export class NotificationsService {
     private readonly notificationRepository: Repository<Notification>,
     private readonly notificationsGateway: NotificationsGateway,
     private readonly usersService: UsersService,
+    // Tarea #19 (docs/modulos/auth-multitenant.md §7): NO se inyecta
+    // TenantContextService (request-scoped) a propósito — NotificationsService
+    // se llama desde muchos otros servicios (families, vehicles, detections,
+    // etc.) y no siempre hay un request HTTP activo. Se deriva el
+    // organizationId directamente del `recipient` (resource-derived) vía
+    // DataSource, igual que TenantContextService internamente.
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
   ) {}
 
   /**
@@ -59,9 +68,15 @@ export class NotificationsService {
   async create(options: CreateNotificationOptions): Promise<Notification> {
     this.logger.log(`Creating notification for user ${options.recipientId}: ${options.title}`);
 
+    // Tarea #19: organizationId resource-derived desde la organización del
+    // destinatario (no cross-tenant por diseño: cada notificación ya está
+    // acotada a un único recipientId).
+    const organizationId = await resolveOrganizationIdForUser(options.recipientId, this.dataSource);
+
     // 1. Guardar en base de datos (PERSISTENCIA)
     const notification = this.notificationRepository.create({
       recipientId: options.recipientId,
+      organizationId,
       type: options.type,
       title: options.title,
       message: options.message,

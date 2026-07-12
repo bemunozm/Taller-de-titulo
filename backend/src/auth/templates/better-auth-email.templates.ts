@@ -198,3 +198,27 @@ export function buildPasswordResetEmailHtml(name: string, url: string, isNewAcco
         footerNote: 'Este enlace expira pronto por tu seguridad',
     });
 }
+
+/**
+ * Email de invitación a una organización (condominio), hook
+ * `organization.sendInvitationEmail` (tarea #19,
+ * docs/modulos/auth-multitenant.md §7b). NO es el camino primario de
+ * onboarding hoy (ver docstring en better-auth.ts sobre por qué) — se deja
+ * cableado por si un flujo futuro invoca `inviteMember` directamente.
+ */
+export function buildOrganizationInvitationEmailHtml(
+    email: string,
+    organizationName: string,
+    inviterName: string,
+    acceptUrl: string,
+): string {
+    return renderLinkEmailTemplate(email, {
+        title: 'Invitación a un condominio',
+        heading: 'Te invitaron a un condominio',
+        message: `${inviterName} te invitó a unirte a "${organizationName}" en Taller de Título. Acepta la invitación para continuar.`,
+        buttonText: 'Aceptar invitación',
+        buttonUrl: acceptUrl,
+        accentColor: '#4f46e5',
+        footerNote: 'Esta invitación expira pronto',
+    });
+}

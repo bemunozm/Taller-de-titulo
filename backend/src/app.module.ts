@@ -31,6 +31,8 @@ import { LogsModule } from './logs/logs.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { HubModule } from './hub/hub.module';
 import { AnomaliesModule } from './anomalies/anomalies.module';
+import { TenantModule } from './common/tenant/tenant.module';
+import { OnboardingModule } from './onboarding/onboarding.module';
 
 @Module({
   imports: [
@@ -55,6 +57,10 @@ import { AnomaliesModule } from './anomalies/anomalies.module';
     // deshabilitado, better-auth solo expone sus endpoints (/api/auth/*) y no
     // interfiere con el resto de la API.
     BetterAuthModule.forRoot({ auth, disableGlobalAuthGuard: true }),
+    // Tarea #19 (docs/modulos/auth-multitenant.md §7): mecanismo de tenant
+    // scoping reutilizable (TenantContextService + interceptor global).
+    // Global, así que no hace falta re-importarlo en cada módulo de dominio.
+    TenantModule,
     UsersModule,
     RolesModule,
     TokensModule,
@@ -75,6 +81,7 @@ import { AnomaliesModule } from './anomalies/anomalies.module';
   DashboardModule,
   HubModule,
   AnomaliesModule,
+  OnboardingModule,
   ],
   controllers: [],
   providers: [DataInitializationService, ExpirationService],

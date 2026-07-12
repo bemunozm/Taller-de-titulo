@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 import { Vehicle } from '../../vehicles/entities/vehicle.entity';
 import { Family } from '../../families/entities/family.entity';
@@ -22,6 +22,16 @@ export enum VisitStatus {
 export class Visit {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // Tarea #19 (docs/modulos/auth-multitenant.md §7). Columna agregada al
+  // esquema; el estampado/filtrado por tenant en VisitsService queda
+  // PENDIENTE (ver reporte de la tarea #19) — se prioriza el mecanismo
+  // reutilizable + las entidades más simples (cameras/units/families/
+  // vehicles). Ver docstring en src/cameras/entities/camera.entity.ts sobre
+  // el diseño de esta columna.
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  organizationId: string | null;
 
   @Column({ type: 'enum', enum: VisitType })
   type: VisitType;

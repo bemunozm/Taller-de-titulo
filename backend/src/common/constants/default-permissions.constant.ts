@@ -23,6 +23,14 @@ export const DEFAULT_PERMISSIONS: PermissionDefinition[] = [
   { name: 'auth.manage-service-tokens', description: 'Generar API keys de servicio para credenciales de máquina', module: 'auth', action: 'manage-service-tokens' },
 
   // ============================================
+  // PLATAFORMA / MULTI-TENANT (tarea #19, doc §7b)
+  // Exclusivo de la plataforma (Super Administrador) — crear condominios
+  // (organization de better-auth) y sus administradores. NO se asigna a
+  // "Administrador" (ese rol está acotado a SU condominio).
+  // ============================================
+  { name: 'platform.manage-organizations', description: 'Crear condominios (organizaciones) y su administrador', module: 'platform', action: 'manage-organizations' },
+
+  // ============================================
   // GESTIÓN DE USUARIOS
   // ============================================
   { name: 'users.create', description: 'Crear usuarios', module: 'users', action: 'create' },

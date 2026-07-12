@@ -15,6 +15,7 @@ import * as nodemailer from 'nodemailer';
 import { hashPassword, checkPassword } from './utils/auth.util';
 import {
   buildAccountVerificationEmailHtml,
+  buildOrganizationInvitationEmailHtml,
   buildPasswordResetEmailHtml,
   buildWelcomeAfterVerificationEmailHtml,
 } from './templates/better-auth-email.templates';
@@ -284,9 +285,53 @@ export const auth = betterAuth({
     },
   },
   plugins: [
-    // tenant = condominio (decisión cerrada, doc sección 10.4). Sin config
-    // adicional por ahora: se deja montado para las fases siguientes.
-    organization(),
+    // tenant = condominio (decisión cerrada, doc sección 10.4). Tarea #19
+    // (doc §7/§7b): la CREACIÓN de organizaciones queda cerrada a nivel de
+    // plugin (`allowUserToCreateOrganization: false`) — nadie crea un
+    // condominio vía el cliente/API pública de better-auth. Los condominios
+    // nacen SOLO por el endpoint super-admin
+    // (POST /onboarding/condominiums, OnboardingService.createCondominium),
+    // que llama a `auth.api.createOrganization({ body: { userId, ... } })`
+    // server-side — esa llamada NO pasa por `allowUserToCreateOrganization`
+    // (el check solo aplica a requests de cliente con headers de sesión; ver
+    // skill organization-best-practices, sección "Creating Organizations on
+    // Behalf of Users").
+    //
+    // Roles de organización: se usan SOLO como pertenencia/tenant (owner al
+    // crear el condominio, member para el resto) — el RBAC fino (79 permisos,
+    // AuthorizationGuard, @RequirePermissions) sigue siendo la única fuente
+    // de autorización real. No se migran permisos al access-control de
+    // better-auth (fuera de alcance de #19).
+    organization({
+      allowUserToCreateOrganization: false,
+      // Cada organización tiene su Admin (owner) + eventualmente conserjes y
+      // residentes (member) — límite generoso para un condominio real.
+      membershipLimit: 500,
+      // No usamos el flujo de invitación (`inviteMember`) como camino
+      // primario: `rut`/`phone` son additionalFields REQUERIDOS del `user`
+      // (ver docstring de la clase, tarea #16) y la aceptación de invitación
+      // nativa de better-auth solo pide contraseña — no hay forma de que el
+      // invitado complete esos campos ahí. El camino primario de onboarding
+      // (§7b) es creación directa server-side
+      // (`UsersService.createAccountByAdmin` + `auth.api.addMember`, ver
+      // OnboardingService). Se deja `sendInvitationEmail` configurado de
+      // todas formas (plugin completo, por si un flujo futuro sí usa
+      // `inviteMember` para reinvitar a alguien que ya tiene cuenta).
+      invitationExpiresIn: 60 * 60 * 24 * 7, // 7 días
+      sendInvitationEmail: async (data) => {
+        const html = buildOrganizationInvitationEmailHtml(
+          data.email,
+          data.organization.name,
+          data.inviter?.user?.name || 'Un administrador',
+          `${frontendUrl}/auth/accept-invitation/${data.invitation.id}`,
+        );
+        await sendAuthEmail(
+          data.email,
+          `Invitación a ${data.organization.name} - Taller de Título`,
+          html,
+        );
+      },
+    }),
     // service-token para el worker LPR (decisión cerrada, doc sección 10.3).
     // `enableMetadata: true` (default es false) porque
     // AuthService.createServiceApiKey guarda `description`/`createdBy` ahí

@@ -68,6 +68,19 @@ export class Notification {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  // Tarea #19 (docs/modulos/auth-multitenant.md §7) — resource-derived desde
+  // la organización del `recipient` (ver
+  // NotificationsService.resolveRecipientOrganizationId), NO desde
+  // TenantContext: NotificationsService se invoca desde muchos otros
+  // servicios (families, vehicles, detections, etc.) y no siempre hay un
+  // request HTTP activo. Sin filtrado adicional en `findAll`: ya está acotado
+  // por `recipientId` (un usuario nunca ve notificaciones de otro), así que
+  // no hay fuga cross-tenant aunque el filtro por organizationId no se
+  // aplique explícitamente todavía.
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  organizationId: string | null;
+
   @Column({ type: 'enum', enum: NotificationType })
   type: NotificationType;
 

@@ -5,6 +5,8 @@ import { Unit } from './entities/unit.entity';
 import { CreateUnitDto } from './dto/create-unit.dto';
 import { UpdateUnitDto } from './dto/update-unit.dto';
 import { CreateBulkUnitsDto } from './dto/create-bulk-units.dto';
+import { TenantContextService } from '../common/tenant/tenant-context.service';
+import { scopeWhere, stampOrganizationId } from '../common/tenant/tenant-context.util';
 
 @Injectable()
 export class UnitsService {
@@ -13,6 +15,8 @@ export class UnitsService {
   constructor(
     @InjectRepository(Unit)
     private readonly unitRepo: Repository<Unit>,
+    // Tarea #19 (docs/modulos/auth-multitenant.md §7): scoping por tenant.
+    private readonly tenantContext: TenantContextService,
   ) {}
 
   /**
@@ -21,10 +25,13 @@ export class UnitsService {
   async create(dto: CreateUnitDto): Promise<Unit> {
     // Crear la entidad (el hook generateIdentifier se ejecutará antes de insertar)
     const unit = this.unitRepo.create(dto);
+    stampOrganizationId(unit, await this.tenantContext.getContext());
 
     // Verificar que no exista una unidad con el mismo identificador
+    // (dentro del mismo condominio: dos condominios distintos pueden tener,
+    // en teoría, unidades con el mismo identifier "A-101").
     const existing = await this.unitRepo.findOne({
-      where: { identifier: unit.identifier },
+      where: scopeWhere({ identifier: unit.identifier }, await this.tenantContext.getContext()),
     });
 
     if (existing) {
@@ -35,7 +42,7 @@ export class UnitsService {
 
     const saved = await this.unitRepo.save(unit);
     this.logger.log(`✅ Unidad creada: ${saved.identifier}`);
-    
+
     return saved;
   }
 
@@ -78,9 +85,11 @@ export class UnitsService {
         ? `${block.toUpperCase()}-${num.toString()}` 
         : num.toString();
 
-      // Verificar si ya existe
+      const ctx = await this.tenantContext.getContext();
+
+      // Verificar si ya existe (dentro del mismo condominio)
       const existing = await this.unitRepo.findOne({
-        where: { identifier },
+        where: scopeWhere({ identifier }, ctx),
       });
 
       if (existing) {
@@ -92,6 +101,7 @@ export class UnitsService {
       // Crear y guardar la unidad (el hook @BeforeInsert generará el identificador al guardar)
       try {
         const unit = this.unitRepo.create(unitDto);
+        stampOrganizationId(unit, ctx);
         const saved = await this.unitRepo.save(unit);
         created.push(saved);
         this.logger.log(`✅ Unidad creada: ${saved.identifier}`);
@@ -116,10 +126,11 @@ export class UnitsService {
    * Obtener todas las unidades con paginación opcional
    */
   async findAll(includeInactive = false): Promise<Unit[]> {
+    const ctx = await this.tenantContext.getContext();
     const where = includeInactive ? {} : { active: true };
-    
+
     return this.unitRepo.find({
-      where,
+      where: scopeWhere(where, ctx),
       relations: ['families'],
       order: { identifier: 'ASC' },
     });
@@ -129,8 +140,9 @@ export class UnitsService {
    * Buscar unidad por ID
    */
   async findOne(id: string): Promise<Unit> {
+    const ctx = await this.tenantContext.getContext();
     const unit = await this.unitRepo.findOne({
-      where: { id },
+      where: scopeWhere({ id }, ctx),
       relations: ['families', 'families.members'],
     });
 
@@ -145,8 +157,9 @@ export class UnitsService {
    * Buscar unidad por identificador (ej: "A-303", "Casa-5")
    */
   async findByIdentifier(identifier: string): Promise<Unit | null> {
+    const ctx = await this.tenantContext.getContext();
     return this.unitRepo.findOne({
-      where: { identifier: identifier.toUpperCase() },
+      where: scopeWhere({ identifier: identifier.toUpperCase() }, ctx),
       relations: ['families', 'families.members'],
     });
   }
@@ -155,11 +168,12 @@ export class UnitsService {
    * Buscar unidades por bloque
    */
   async findByBlock(block: string): Promise<Unit[]> {
+    const ctx = await this.tenantContext.getContext();
     return this.unitRepo.find({
-      where: { 
+      where: scopeWhere({
         block: block.toUpperCase(),
         active: true,
-      },
+      }, ctx),
       relations: ['families'],
       order: { number: 'ASC' },
     });
@@ -169,11 +183,12 @@ export class UnitsService {
    * Buscar unidades por piso
    */
   async findByFloor(floor: number): Promise<Unit[]> {
+    const ctx = await this.tenantContext.getContext();
     return this.unitRepo.find({
-      where: { 
+      where: scopeWhere({
         floor,
         active: true,
-      },
+      }, ctx),
       relations: ['families'],
       order: { block: 'ASC', number: 'ASC' },
     });
@@ -184,12 +199,13 @@ export class UnitsService {
    */
   async search(searchTerm: string): Promise<Unit[]> {
     const term = searchTerm.toUpperCase();
-    
+    const ctx = await this.tenantContext.getContext();
+
     return this.unitRepo.find({
-      where: [
+      where: scopeWhere([
         { identifier: Like(`%${term}%`) },
         { number: Like(`%${term}%`) },
-      ],
+      ], ctx),
       relations: ['families'],
       order: { identifier: 'ASC' },
     });
@@ -211,9 +227,9 @@ export class UnitsService {
       // El hook generará el nuevo identifier
       updatedUnit.generateIdentifier();
 
-      // Verificar que no exista otra unidad con ese identifier
+      // Verificar que no exista otra unidad con ese identifier (mismo condominio)
       const existing = await this.unitRepo.findOne({
-        where: { identifier: updatedUnit.identifier },
+        where: scopeWhere({ identifier: updatedUnit.identifier }, await this.tenantContext.getContext()),
       });
 
       if (existing && existing.id !== id) {
@@ -257,8 +273,9 @@ export class UnitsService {
    * Obtener unidades disponibles (sin familia activa asignada)
    */
   async findAvailable(): Promise<Unit[]> {
+    const ctx = await this.tenantContext.getContext();
     const allUnits = await this.unitRepo.find({
-      where: { active: true },
+      where: scopeWhere({ active: true }, ctx),
       relations: ['families'],
       order: { identifier: 'ASC' },
     });
@@ -307,6 +324,12 @@ export class UnitsService {
   /**
    * Obtener unidades con Conserje Digital habilitado
    * Usado por el Hub (Raspberry Pi) para cache local
+   *
+   * Tarea #19: NO se scopea por tenant a propósito — el endpoint que lo
+   * expone (`GET /units/ai-enabled`) se autentica con `X-Hub-Secret`
+   * (@Public, sin AuthGuard/request.user), y hoy no existe una asociación
+   * Hub<->organización (ver docstring en src/hub/entities/hub.entity.ts).
+   * Pendiente junto con el resto del scoping de Hub.
    */
   async findWithAIEnabled(): Promise<Array<{
     houseNumber: string;

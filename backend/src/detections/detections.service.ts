@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { PlateDetection } from './entities/plate-detection.entity';
 import { AccessAttempt } from './entities/access-attempt.entity';
+import { Camera } from '../cameras/entities/camera.entity';
 import { CreatePlateDetectionDto } from './dto/create-plate-detection.dto';
 import { CreateAccessAttemptDto } from './dto/create-access-attempt.dto';
 import { RespondPendingDetectionDto } from './dto/respond-pending-detection.dto';
@@ -23,6 +24,8 @@ export class DetectionsService {
     private readonly detectionsRepo: Repository<PlateDetection>,
     @InjectRepository(AccessAttempt)
     private readonly attemptsRepo: Repository<AccessAttempt>,
+    @InjectRepository(Camera)
+    private readonly cameraRepository: Repository<Camera>,
     private readonly vehiclesService: VehiclesService,
     private readonly notificationsService: NotificationsService,
     private readonly usersService: UsersService,
@@ -31,10 +34,34 @@ export class DetectionsService {
     private readonly visitsService: VisitsService,
   ) {}
 
+  /**
+   * Tarea #19 (docs/modulos/auth-multitenant.md §7): resuelve el
+   * `organizationId` de la cámara asociada a una detección. RESOURCE-DERIVED
+   * (no TenantContext): estos endpoints los llama el worker LPR sin sesión de
+   * usuario (`POST /detections/plates`, sin AuthGuard — ver
+   * DetectionsController). Réplica minimalista de
+   * `CamerasService.resolveCameraByIdOrMount` (id UUID o mountPath, limpiando
+   * el sufijo `_guardia` del worker manager) para no acoplar módulos.
+   */
+  private async resolveCameraOrganizationId(cameraIdOrMount: string): Promise<string | null> {
+    if (!cameraIdOrMount) return null;
+    const cleanId = cameraIdOrMount.replace('_guardia', '');
+    const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(cleanId);
+
+    const camera = isUuid
+      ? await this.cameraRepository.findOne({ where: { id: cleanId } })
+      : await this.cameraRepository.findOne({ where: { mountPath: cleanId } });
+
+    return camera?.organizationId ?? null;
+  }
+
   async createDetection(dto: CreatePlateDetectionDto) {
     // Mapear DTO a la entidad PlateDetection. Usamos el campo `meta` como JSONB
     // para guardar bbox, snapshot y estadísticas de caracteres.
     const ent = this.detectionsRepo.create(dto);
+    // Tarea #19: estampar organizationId derivado de la cámara (ver docstring
+    // de resolveCameraOrganizationId arriba).
+    ent.organizationId = await this.resolveCameraOrganizationId(dto.cameraId);
 
     // `create()` solo instancia la entidad; `save()` persiste en la BD.
     const saved = await this.detectionsRepo.save(ent);
@@ -151,13 +178,14 @@ export class DetectionsService {
     const t1 = saved.detectionTimestamp || saved.createdAt.getTime();
     const responseTimeMs = Date.now() - t1;
 
-    const att = this.attemptsRepo.create({ 
-      detection: saved, 
-      decision, 
-      reason, 
+    const att = this.attemptsRepo.create({
+      detection: saved,
+      decision,
+      reason,
       method: isExit ? 'Patente - Salida' : 'Patente - Entrada',
       residente,
       responseTimeMs, // Guardar métrica de tiempo de respuesta
+      organizationId: saved.organizationId, // Tarea #19: hereda de la detección
     });
 
     const savedAtt = await this.attemptsRepo.save(att);
@@ -227,12 +255,13 @@ export class DetectionsService {
     const t1 = det.detectionTimestamp || det.createdAt.getTime();
     const responseTimeMs = Date.now() - t1;
     
-    const att = this.attemptsRepo.create({ 
-      detection: det, 
-      decision: dto.decision, 
-      reason: dto.reason ?? null, 
+    const att = this.attemptsRepo.create({
+      detection: det,
+      decision: dto.decision,
+      reason: dto.reason ?? null,
       method: dto.method ?? null,
       responseTimeMs,
+      organizationId: det.organizationId, // Tarea #19: hereda de la detección
     });
     if (dto.residenteId) {
       (att as any).residente = { id: dto.residenteId };
@@ -336,6 +365,7 @@ export class DetectionsService {
       respondedBy: null,
       respondedAt: null,
       responseTimeMs, // Tiempo hasta notificación al conserje
+      organizationId: detection.organizationId, // Tarea #19: hereda de la detección
     });
     
     const savedAttempt = await this.attemptsRepo.save(attempt);
