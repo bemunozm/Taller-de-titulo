@@ -1,5 +1,6 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Request, UseGuards, UseInterceptors, UploadedFile } from "@nestjs/common";
-import { ApiTags, ApiOperation, ApiResponse, ApiBody, ApiBearerAuth, ApiUnauthorizedResponse, ApiBadRequestResponse, ApiNotFoundResponse, ApiForbiddenResponse, ApiConsumes } from "@nestjs/swagger";
+import { ApiTags, ApiOperation, ApiResponse, ApiBody, ApiBearerAuth, ApiUnauthorizedResponse, ApiBadRequestResponse, ApiNotFoundResponse, ApiForbiddenResponse, ApiConsumes, ApiTooManyRequestsResponse } from "@nestjs/swagger";
+import { Throttle, ThrottlerGuard } from "@nestjs/throttler";
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { AuthService } from "./auth.service";
@@ -99,6 +100,12 @@ export class AuthController {
 
   @HttpCode(HttpStatus.OK)
   @Post("login")
+  // Tarea #21 (hardening): throttling propio del login legacy — 5 intentos
+  // por minuto por IP (better-auth ya protege /sign-in/email vía
+  // rateLimit.customRules en better-auth.ts, pero este endpoint no pasa por
+  // ahí). Throttler 'login' registrado en AuthModule (ThrottlerModule.forRoot).
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ login: { limit: 5, ttl: 60_000 } })
   @Auditable({
     module: AuditModule.AUTH,
     action: AuditAction.LOGIN,
@@ -111,6 +118,7 @@ export class AuthController {
     summary: 'Iniciar sesión',
     description: 'Autentica al usuario con email y contraseña. Retorna un token JWT válido por 24 horas.'
   })
+  @ApiTooManyRequestsResponse({ description: 'Demasiados intentos de login — intenta de nuevo en un minuto' })
   @ApiResponse({
     status: 200,
     description: 'Login exitoso',
@@ -120,13 +128,15 @@ export class AuthController {
     }
   })
   @ApiUnauthorizedResponse({
-    description: 'Credenciales inválidas o cuenta no confirmada',
+    description:
+      'Credenciales inválidas (usuario inexistente, cuenta no activada o password incorrecto — ' +
+      'tarea #21: mensaje unificado a propósito, anti-enumeración de cuentas)',
     schema: {
       type: 'object',
       properties: {
-        message: { 
-          type: 'string', 
-          example: 'Tu cuenta no está confirmada. Hemos enviado un nuevo código de verificación a tu email.'
+        message: {
+          type: 'string',
+          example: 'Credenciales inválidas'
         },
         error: { type: 'string', example: 'Unauthorized' },
         statusCode: { type: 'number', example: 401 }
@@ -550,10 +560,14 @@ export class AuthController {
     }
   })
   @ApiUnauthorizedResponse({ description: 'Token inválido o expirado' })
-  @ApiForbiddenResponse({ description: 'No tiene el permiso "auth.manage-service-tokens"' })
+  @ApiForbiddenResponse({
+    description:
+      'No tiene el permiso "auth.manage-service-tokens", o intenta asignar la key a un usuario ' +
+      'fuera de su organización o a una cuenta de super-administrador',
+  })
   @ApiNotFoundResponse({ description: 'El usuario dueño de la key (targetUserId) no existe' })
   @ApiBody({ type: CreateServiceApiKeyDto })
   createServiceApiKey(@Request() req, @Body() createServiceApiKeyDto: CreateServiceApiKeyDto) {
-    return this.authService.createServiceApiKey(req.user.id, createServiceApiKeyDto);
+    return this.authService.createServiceApiKey(req.user, createServiceApiKeyDto);
   }
 }

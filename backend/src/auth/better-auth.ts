@@ -108,6 +108,19 @@ const pool = new Pool({
 const backendBaseUrl =
   process.env.BETTER_AUTH_URL || `http://localhost:${process.env.PORT || 3000}`;
 const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+const isProduction = process.env.NODE_ENV === 'production';
+
+// Tarea #21 (hardening): en producción, better-auth DEBE montar sobre HTTPS —
+// si no, las cookies de sesión con `secure: true` (ver `useSecureCookies`
+// abajo) nunca se enviarían de vuelta al backend y el login por sesión
+// quedaría roto en silencio. Falla rápido en vez de dejar ese bug a
+// descubrirse en producción.
+if (isProduction && !backendBaseUrl.startsWith('https://')) {
+  throw new Error(
+    `BETTER_AUTH_URL debe ser https:// en producción (valor actual: "${backendBaseUrl}"). ` +
+      'Sin HTTPS, las cookies de sesión con `secure: true` no se envían y el login por sesión no funciona.',
+  );
+}
 
 // Fila cruda que devuelve la query de roles/permisos de customSession (abajo).
 interface RolePermissionRow {
@@ -192,12 +205,38 @@ export const auth = betterAuth({
   baseURL: backendBaseUrl,
   trustedOrigins: [frontendUrl],
   database: pool,
+  // Tarea #21 (docs/modulos/auth-multitenant.md §11+, hardening): sin esto
+  // better-auth solo activa el rate-limit por default en producción
+  // (`NODE_ENV === 'production'`) — lo forzamos ON siempre (dev incluido)
+  // para que el comportamiento sea el mismo en todos los ambientes y no haya
+  // sorpresas al desplegar. `storage: 'database'` (tabla `rateLimit`, la crea
+  // el CLI de better-auth — correr `npx @better-auth/cli migrate` tras este
+  // cambio) en vez de 'memory': sobrevive reinicios/rolling deploys y
+  // funciona igual si el backend corre con más de una instancia.
+  // `customRules` endurece login (fuerza bruta) por encima del rule especial
+  // que ya trae better-auth por default (3 intentos / 10s en /sign-in/email)
+  // — la clave del rule es el path RELATIVO a basePath (better-auth le quita
+  // `/api/auth` antes de matchear, ver node_modules/better-auth/dist/api/
+  // rate-limiter/index.mjs `resolveRateLimitConfig`), NO el path completo.
+  rateLimit: {
+    enabled: true,
+    storage: 'database',
+    customRules: {
+      '/sign-in/email': { window: 60, max: 5 },
+    },
+  },
   advanced: {
     database: {
       // IDs uuid (gen_random_uuid() en Postgres) para calzar con las FK `uuid`
       // ya existentes en el resto del dominio (ver docstring arriba).
       generateId: 'uuid',
     },
+    // Tarea #21 (hardening): better-auth ya pone `secure: true` por default
+    // cuando detecta HTTPS, pero lo forzamos explícito en producción (y lo
+    // dejamos OFF en dev, donde el backend corre en http://localhost) — así
+    // el comportamiento no depende de la detección automática (p.ej. detrás
+    // de un proxy/load balancer que termina TLS antes del backend).
+    useSecureCookies: isProduction,
   },
   user: {
     // modelName por defecto ("user") ya apunta a la tabla que crea TypeORM.

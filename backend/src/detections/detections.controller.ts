@@ -6,6 +6,7 @@ import { CreateAccessAttemptDto } from './dto/create-access-attempt.dto';
 import { RespondPendingDetectionDto } from './dto/respond-pending-detection.dto';
 import { AuthGuard } from '../auth/auth.guard';
 import { AuthorizationGuard } from '../auth/guards/authorization.guard';
+import { ServiceApiKeyGuard } from '../auth/guards/service-api-key.guard';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
 import { FilterByUser } from '../common/decorators/filter-by-user.decorator';
 import { UserFilterInterceptor } from '../common/interceptors/user-filter.interceptor';
@@ -18,30 +19,35 @@ export class DetectionsController {
   constructor(private readonly plates: DetectionsService) {}
 
   // ============================================
-  // ENDPOINTS PARA WORKER LPR (sin protección de permisos)
-  // Estos endpoints son llamados por el sistema de IA Python usando token de servicio
+  // ENDPOINTS PARA WORKER LPR (protegidos con API key de servicio)
+  // Estos endpoints son llamados por el sistema de IA Python usando la API key
+  // de servicio (header x-api-key, ver ServiceApiKeyGuard — tarea #21).
   // ============================================
 
   @Post('plates')
-  @ApiOperation({ 
-    summary: 'Crear detección de patente', 
-    description: 'Registra una detección de placa proveniente del worker LPR. Este endpoint es usado por el sistema de IA y no requiere permisos de usuario (usa token de servicio).'
+  @UseGuards(ServiceApiKeyGuard)
+  @ApiOperation({
+    summary: 'Crear detección de patente',
+    description: 'Registra una detección de placa proveniente del worker LPR. Requiere API key de servicio (header x-api-key).'
   })
   @ApiBody({ type: CreatePlateDetectionDto })
   @ApiResponse({ status: 201, description: 'Detección creada correctamente' })
   @ApiResponse({ status: 400, description: 'Datos inválidos' })
+  @ApiUnauthorizedResponse({ description: 'API key de servicio inválida, expirada o ausente' })
   createDetection(@Body() dto: CreatePlateDetectionDto) {
     return this.plates.createDetection(dto);
   }
 
   @Post('plates/attempts')
-  @ApiOperation({ 
-    summary: 'Registrar intento de acceso', 
-    description: 'Guarda la decisión tomada (allow/deny) asociada a una detección previamente registrada. Usado por el sistema de IA con token de servicio.'
+  @UseGuards(ServiceApiKeyGuard)
+  @ApiOperation({
+    summary: 'Registrar intento de acceso',
+    description: 'Guarda la decisión tomada (allow/deny) asociada a una detección previamente registrada. Requiere API key de servicio (header x-api-key).'
   })
   @ApiBody({ type: CreateAccessAttemptDto })
   @ApiResponse({ status: 201, description: 'Intento de acceso registrado correctamente' })
   @ApiResponse({ status: 400, description: 'Datos inválidos o detección no encontrada' })
+  @ApiUnauthorizedResponse({ description: 'API key de servicio inválida, expirada o ausente' })
   createAttempt(@Body() dto: CreateAccessAttemptDto) {
     return this.plates.createAttempt(dto);
   }

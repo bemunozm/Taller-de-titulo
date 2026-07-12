@@ -14,6 +14,21 @@ def _post_request(url: str, dto: dict, dry_run: bool = True) -> int:
     if token:
         headers['Authorization'] = f'Bearer {token}'
 
+    # Tarea #21 (hardening de ingesta LPR): los endpoints de ingesta
+    # (detections/plates, detections/plates/attempts, anomalies) ahora exigen
+    # la API key de servicio de better-auth vía el header `x-api-key`
+    # (ver ServiceApiKeyGuard en el backend) — el `Authorization: Bearer`
+    # de arriba (token JWT legacy, deprecated) NO la reemplaza para estos
+    # endpoints. Sin `LPR_SERVICE_API_KEY` configurada, el backend responderá
+    # 401 en producción/staging.
+    if settings.LPR_SERVICE_API_KEY:
+        headers['x-api-key'] = settings.LPR_SERVICE_API_KEY
+    else:
+        logging.warning(
+            'LPR_SERVICE_API_KEY no está configurada — el backend rechazará este request '
+            'con 401 si el endpoint exige API key de servicio (ver docs/modulos/auth-multitenant.md).'
+        )
+
     attempts = 3
     backoff = 1.0
     for attempt in range(1, attempts + 1):

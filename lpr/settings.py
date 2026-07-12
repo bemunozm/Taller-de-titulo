@@ -53,6 +53,16 @@ class Settings(BaseSettings):
     LPR_MIN_CHAR_CONF: float = Field(0.30, ge=0, le=1)
     LPR_INCLUDE_SNAPSHOT: bool = True
     LPR_WORKER_TOKEN: Optional[str] = None
+    # Tarea #21 (backend/docs/modulos/auth-multitenant.md §11+, hardening de
+    # ingesta LPR): API key de servicio (plugin `apiKey` de better-auth) que
+    # el worker envía en el header `x-api-key` contra los endpoints de
+    # ingesta (POST /detections/plates, /detections/plates/attempts,
+    # POST/GET /anomalies) — ahora protegidos por `ServiceApiKeyGuard`. Se
+    # obtiene con el admin del backend vía
+    # `POST /api/v1/auth/service-api-keys` (requiere el permiso
+    # "auth.manage-service-tokens") y se pega ACÁ, en `lpr/.env` — la key en
+    # texto plano solo se muestra una vez en esa respuesta.
+    LPR_SERVICE_API_KEY: Optional[str] = None
 
     # Logging
     LOG_LEVEL: str = 'INFO'

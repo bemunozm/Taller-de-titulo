@@ -99,7 +99,13 @@ export class AuthGuard implements CanActivate {
     }
 
     try {
-      const payload = await this.jwtService.verifyAsync(token);
+      // Tarea #21: restringe explícitamente el algoritmo de verificación a
+      // HS256 (defensa en profundidad — JwtModule ya lo fija por default vía
+      // `verifyOptions` en auth.module.ts, pero fijarlo también acá evita que
+      // un cambio futuro en esa config debilite silenciosamente este guard).
+      // Sin esto, un JWT firmado con `alg: none` u otro algoritmo inesperado
+      // podría ser aceptado dependiendo de la configuración de jsonwebtoken.
+      const payload = await this.jwtService.verifyAsync(token, { algorithms: ['HS256'] });
       return payload?.id ?? null;
     } catch {
       throw new UnauthorizedException('Error validando el token');

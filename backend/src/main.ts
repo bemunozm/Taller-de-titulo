@@ -1,11 +1,36 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { json, urlencoded, Request, Response, NextFunction } from 'express';
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import helmet from 'helmet';
 
 // Debe coincidir con el `basePath` configurado en src/auth/better-auth.ts.
 const BETTER_AUTH_BASE_PATH = '/api/auth';
+
+const bootstrapLogger = new Logger('Bootstrap');
+
+// Tarea #21 (hardening): falla rápido en vez de arrancar con CORS abierto a
+// cualquier origen (`origin: undefined` en `app.enableCors` deja pasar
+// requests SIN header Origin, y en algunas configuraciones de Express/cors
+// equivale a "cualquiera") o con un valor claramente mal formado.
+function getRequiredFrontendOrigin(): string {
+  const origin = process.env.FRONTEND_URL;
+  if (!origin) {
+    throw new Error(
+      'FRONTEND_URL no está definido — es el origin permitido por CORS. Configúralo en tu .env antes de arrancar el backend.',
+    );
+  }
+  try {
+    void new URL(origin);
+  } catch {
+    throw new Error(`FRONTEND_URL no es una URL válida: "${origin}"`);
+  }
+  if (process.env.NODE_ENV === 'production' && !origin.startsWith('https://')) {
+    throw new Error(`FRONTEND_URL debe ser https:// en producción (valor actual: "${origin}")`);
+  }
+  return origin;
+}
 
 async function bootstrap() {
   // better-auth necesita leer el body/raw-stream de la request por su cuenta
@@ -14,6 +39,14 @@ async function bootstrap() {
   // de la librería) y lo re-agregamos nosotros mismos más abajo, saltándonos
   // SOLO las rutas de better-auth para no consumirle el stream.
   const app = await NestFactory.create(AppModule, { bodyParser: false });
+
+  // Tarea #21 (hardening): cabeceras de seguridad HTTP estándar (HSTS,
+  // X-Content-Type-Options, X-Frame-Options, quita X-Powered-By, etc).
+  // `contentSecurityPolicy: false` — esta es una API JSON (más el HTML propio
+  // de better-auth para /reset-password), no sirve HTML de la app; el CSP
+  // por default de helmet está pensado para apps que sirven vistas y puede
+  // romper Swagger UI (/api) o el flujo de better-auth sin aportar valor acá.
+  app.use(helmet({ contentSecurityPolicy: false }));
 
   // Body parser propio: mismo límite de 10mb que antes (snapshots Full-Frame
   // en Base64), aplicado a todo EXCEPTO /api/auth/* (better-auth parsea su
@@ -32,9 +65,10 @@ async function bootstrap() {
     });
   });
 
-  // Configuración de CORS
+  // Configuración de CORS — `getRequiredFrontendOrigin()` falla el arranque
+  // si FRONTEND_URL falta o está mal formado (tarea #21, hardening).
   app.enableCors({
-    origin: process.env.FRONTEND_URL, // URLs del frontend
+    origin: getRequiredFrontendOrigin(), // URL del frontend (validada al arrancar)
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], // Métodos HTTP permitidos
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin', 'Bearer'], // Headers permitidos
     credentials: true, // Permite el envío de cookies y credenciales
@@ -119,6 +153,8 @@ async function bootstrap() {
     .build();
   const documentFactory = () => SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api', app, documentFactory);
-  await app.listen(process.env.PORT ?? 3000, '0.0.0.0');
+  const port = process.env.PORT ?? 3000;
+  await app.listen(port, '0.0.0.0');
+  bootstrapLogger.log(`Backend escuchando en el puerto ${port} — CORS origin: ${process.env.FRONTEND_URL}`);
 }
 bootstrap();

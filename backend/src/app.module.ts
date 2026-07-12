@@ -46,7 +46,13 @@ import { OnboardingModule } from './onboarding/onboarding.module';
       password: process.env.DB_PASSWORD,
       database: process.env.DB_NAME,
       autoLoadEntities: true, // Carga automaticamente las entidades
-      synchronize: true, // no usar en produccion
+      // Tarea #21 (hardening): `synchronize: true` en producción puede alterar
+      // el schema de forma destructiva en cada arranque (drop/recreate de
+      // columnas, pérdida de datos) — solo debe usarse en dev. Producción
+      // necesita migraciones reales de TypeORM (`typeorm migration:generate` +
+      // `migration:run`), que hoy NO existen en este repo — son prerequisito
+      // antes de desplegar con NODE_ENV=production (ver reporte de la tarea).
+      synchronize: process.env.NODE_ENV !== 'production',
     }),
     TypeOrmModule.forFeature([Role, Permission, AccessAttempt, Notification, Visit]),
     // POC Fase 0 (docs/modulos/auth-multitenant.md): better-auth montado EN

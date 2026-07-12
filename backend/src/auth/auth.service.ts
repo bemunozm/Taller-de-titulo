@@ -1,8 +1,8 @@
-import { BadRequestException, Injectable, UnauthorizedException, NotFoundException, InternalServerErrorException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, UnauthorizedException, NotFoundException, InternalServerErrorException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { AuthService as BetterAuthServiceBase } from '@thallesp/nestjs-better-auth';
 import { APIError as BetterAuthAPIError } from 'better-auth/api';
 import type { auth } from './better-auth';
@@ -10,6 +10,8 @@ import { UsersService } from 'src/users/users.service';
 import { TokensService } from 'src/tokens/tokens.service';
 import { CloudinaryService } from 'src/cloudinary/cloudinary.service';
 import { User } from 'src/users/entities/user.entity';
+import { PLATFORM_SUPER_ADMIN_ROLE } from 'src/common/tenant/tenant-context.types';
+import { resolveOrganizationIdForUser } from 'src/common/tenant/tenant-context.util';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { ConfirmAccountDto } from './dto/confirm-account.dto';
@@ -62,6 +64,12 @@ export class AuthService {
         private readonly betterAuthService: BetterAuthServiceBase,
         @InjectRepository(User)
         private readonly userRepository: Repository<User>,
+        // Tarea #21: resuelve la organización del requester/target sin pasar
+        // por TenantContextService (REQUEST-scoped) para no volver AuthService
+        // entero request-scoped solo por este método — reusa el mismo helper
+        // que ya usa el interceptor de tenant (tenant-context.util.ts).
+        @InjectDataSource()
+        private readonly dataSource: DataSource,
     ) {}
 
     /** `.api` tipado con los plugins de nuestro `auth` (ver `BetterAuthApi` arriba) — solo para llamadas plugin-specific (createApiKey). */
@@ -143,36 +151,35 @@ export class AuthService {
         }
     }
 
+    /**
+     * Tarea #21 (hardening, skill better-auth-security-best-practices
+     * "Account Enumeration Prevention"): unifica los tres motivos de rechazo
+     * (usuario inexistente, cuenta no activada, password incorrecto) al MISMO
+     * mensaje genérico — antes cada uno tenía un mensaje/código distinto, lo
+     * que permitía a un atacante enumerar qué emails están registrados (y
+     * cuáles ya activaron su cuenta) probando logins.
+     *
+     * También se retira el side-effect de disparar `requestPasswordReset`
+     * (better-auth) desde este path: un endpoint NO autenticado no debe poder
+     * gatillar el envío de un email a una cuenta arbitraria con solo conocer
+     * su dirección (abuso de email-bombing / oráculo de enumeración por
+     * timing). Un usuario con cuenta no activada ahora debe usar
+     * `POST /auth/forgot-password` (ya diseñado para ser anti-enumeración —
+     * responde igual exista o no el email) para recibir su link de
+     * activación.
+     */
     async login(loginDto: LoginDto) {
+        const invalidCredentials = () => new UnauthorizedException('Credenciales inválidas');
         try {
             const { email, password } = loginDto;
 
             const user = await this.usersService.findByEmailWithPassword(email);
             if (!user) {
-                throw new UnauthorizedException('Usuario No Encontrado');
+                throw invalidCredentials();
             }
 
             if (!user.emailVerified) {
-                // Tarea #18: activar la cuenta = establecer contraseña por
-                // primera vez, que es el MISMO flujo que "olvidé mi
-                // contraseña" vía better-auth (ver better-auth.ts
-                // `sendResetPassword`, que distingue el copy del email con
-                // `isNewAccount` sin necesitar un hook separado). Reemplaza
-                // el token de 6 dígitos + sendAccountCreatedByAdminEmail.
-                try {
-                    await this.betterAuthService.api.requestPasswordReset({
-                        body: {
-                            email: user.email,
-                            redirectTo: `${this.frontendUrl}/auth/new-password`,
-                        },
-                    });
-                } catch (error) {
-                    // No dejamos que un fallo de email/better-auth oculte el
-                    // 401 esperado — se loguea para investigar aparte.
-                    console.error('Error al solicitar activación de cuenta vía better-auth:', error);
-                }
-
-                throw new UnauthorizedException('Tu cuenta aún no ha sido activada. Hemos enviado un enlace a tu email para que establezcas tu contraseña y actives tu cuenta.');
+                throw invalidCredentials();
             }
 
             // Revisar password (RESTRICCIÓN CRÍTICA tarea #18: user.password
@@ -181,7 +188,7 @@ export class AuthService {
             // funcionando sin cambios tras un reset/activación por better-auth)
             const isPasswordCorrect = await checkPassword(password, user.password);
             if (!isPasswordCorrect) {
-                throw new UnauthorizedException('Password Incorrecto');
+                throw invalidCredentials();
             }
 
             // Solo guardar IDs de roles en el JWT para evitar que sea muy grande
@@ -578,14 +585,31 @@ export class AuthService {
      * `@RequirePermissions('auth.manage-service-tokens')`.
      *
      * El worker consume la key enviándola en el header `x-api-key` (default
-     * de better-auth, `apiKeyHeaders`) contra los endpoints que en el futuro
-     * (#21, hardening de ingesta LPR) se protejan con el guard/plugin de
-     * apiKey — NO se cablea ningún endpoint de ingesta en esta tarea.
+     * de better-auth, `apiKeyHeaders`) contra los endpoints de ingesta LPR,
+     * protegidos por `ServiceApiKeyGuard` (tarea #21).
+     *
+     * RESTRICCIÓN `targetUserId` (tarea #21, hardening — hallazgo del
+     * cybersecurity-engineer): sin esto, cualquier admin de condominio con el
+     * permiso `auth.manage-service-tokens` podía mintear una API key para
+     * OTRO usuario arbitrario vía `targetUserId` — incluyendo, en el peor
+     * caso, un super-admin de la plataforma, obteniendo así una credencial de
+     * máquina que actúa como esa cuenta. Ahora, si `targetUserId` difiere del
+     * requester, se exige UNA de estas dos condiciones:
+     *   1) El requester es "Super Administrador" (rol de plataforma,
+     *      PLATFORM_SUPER_ADMIN_ROLE) — puede asignar keys cross-tenant.
+     *   2) El target NO es super-admin Y pertenece a la MISMA organización
+     *      (condominio) que el requester (resuelta vía membresía, igual que
+     *      TenantContextService — ver tenant-context.util.ts).
      */
-    async createServiceApiKey(requestingUserId: string, dto: CreateServiceApiKeyDto) {
+    async createServiceApiKey(requestingUser: User, dto: CreateServiceApiKeyDto) {
         try {
+            const requestingUserId = requestingUser.id;
             const targetUserId = dto.targetUserId ?? requestingUserId;
             const targetUser = await this.usersService.findOne(targetUserId);
+
+            if (targetUserId !== requestingUserId) {
+                await this.assertCanAssignServiceApiKeyTo(requestingUser, targetUser);
+            }
 
             const expiresIn = SERVICE_API_KEY_DURATIONS[dto.duration ?? '365d'];
 
@@ -614,11 +638,41 @@ export class AuthService {
                 createdAt: result.createdAt,
             };
         } catch (error) {
-            if (error instanceof NotFoundException) {
+            if (error instanceof NotFoundException || error instanceof ForbiddenException) {
                 throw error;
             }
             console.error('Error al crear la API key de servicio:', error);
             throw new InternalServerErrorException('Error al crear la API key de servicio');
+        }
+    }
+
+    /**
+     * Ver docstring de `createServiceApiKey` para el detalle de la política.
+     * Lanza `ForbiddenException` (403) si el requester NO tiene permiso para
+     * asignar la key a `targetUser`.
+     */
+    private async assertCanAssignServiceApiKeyTo(requestingUser: User, targetUser: User): Promise<void> {
+        const isRequesterSuperAdmin = requestingUser.roles?.some((role) => role.name === PLATFORM_SUPER_ADMIN_ROLE) ?? false;
+        if (isRequesterSuperAdmin) {
+            return;
+        }
+
+        const isTargetSuperAdmin = targetUser.roles?.some((role) => role.name === PLATFORM_SUPER_ADMIN_ROLE) ?? false;
+        if (isTargetSuperAdmin) {
+            throw new ForbiddenException(
+                'No tiene permisos de plataforma para asignar una API key de servicio a una cuenta de super-administrador',
+            );
+        }
+
+        const [requesterOrgId, targetOrgId] = await Promise.all([
+            resolveOrganizationIdForUser(requestingUser.id, this.dataSource),
+            resolveOrganizationIdForUser(targetUser.id, this.dataSource),
+        ]);
+
+        if (!requesterOrgId || requesterOrgId !== targetOrgId) {
+            throw new ForbiddenException(
+                'Solo puede asignar la API key de servicio a un usuario de su misma organización',
+            );
         }
     }
 }
