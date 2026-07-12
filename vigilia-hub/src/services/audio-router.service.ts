@@ -275,9 +275,9 @@ export class AudioRouterService {
       // Solo esperamos el settling time
       await this.sleep(this.relayController['RELAY_SETTLING_TIME_MS'] || 200);
       
-      // 1. Conectar a OpenAI (solicita token efímero al backend)
+      // 1. Conectar a OpenAI (pide agent-config + token efímero al backend)
       this.logger.log('🔌 Conectando a OpenAI Realtime API...');
-      await this.conciergeClient.connect();
+      await this.conciergeClient.connect(houseNumber);
       
       // 2. Iniciar conversación con contexto de casa
       await this.conciergeClient.startConversation(houseNumber);

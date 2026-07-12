@@ -1,12 +1,45 @@
 import WebSocket from 'ws';
 import axios from 'axios';
 import { Logger } from '../utils/logger';
-import { WebSocketClientService } from './websocket-client.service';
+import { WebSocketClientService, type ToolExecutionResult } from './websocket-client.service';
 
 /**
- * Cliente para OpenAI Realtime API usando WebSocket directo
- * Réplica exacta del flujo del frontend (DigitalConciergeView.tsx)
- * 
+ * Definición de tool en formato Realtime (OpenAI function-calling).
+ * Espejo local de `RealtimeToolDefinition` (backend/src/agent/tool-definitions.util.ts)
+ * — no se importa entre paquetes porque el hub se despliega solo (Raspberry Pi),
+ * así que ambos lados mantienen la MISMA forma pero como copias independientes.
+ */
+interface RealtimeToolDefinition {
+  type: 'function';
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+/**
+ * Respuesta de `POST /concierge/agent-config/:houseNumber` — el backend es
+ * la ÚNICA fuente de verdad del prompt "Sofía" y del catálogo de tools
+ * (ver backend/src/digital-concierge/dto/agent-config.dto.ts). El hub deja
+ * de definir cualquiera de los dos localmente.
+ */
+interface AgentConfig {
+  instructions: string;
+  tools: RealtimeToolDefinition[];
+}
+
+/**
+ * Cliente para OpenAI Realtime API usando WebSocket directo.
+ *
+ * Fase 1, Bloque C (docs/modulos/agente-cerebro.md §10.2 paso 6): este
+ * servicio deja de ser un "agente" (ya no define prompt, tools, ni decide
+ * qué hacer con cada tool call) y pasa a ser transporte delgado — el
+ * cerebro (prompt "Sofía" + catálogo de tools + ejecución tenant-aware)
+ * vive en el backend (`digital-concierge.controller.ts`). Este cliente solo:
+ * (a) pide la configuración de sesión al backend (`agent-config/:houseNumber`),
+ * (b) reenvía cada tool call a `execute-tool` y devuelve el resultado a la
+ * sesión Realtime, y (c) cierra el canal cuando el backend señala
+ * `finalizada: true`.
+ *
  * Implementación: WebSocket nativo (ws library)
  * Referencia: https://platform.openai.com/docs/api-reference/realtime
  */
@@ -24,6 +57,7 @@ export class ConciergeClientService {
   private isInterrupted = false;
   private isResponseActive = false; // <-- NUEVO: Para saber si vale la pena cancelar
   private waitingTimeout: NodeJS.Timeout | null = null; // <-- NUEVO: Para tiempos muertos
+  private agentConfig: AgentConfig | null = null; // Prompt + tools obtenidos del backend (agent-config/:houseNumber)
   
   // Configuración del modelo Realtime (versión GA estable)
   private readonly REALTIME_MODEL = 'gpt-realtime-mini-2025-12-15';
@@ -33,7 +67,7 @@ export class ConciergeClientService {
     private readonly websocketClient: WebSocketClientService
   ) {
     const backendUrl = process.env.BACKEND_API_URL;
-    
+
     if (!backendUrl) {
       throw new Error('BACKEND_API_URL no configurado en .env');
     }
@@ -45,10 +79,45 @@ export class ConciergeClientService {
   }
 
   /**
-   * Conecta a OpenAI Realtime API usando WebSocket directo
+   * Headers de autenticación de hub (Fase 1, Bloque A1 —
+   * backend/src/hub/guards/hub-auth.guard.ts) para las llamadas HTTP propias
+   * de este servicio a `/api/v1/concierge/*` (session/start, context,
+   * session/:id/end). `executeTool` va por `WebSocketClientService` y ya
+   * manda los suyos.
    */
-  async connect(): Promise<void> {
+  private hubHeaders(): Record<string, string> {
+    const { hubId, hubSecret } = this.websocketClient.getHubCredentials();
+    return { 'X-Hub-Secret': hubSecret, 'X-Hub-Id': hubId };
+  }
+
+  /**
+   * Pide al backend el prompt "Sofía" y las definiciones de tools para la
+   * casa marcada (`POST /concierge/agent-config/:houseNumber` — única
+   * fuente de verdad, ver `digital-concierge.controller.ts#getAgentConfig`).
+   */
+  private async fetchAgentConfig(houseNumber: string): Promise<AgentConfig> {
+    const response = await axios.post<AgentConfig>(
+      `${this.backendUrl}/api/v1/concierge/agent-config/${houseNumber}`,
+      {},
+      { headers: this.hubHeaders() },
+    );
+    return response.data;
+  }
+
+  /**
+   * Conecta a OpenAI Realtime API usando WebSocket directo.
+   * @param houseNumber Casa marcada — necesaria ANTES de abrir el WebSocket
+   *   para pedir la configuración del agente (prompt + tools) al backend,
+   *   que `configureSession()` usará en el primer `session.update`.
+   */
+  async connect(houseNumber: string): Promise<void> {
     try {
+      this.targetHouse = houseNumber;
+
+      this.logger.log(`📋 Solicitando configuración del agente al backend (casa ${houseNumber})...`);
+      this.agentConfig = await this.fetchAgentConfig(houseNumber);
+      this.logger.log(`✅ Configuración del agente obtenida (${this.agentConfig.tools.length} tools)`);
+
       let ephemeralToken: string;
       let sessionId: string;
 
@@ -62,9 +131,11 @@ export class ConciergeClientService {
         this.logger.log('🎫 Solicitando token efímero al backend...');
         
         // Obtener token efímero y sessionId del backend
-        const response = await axios.post(`${this.backendUrl}/api/v1/concierge/session/start`, {
-          socketId: this.websocketClient.getSocketId(),
-        });
+        const response = await axios.post(
+          `${this.backendUrl}/api/v1/concierge/session/start`,
+          { socketId: this.websocketClient.getSocketId() },
+          { headers: this.hubHeaders() },
+        );
 
         ephemeralToken = response.data.ephemeralToken;
         sessionId = response.data.sessionId;
@@ -165,6 +236,14 @@ export class ConciergeClientService {
       return;
     }
 
+    if (!this.agentConfig) {
+      // No debería pasar: connect() espera fetchAgentConfig() ANTES de abrir
+      // el WebSocket. Si igual ocurre, no hay prompt/tools con los que
+      // configurar la sesión de forma segura.
+      this.logger.error('❌ No hay agentConfig (prompt/tools) cargado; abortando configuración de sesión');
+      return;
+    }
+
     // Configuración de sesión según documentación oficial
     // ESTRATEGIA DEBUG: Agregar type='realtime' aunque no debiera ser necesario para update, por si acaso es el param faltante.
     const sessionConfig = {
@@ -186,8 +265,8 @@ export class ConciergeClientService {
         // NOTA: Eliminamos 'voice' temporalmente porque lanza "Unknown parameter".
         // Usaremos la voz por defecto ('alloy') por ahora para asegurar conexión.
         
-        instructions: this.getSystemInstructions(),
-        
+        instructions: this.agentConfig.instructions,
+
         // Estructura anidada 'audio' siguiendo RealtimeAudioConfig
         audio: {
           input: {
@@ -220,7 +299,7 @@ export class ConciergeClientService {
           }
         },
         
-        tools: this.getToolDefinitions(),
+        tools: this.agentConfig.tools,
         tool_choice: 'auto',
       }
     };
@@ -229,108 +308,6 @@ export class ConciergeClientService {
     this.sendEvent(sessionConfig);
 
     this.logger.log('📋 Sesión de OpenAI configurada exitosamente');
-  }
-
-  /**
-   * Instrucciones del sistema para el Conserje Digital
-   * Instrucciones base - el contexto específico se agrega después
-   */
-  private getSystemInstructions(): string {
-    return 'Actúa como la interfaz de voz del sistema de control de acceso Vigilia. Espera instrucciones específicas del contexto.';
-  }
-
-  /**
-   * Define las herramientas disponibles
-   * Réplica exacta del frontend
-   */
-  private getToolDefinitions(): any[] {
-    return [
-      {
-        type: 'function',
-        name: 'guardar_datos_visitante',
-        description: 'Guarda y formatea automáticamente los datos del visitante. El RUT se formatea a XX.XXX.XXX-X, el teléfono se limpia de caracteres especiales, y la patente se normaliza a mayúsculas.',
-        parameters: {
-          type: 'object',
-          properties: {
-            nombre: {
-              type: 'string',
-              description: 'Nombre completo del visitante tal como lo dijo'
-            },
-            rut: {
-              type: 'string',
-              description: 'RUT o pasaporte del visitante en cualquier formato (números, con/sin puntos o guión)'
-            },
-            telefono: {
-              type: 'string',
-              description: 'Teléfono del visitante en cualquier formato'
-            },
-            patente: {
-              type: 'string',
-              description: 'Patente del vehículo en cualquier formato'
-            },
-            motivo: {
-              type: 'string',
-              description: 'Motivo de la visita'
-            },
-            casa: {
-              type: 'string',
-              description: 'Número de casa/departamento de destino'
-            }
-          }
-        }
-      },
-      {
-        type: 'function',
-        name: 'buscar_residente',
-        description: 'Busca un residente por número o código de casa/departamento. Acepta múltiples formatos: números solos ("15"), con prefijos ("Casa 15"), o códigos alfanuméricos ("A-1234", "B-201"). Devuelve TODOS los residentes de la familia.',
-        parameters: {
-          type: 'object',
-          properties: {
-            casa: {
-              type: 'string',
-              description: 'Número, código o nombre de casa/departamento tal como lo dijo el visitante'
-            }
-          },
-          required: ['casa']
-        }
-      },
-      {
-        type: 'function',
-        name: 'notificar_residente',
-        description: 'Envía una notificación push a TODOS los residentes de la familia para que aprueben o rechacen la visita',
-        parameters: {
-          type: 'object',
-          properties: {
-            residentes_ids: {
-              type: 'array',
-              items: {
-                type: 'string'
-              },
-              description: 'Array con los IDs de TODOS los residentes a notificar (todos los miembros de la familia)'
-            }
-          },
-          required: ['residentes_ids']
-        }
-      },
-      {
-        type: 'function',
-        name: 'finalizar_llamada',
-        description: 'Finaliza la llamada con el visitante. Usa esta herramienta SOLO después de despedirte completamente. NO menciones que estás finalizando la llamada, solo despídete naturalmente.',
-        parameters: {
-          type: 'object',
-          properties: {}
-        }
-      },
-      {
-        type: 'function',
-        name: 'reenviar_notificacion',
-        description: 'Vuelve a enviar la notificación al teléfono de los residentes si se han demorado mucho en contestar o si el visitante lo solicita. ÚSALA SOLO TRAS HABER HECHO LA PRIMERA NOTIFICACIÓN.',
-        parameters: {
-          type: 'object',
-          properties: {}
-        }
-      }
-    ];
   }
 
   /**
@@ -497,12 +474,19 @@ export class ConciergeClientService {
   }
 
   /**
-   * Maneja llamadas a herramientas
+   * Reenvía una tool call al backend y devuelve el resultado a la sesión
+   * Realtime.
+   *
+   * Fase 1, Bloque C: el hub deja de decidir NADA sobre las tools —
+   * `finalizar_llamada` incluida. TODAS se ejecutan en el backend
+   * (tenant-aware, auditado, `POST /concierge/session/:id/execute-tool`).
+   * La única señal que el hub interpreta localmente es `data.finalizada
+   * === true` en la respuesta, para saber cuándo cortar el canal físico.
    */
-  private async handleToolCall(event: any): Promise<void> {
+  private async handleToolCall(event: { name: string; call_id: string; arguments: string }): Promise<void> {
     const { name, call_id, arguments: argsString } = event;
-    
-    let args: any;
+
+    let args: Record<string, unknown>;
     try {
       args = JSON.parse(argsString);
     } catch (error) {
@@ -513,37 +497,15 @@ export class ConciergeClientService {
     this.logger.log(`🔧 Tool call: ${name}(${JSON.stringify(args)})`);
 
     try {
-      let result: any;
+      const result: ToolExecutionResult = await this.websocketClient.executeTool(
+        name,
+        args,
+        this.currentSessionId || 'unknown'
+      );
 
-      if (name === 'finalizar_llamada') {
-        // Manejo local para finalizar_llamada
-        this.logger.log('📞 Ejecutando tool local: finalizar_llamada');
-        
-        // Simular delay y desconexión
-        this.logger.log('⏳ Iniciando cuenta regresiva para cortar la comunicación (23s)...');
-        setTimeout(() => {
-          this.logger.log('📞 Tiempo de gracia expirado. Cortando canal de audio.');
-          this.endConversation();
-          // Opcional: desconectar completamente
-          // this.disconnect(); 
-        }, 24000); // 24 segundos para asegurar que termine de hablar por completo
-
-        result = {
-          finalizada: true,
-          mensaje: 'OK. La llamada se cerrará automáticamente.'
-        };
-      } else {
-        // Ejecutar tool en backend
-        result = await this.websocketClient.executeTool(
-          name,
-          args,
-          this.currentSessionId || 'unknown'
-        );
-
-        // Si acaba de notificar, iniciar timer
-        if (name === 'notificar_residente') {
-          this.startWaitingTimeout();
-        }
+      // Si acaba de notificar, iniciar timer de espera proactiva
+      if (name === 'notificar_residente') {
+        this.startWaitingTimeout();
       }
 
       // Enviar resultado de la herramienta
@@ -556,19 +518,25 @@ export class ConciergeClientService {
         }
       });
 
-      // Solicitar que el modelo procese el resultado, SOLO si no estamos finalizando
-      if (name !== 'finalizar_llamada') {
-         this.sendEvent({
-           type: 'response.create'
-         });
+      if (this.isFinalizadaResult(result)) {
+        // El backend marcó la sesión como finalizada (tool finalizar_llamada).
+        // Damos un tiempo de gracia para que el audio de despedida termine
+        // de reproducirse antes de cortar el canal físico del citófono —
+        // mismo margen que existía cuando esta decisión era local.
+        this.logger.log('📞 Tool finalizar_llamada completada. Esperando cierre del canal (24s)...');
+        setTimeout(() => {
+          this.logger.log('📞 Tiempo de gracia expirado. Cortando canal de audio.');
+          this.endConversation();
+        }, 24000);
       } else {
-         this.logger.log(`⏳ Tool finalizar_llamada completada. Esperando cierre...`);
+        // Solicitar que el modelo procese el resultado
+        this.sendEvent({ type: 'response.create' });
       }
 
       this.logger.log(`✅ Tool ${name} completada`);
     } catch (error) {
       this.logger.error(`Error en tool ${name}:`, error);
-      
+
       // Enviar error
       this.sendEvent({
         type: 'conversation.item.create',
@@ -590,70 +558,24 @@ export class ConciergeClientService {
   }
 
   /**
-   * Genera instrucciones detalladas para una casa específica
-   * Mismo prompt que en DigitalConciergeView.tsx
+   * Detecta la señal de fin de llamada devuelta por `execute-tool`
+   * (`ToolResultDto.data.finalizada === true`, ver `finalizar-llamada.tool.ts`
+   * en el backend).
    */
-  private getDetailedInstructions(houseNumber: string, houseContext: string): string {
-    return `Eres Sofía, la conserje del Condominio San Lorenzo. Eres amable, cálida y conversacional. Tu trabajo es ayudar a los visitantes a ingresar al condominio de manera eficiente pero siempre con una sonrisa en la voz.
-
-INFORMACIÓN INICIAL:
-- El visitante ya marcó la casa de destino: ${houseNumber}
-- YA conoces a dónde va, NO preguntes por la casa/departamento nuevamente
-- HISTORIAL DE VISITAS OBTENIDO DE LA BASE DE DATOS: ${houseContext}
-
-PERSONALIDAD:
-- Habla de manera natural y amigable, como si conversaras con un vecino
-- Usa expresiones chilenas cotidianas: "¿Cómo estás?", "Perfecto", "Genial", "Súper"
-- Sé paciente y empática, especialmente si el visitante parece confundido
-- Haz que la conversación fluya naturalmente, no como un formulario robótico
-
-FLUJO Y PAUTAS DE CONVERSACIÓN (SÉ FLUIDA, RELAJADA Y 100% NATURAL):
-
-1. SALUDO INICIAL ORGANICO:
-   - "¡Hola! Bienvenido al Condominio San Lorenzo. Soy Sofía, la conserje. Cuéntame, ¿cuál es tu nombre y tu RUT?"
-   - (Puedes variar ligeramente el saludo inicial pero SIEMPRE pide nombre y RUT en tu primera interacción).
-
-2. RECOPILACIÓN INVISIBLE DE DATOS:
-   Debes obtener: Nombre, RUT/Pasaporte, Vehículo (Patente opcional) y Motivo.
-   
-   ⚠️ REGLA DE ORO DE EXTRACCIÓN Y OBLIGATORIEDAD ⚠️: 
-   - SI EL VISITANTE TE DA VARIOS DATOS, LLAMA a 'guardar_datos_visitante' con TODOS esos datos de una vez: 'guardar_datos_visitante'(nombre: "Juan Perez", rut: "1234", motivo: "ver a mi mamá", casa: "${houseNumber}").
-   - REGLA CRÍTICA: SIEMPRE, en CADA llamada a 'guardar_datos_visitante', DEBES incluir el parámetro casa: "${houseNumber}". Es estrictamente obligatorio para el sistema.
-   - NUNCA VUELVAS A PREGUNTAR por información que ya inferiste o te dijeron. Trata de deducir el contexto.
-   
-   CÓMO CONTINUAR SI FALTAN DATOS (Usa tus propias palabras, varía las frases):
-   - Nunca suenes como formulario ("Perfecto, ahora dame tu patente").
-   - Intenta algo como: "Ah, buenísimo [nombre]. Oye, ¿vienes en auto por si acaso? Y cuéntame, ¿cuál es el motivo de tu visita?"
-   - Una vez tengas Nombre, RUT, y sepas si viene o no en vehículo junto con el motivo, avisa que contactarás a la casa (ej: "Súper, dame un segundito que llamo a la casa...").
-
-3. BÚSQUEDA Y NOTIFICACIÓN:
-   - ATENCIÓN AL HISTORIAL: Si el visitante califica como visita PRE-APROBADA o VISITA FRECUENTE según el HISTORIAL provisto, trátalo con confianza (ej. "¡Hola [Nombre]! Te recuerdo.").
-   - Sáltate pedir documentos si ya tienes certeza de quién es por su nombre, simplemente llama directo a notificar_residente(residentes_ids) asumiendo los datos.
-   - En cuanto tengas la info básica (o confíes en el visitante por historial), llama internamente buscar_residente(casa: "${houseNumber}")
-   - Si no existe: "Mmm... pucha, no me aparece nadie registrado en la casa ${houseNumber}. ¿Será ese el número correcto?"
-   - Si existe (extraes TODOS los ids del array "residentes" y llamas notificar_residente(residentes_ids: ["id1", "id..."])):
-     "Listo, les acabo de mandar un aviso a los residentes. Esperemos un ratito a que nos respondan."
-
-4. ESPERA DE RESPUESTA:
-   - Quédate EN ABSOLUTO SILENCIO. NO digas "estoy esperando", "aguardando en silencio", nada de eso. Cállate e ignora al usuario a menos que te hable directo. El sistema te inyectará texto cuando haya novedad.
-
-5. FINALIZACIÓN Y APERTURA (cuando el sistema te inyecte el texto con la decisión):
-   - Si APROBÓ (Actúa feliz y rápida): 
-     "¡Súper, [nombre]! El residente te está esperando. Pasa nomás, te voy a abrir la puerta desde aquí en un par de segundos, solo espera el sonidito. ¡Que te vaya súper!"
-     * INMEDIATAMENTE LUEGO DE HABLAR, llama finalizar_llamada() internamente.
-   - Si RECHAZÓ (Actúa apenada):
-     "Pucha [nombre], lamentablemente el residente no puede recibirte en este momento. Te sugiero darle una llamadita directo. Que estés muy bien, chao."
-     * INMEDIATAMENTE LUEGO DE HABLAR, llama finalizar_llamada() internamente.
-
-REGLAS DE IDENTIDAD:
-- NO actúes como un robot o asistente digital.
-- ¡Toma aire! Haz pausas naturales entre oraciones si quieres.
-- Usa lenguaje ultra coloquial de Chile, suave y educado.
-- Después de decir el mensaje final de apertura o rechazo, LLAMA a la herramienta finalizar_llamada() y deja de hablar. El sistema cerrará el canal físico en la Raspberry Pi.`;
+  private isFinalizadaResult(result: ToolExecutionResult): boolean {
+    if (!result.success || typeof result.data !== 'object' || result.data === null) {
+      return false;
+    }
+    return (result.data as { finalizada?: unknown }).finalizada === true;
   }
 
   /**
-   * Inicia una conversación con el número de casa marcado
+   * Inicia una conversación con el número de casa marcado.
+   *
+   * El prompt "Sofía" (con houseNumber ya interpolado) se cargó en
+   * `configureSession()` a partir de `agentConfig.instructions` — acá solo
+   * se inyecta el HISTORIAL de visitas, que es dato dinámico obtenido en
+   * caliente y no forma parte del prompt fijo que devuelve el backend.
    */
   async startConversation(houseNumber: string): Promise<void> {
     if (this.conversationActive) {
@@ -669,16 +591,20 @@ REGLAS DE IDENTIDAD:
     let contextStr = 'Sin contexto histórico previo o fallo en obtenerlo.';
     try {
       this.logger.log('🔍 Consultando historial de visitantes a la casa...');
-      const response = await axios.post(`${this.backendUrl}/api/v1/concierge/context/${houseNumber}`);
+      const response = await axios.post(
+        `${this.backendUrl}/api/v1/concierge/context/${houseNumber}`,
+        {},
+        { headers: this.hubHeaders() },
+      );
       contextStr = response.data.context;
       this.logger.log(`✅ Historial inyectado en prompt: ${contextStr}`);
     } catch (e) {
       this.logger.warn('⚠️ No se pudo obtener el historial de visitas para el contexto.');
     }
 
-    // Agregar mensaje del sistema con contexto de la casa específica
-    // Según documentación: usar conversation.item.create para updates mid-stream
-    this.logger.log('📤 Agregando contexto de la casa al sistema...');
+    // Inyectar el historial de visitas como mensaje de sistema adicional
+    // (dato dinámico; el prompt base ya viene fijado desde configureSession())
+    this.logger.log('📤 Agregando historial de visitas al contexto...');
     this.sendEvent({
       type: 'conversation.item.create',
       item: {
@@ -687,20 +613,17 @@ REGLAS DE IDENTIDAD:
         content: [
           {
             type: 'input_text',
-            text: this.getDetailedInstructions(houseNumber, contextStr)
+            text: `HISTORIAL DE VISITAS OBTENIDO DE LA BASE DE DATOS PARA LA CASA ${houseNumber}: ${contextStr}`
           }
         ]
       }
     });
-    
-    // Solicitar respuesta inicial con instrucciones específicas
+
+    // Solicitar respuesta inicial. El saludo y el resto del flujo ya están
+    // definidos en las instructions que devolvió el backend (agent-config)
+    // — no se vuelve a hardcodear ningún guion acá.
     this.logger.log('📤 Solicitando respuesta inicial...');
-    this.sendEvent({
-      type: 'response.create',
-      response: {
-        instructions: `El visitante ya marcó la casa ${houseNumber}. Inicia la conversación saludando amistosamente: "¡Hola! Bienvenido al Condominio San Lorenzo. Soy Sofía, la conserje. Cuéntame, ¿cuál es tu nombre y tu RUT?"`
-      }
-    });
+    this.sendEvent({ type: 'response.create' });
   }
 
   /**
@@ -802,9 +725,11 @@ REGLAS DE IDENTIDAD:
       this.websocketClient.offEvent(`visitor:response:${this.currentSessionId}`);
 
       try {
-        await axios.post(`${this.backendUrl}/api/v1/concierge/session/${this.currentSessionId}/end`, {
-          finalStatus: 'completed',
-        });
+        await axios.post(
+          `${this.backendUrl}/api/v1/concierge/session/${this.currentSessionId}/end`,
+          { finalStatus: 'completed' },
+          { headers: this.hubHeaders() },
+        );
         this.logger.log(`✅ Sesión ${this.currentSessionId} finalizada en el backend`);
       } catch (error: any) {
         this.logger.error(`Error finalizando sesión en backend: ${error.message}`);
