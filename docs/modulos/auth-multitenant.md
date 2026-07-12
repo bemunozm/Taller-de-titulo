@@ -143,6 +143,14 @@ El `user` de better-auth es la fuente de verdad (opción C). **Una sola tabla `u
 - Verificado por Nova (test independiente): 2 condominios, **cada admin ve SOLO su data**, super-admin cross-tenant, RBAC 403, login legacy+módulos 200. Build limpio.
 - 🟠 **Pendiente para #21:** filtrado de `Visits`, filtrado de lectura en `detections`/`anomalies` (ya estampados), `Hub` (sin CRUD REST hoy).
 
+## 17. Tarea #21 — Hardening de seguridad ✅ (2026-07-11, verificado)
+Auditoría del cybersecurity-engineer (2🔴 · 3🟠 · 3🟡 · 5🔵) + fixes implementados y verificados por Nova. Postura: de "Necesita mejoras" → "Aceptable".
+- 🔴 **Ingesta cerrada:** `ServiceApiKeyGuard` (verifica `x-api-key` vía `verifyApiKey`) en `/detections/plates(+attempts)` y `/anomalies`; `/workers/ia-health` → `AuthGuard` (lo usa el frontend). Worker LPR (`lpr/settings.py`, `lpr/api/client.py`) manda `x-api-key` desde `LPR_SERVICE_API_KEY`. **Verificado: 401 sin key.** Cierra el riesgo #1 (abrir el portón sin auth).
+- 🔴 **JWT_SECRET:** eliminado el fallback `'yourSecretKey'`, fail-fast + `algorithms:['HS256']`. **Bug grave encontrado:** por orden de carga, `auth.module` firmaba los JWT con el secret hardcodeado ignorando el `.env` — arreglado con `import 'dotenv/config'`.
+- 🟠 Rate-limit: better-auth (`storage:'database'`) + `@nestjs/throttler` en login legacy (verificado 429 al 6º intento). `synchronize` solo en no-producción. `createServiceApiKey` restringe `targetUserId` (super-admin o misma org, verificado 403).
+- 🟡/🔵 Anti-enumeración en login legacy, `useSecureCookies`+https en prod, `helmet`, CORS validado, sin logs de PII.
+- **Deuda:** `lpr/.env` estaba trackeado con secretos (JWT legacy + `WORKER_MANAGER_SECRET`) → **desregistrado**, pero siguen en el historial de git → **ROTAR esos secretos**. Diferido: cajón `null` de tenant, Jest/ESM (bloquea tests), ~880 issues ESLint preexistentes.
+
 ## 16. Tarea #20 — Frontend a cookies: acoplamiento a resolver
 Al cutear el frontend de JWT/localStorage a cookies de better-auth, el login del navegador pasa a `POST /api/auth/sign-in/email` — que exige que el usuario tenga una **cuenta better-auth** (fila `account` con hash). Hoy: los usuarios de onboarding la obtienen al activar (reset flow crea el account); pero el `seed-admin` solo setea `user.password` (legacy). Antes/durante #20 hay que **darle al admin de dev una cuenta better-auth** (actualizar seed-admin) para que pueda loguear por cookie. El guard dual-mode ya soporta ambos, así que el backend no se rompe.
 

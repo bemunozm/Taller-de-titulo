@@ -4,6 +4,15 @@ Registro cronológico de conversaciones, decisiones y avances. Lo más reciente 
 
 ---
 
+## 2026-07-11 (cont. 9) — Fase 0 #21: review de seguridad + hardening ✅
+- Auditoría del cybersecurity-engineer (2🔴/3🟠/3🟡/5🔵) + fixes por senior-backend-engineer, revisado y verificado por Nova.
+- **Cerrado el riesgo #1**: los endpoints de ingesta que abrían el portón sin auth ahora exigen `apiKey` (ServiceApiKeyGuard) — verificado 401 sin key. Worker LPR cablea la key.
+- JWT_SECRET: fallback eliminado + fix de un bug grave (firmaba con el secret hardcodeado por orden de carga). Rate-limit, synchronize prod-safe, targetUserId restringido, anti-enumeración, helmet, secure cookies.
+- `lpr/.env` desregistrado (tenía secretos) → **ROTAR**. Detalle en [modulos/auth-multitenant.md §17](modulos/auth-multitenant.md#17-tarea-21--hardening-de-seguridad--2026-07-11-verificado).
+- **Fase 0: 6/7 (#15–#19, #21). Solo falta #20 (frontend→cookies), diferido para cuando Benjamin esté presente (cutover visible + acoplamiento §16).**
+
+---
+
 ## 2026-07-11 (cont. 8) — Fase 0 #19: multi-tenant ✅
 - Delegado a senior-backend-engineer, revisado y verificado por Nova (test de aislamiento independiente).
 - organization=condominio; tenant desde membresía; TenantInterceptor + helpers de scoping (super-admin bypass); `organizationId` en 10 entidades núcleo; módulo onboarding (condominios + members).
