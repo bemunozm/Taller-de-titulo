@@ -168,4 +168,72 @@ describe('HubGateway', () => {
       expect(delivered).toBe(0);
     });
   });
+
+  describe('sendToSession (limpieza post-auditoría, dedup DUP1)', () => {
+    /**
+     * Réplica del helper `connectHub` de arriba, en su propio describe para
+     * no acoplarse al estado de los tests de `sendToOrganization`.
+     */
+    async function connectHub(hubId: string, organizationId: string | null, secretHash: string, plaintextSecret: string) {
+      hubRepository.findOne.mockResolvedValueOnce(mockHub(hubId, organizationId, secretHash));
+      const socket = makeMockSocket(`sock-${hubId}`) as any;
+      await gateway.handleConnection({
+        ...socket,
+        handshake: { auth: { hubId, hubSecret: plaintextSecret } },
+      });
+      return socket;
+    }
+
+    it('dirige SOLO al hub propio de la sesión cuando está conectado (mismo criterio que tenía cada call-site duplicado)', async () => {
+      const socketOwn = await connectHub('hub-A', ORG_A, secretHashA, 'secret-hub-A');
+      const socketOther = await connectHub('hub-B', ORG_A, secretHashB, 'secret-hub-B');
+
+      gateway.sendToSession(
+        { hubId: 'hub-A', organizationId: ORG_A },
+        'hub:door_open',
+        { type: 'vehicular' },
+      );
+
+      expect(socketOwn.emit).toHaveBeenCalledWith('hub:door_open', { type: 'vehicular' });
+      expect(socketOther.emit).not.toHaveBeenCalledWith('hub:door_open', expect.anything());
+    });
+
+    it('cae a broadcast por organización cuando la sesión no tiene hubId asociado', async () => {
+      const socketA = await connectHub('hub-A', ORG_A, secretHashA, 'secret-hub-A');
+      const socketB = await connectHub('hub-B', ORG_B, secretHashB, 'secret-hub-B');
+
+      gateway.sendToSession(
+        { hubId: null, organizationId: ORG_A },
+        'hub:door_open',
+        { type: 'pedestrian' },
+      );
+
+      expect(socketA.emit).toHaveBeenCalledWith('hub:door_open', { type: 'pedestrian' });
+      expect(socketB.emit).not.toHaveBeenCalledWith('hub:door_open', expect.anything());
+    });
+
+    it('cae a broadcast por organización cuando el hubId de la sesión NO está conectado (p.ej. se cayó la conexión)', async () => {
+      const socketFallback = await connectHub('hub-A2', ORG_A, secretHashA, 'secret-hub-A');
+
+      gateway.sendToSession(
+        { hubId: 'hub-desconectado', organizationId: ORG_A },
+        'hub:door_open',
+        { type: 'vehicular' },
+      );
+
+      expect(socketFallback.emit).toHaveBeenCalledWith('hub:door_open', { type: 'vehicular' });
+    });
+
+    it('NUNCA hace broadcast global — sin organizationId y sin hub propio conectado, no entrega a nadie', async () => {
+      const socketA = await connectHub('hub-A', ORG_A, secretHashA, 'secret-hub-A');
+
+      gateway.sendToSession(
+        { hubId: null, organizationId: null },
+        'hub:door_open',
+        { type: 'vehicular' },
+      );
+
+      expect(socketA.emit).not.toHaveBeenCalledWith('hub:door_open', expect.anything());
+    });
+  });
 });

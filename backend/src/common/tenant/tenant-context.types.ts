@@ -32,3 +32,22 @@ export const EMPTY_TENANT_CONTEXT: TenantContext = {
   organizationId: null,
   isSuperAdmin: false,
 };
+
+/**
+ * Forma mínima que necesitan `DigitalConciergeService.findSessionForTenant` y
+ * `PendingActionsService.findForTenant`/`approve`/`reject` para revalidar
+ * tenant (limpieza post-auditoría, dedup DUP3 — antes vivía duplicada como
+ * interface local en ambos servicios).
+ *
+ * Usa el vocabulario del agente-cerebro (`tenantId`, NO `organizationId`) a
+ * propósito — mismo valor que `TenantContext.organizationId` pero con nombre
+ * distinto en este subsistema (ver docstring de
+ * `PendingActionsController.resolveTenantScope`, que traduce entre ambos
+ * vocabularios en el borde del controller). Cualquier objeto con estos dos
+ * campos (incluido un `AuthorizedContext` completo) es asignable acá por
+ * tipado estructural.
+ */
+export interface TenantScope {
+  tenantId: string | null;
+  isSuperAdmin: boolean;
+}

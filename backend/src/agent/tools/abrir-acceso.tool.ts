@@ -4,7 +4,7 @@ import { FamiliesService } from '../../families/families.service';
 import { DigitalConciergeService } from '../../digital-concierge/services/digital-concierge.service';
 import type { ConciergeSession } from '../../digital-concierge/entities/concierge-session.entity';
 import { HubGateway } from '../../hub/hub.gateway';
-import { VisitStatus } from '../../visits/entities/visit.entity';
+import { NON_TERMINAL_VISIT_STATUSES } from '../../visits/visits.constants';
 import { VisitsService } from '../../visits/visits.service';
 import type { AuthorizedContext } from '../types/authorized-context.type';
 import type { VigiliaTool } from '../types/vigilia-tool.type';
@@ -23,23 +23,6 @@ const outputSchema = z.object({
   mensaje: z.string(),
 });
 type AbrirAccesoOutput = z.infer<typeof outputSchema>;
-
-/**
- * Estados de `Visit` que cuentan como "acceso autorizado" para la política de
- * autonomía de abajo — MISMO set que `ACTIVE_STATUSES` de
- * `ConsultarVisitasTool` (docs/modulos/agente-cerebro.md §12): una visita
- * `PENDING` (el residente ya la pre-registró, el visitante aún no marca
- * entrada), `ACTIVE` (ya en curso) o `READY_FOR_REENTRY` (puede reingresar) es
- * "visita pre-aprobada" a efectos de abrir el acceso sin escalar. No se
- * extrae a un util compartido para no acoplar dos tools que hoy evolucionan
- * independiente — si un tercer consumidor necesita el mismo criterio, vale la
- * pena centralizarlo entonces (ver "deuda" en el reporte de la tarea).
- */
-const PRE_APPROVED_VISIT_STATUSES = new Set<VisitStatus>([
-  VisitStatus.PENDING,
-  VisitStatus.ACTIVE,
-  VisitStatus.READY_FOR_REENTRY,
-]);
 
 /**
  * CORRECCIÓN CRÍTICA (auditoría de seguridad, hallazgo F2.2 — "autoriza por
@@ -214,15 +197,7 @@ export class AbrirAccesoTool
       visitId: session.createdVisit?.id ?? null,
     };
 
-    if (session.hubId && this.hubGateway.isHubConnected(session.hubId)) {
-      this.hubGateway.sendToHub(session.hubId, hubEvent, payload);
-    } else {
-      this.hubGateway.sendToOrganization(
-        session.organizationId,
-        hubEvent,
-        payload,
-      );
-    }
+    this.hubGateway.sendToSession(session, hubEvent, payload);
 
     return {
       abierto: true,
@@ -303,7 +278,7 @@ export class AbrirAccesoTool
     const now = new Date();
 
     return visits.some((visit) => {
-      if (!PRE_APPROVED_VISIT_STATUSES.has(visit.status)) {
+      if (!NON_TERMINAL_VISIT_STATUSES.has(visit.status)) {
         return false;
       }
       if (!(visit.validFrom <= now && visit.validUntil >= now)) {

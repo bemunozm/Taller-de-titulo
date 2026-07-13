@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import { FamiliesService } from '../../families/families.service';
-import { VisitStatus } from '../../visits/entities/visit.entity';
+import { NON_TERMINAL_VISIT_STATUSES } from '../../visits/visits.constants';
 import { VisitsService } from '../../visits/visits.service';
 import type { AuthorizedContext } from '../types/authorized-context.type';
 import type { VigiliaTool } from '../types/vigilia-tool.type';
@@ -41,25 +41,19 @@ const outputSchema = z.object({
 });
 type ConsultarVisitasOutput = z.infer<typeof outputSchema>;
 
-const ACTIVE_STATUSES = new Set<VisitStatus>([
-  VisitStatus.PENDING,
-  VisitStatus.ACTIVE,
-  VisitStatus.READY_FOR_REENTRY,
-]);
-
 /**
  * Segunda `VigiliaTool` de consulta de Fase 2 (Bloque F2.1 —
  * docs/modulos/agente-cerebro.md §12). `access: 'read'`.
  *
- * SEGURIDAD: en ESTA rama `VisitsService` aún NO es tenant-aware (el fix
- * vive en el PR #50, no mergeado acá) — `findAll({ familyId })` no filtra por
- * `organizationId`. Por eso el `familyId` que se le pasa NUNCA sale del
- * input del modelo: se deriva EXCLUSIVAMENTE de `FamiliesService.findByDepartment`,
- * que sí es tenant-scoped (misma garantía que ya documenta
- * `BuscarResidenteTool` — su `findOne` interno aplica `scopeWhere` contra el
- * tenant de la request). Además, se re-valida explícitamente
- * `family.organizationId === ctx.tenantId` ANTES de listar sus visitas —
- * defensa en profundidad ante un cambio futuro en `FamiliesService` (mismo
+ * SEGURIDAD: `VisitsService` ya es tenant-aware (PR #50, en main) —
+ * `findAll({ familyId })` filtra por `organizationId` vía `TenantContextService`
+ * salvo que se pase `skipTenantScope`, que esta tool nunca pasa. Aun así, el
+ * `familyId` que se le pasa NUNCA sale del input del modelo: se deriva
+ * EXCLUSIVAMENTE de `FamiliesService.findByDepartment`, que también es
+ * tenant-scoped (misma garantía que ya documenta `BuscarResidenteTool` — su
+ * `findOne` interno aplica `scopeWhere` contra el tenant de la request).
+ * Además, se re-valida explícitamente `family.organizationId === ctx.tenantId`
+ * ANTES de listar sus visitas — defensa en profundidad por capas (mismo
  * criterio que el fix M1 de `NotificarResidenteTool`): un modelo nunca puede
  * alcanzar visitas de otro condominio pasando un identificador de casa,
  * porque nunca controla el `familyId` real usado en la consulta.
@@ -101,7 +95,7 @@ export class ConsultarVisitasTool
     const soloActivas = input.soloActivas ?? true;
     const allVisits = await this.visitsService.findAll({ familyId: family.id });
     const visits = soloActivas
-      ? allVisits.filter((visit) => ACTIVE_STATUSES.has(visit.status))
+      ? allVisits.filter((visit) => NON_TERMINAL_VISIT_STATUSES.has(visit.status))
       : allVisits;
 
     return {
