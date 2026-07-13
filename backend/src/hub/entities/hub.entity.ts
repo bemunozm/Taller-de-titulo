@@ -1,9 +1,28 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 
+/**
+ * Tipo de dispositivo que provisiona/autentica este `Hub` (tarea "kiosko web
+ * como device del condominio", 2026-07-12): hasta ahora todo `Hub` era
+ * implícitamente un `physical-hub` (Raspberry Pi con teclado/relés GPIO).
+ * `web-kiosk` modela el totem web de `/digital-concierge` como el MISMO tipo
+ * de credencial de máquina (mismo `secretHash`/`HubAuthGuard`) pero SIN
+ * control de GPIO/relés — ver `Hub.config`.
+ */
+export enum HubType {
+  PHYSICAL_HUB = 'physical-hub',
+  WEB_KIOSK = 'web-kiosk',
+}
+
 @Entity({ name: 'hubs' })
 export class Hub {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // Retrocompat (migración `AddTypeToHubs`): todo hub existente antes de esta
+  // columna quedó como `physical-hub` (default de columna) — eran, de hecho,
+  // Raspberry Pi físicas, así que el default no cambia su comportamiento real.
+  @Column({ type: 'enum', enum: HubType, default: HubType.PHYSICAL_HUB })
+  type: HubType;
 
   // Tarea #19 (docs/modulos/auth-multitenant.md §7). Se estampa en
   // `HubsService.provision` (Fase 1, Bloque A1.1, docs/modulos/agente-cerebro.md

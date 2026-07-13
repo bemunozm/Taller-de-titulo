@@ -12,6 +12,7 @@ import {
   SessionStatus,
 } from '../digital-concierge/entities/concierge-session.entity';
 import { DigitalConciergeService } from '../digital-concierge/services/digital-concierge.service';
+import { HubGateway } from '../hub/hub.gateway';
 import { LogsService } from '../logs/logs.service';
 import {
   NotificationPriority,
@@ -59,6 +60,11 @@ export class PendingActionsService {
     // escritura ya usan este mismo servicio, ver finalizar-llamada.tool.ts) y
     // `DigitalConciergeModule` ya exporta `DigitalConciergeService`.
     private readonly conciergeService: DigitalConciergeService,
+    // Aviso en vivo al visitante (ver `notifyVisitorLive` más abajo): MISMO
+    // gateway que ya inyecta `AbrirAccesoTool` (`HubModule` ya exportado y
+    // disponible en `AgentModule`, ver agent.module.ts) — ningún cambio de
+    // wiring de módulos necesario.
+    private readonly hubGateway: HubGateway,
   ) {}
 
   /**
@@ -244,6 +250,7 @@ export class PendingActionsService {
         Date.now() - startedAt,
       );
       await this.notifyResolution(action, tool, 'executed');
+      await this.notifyVisitorLive(action, 'approved');
 
       const finalAction = await this.repo.findOneOrFail({ where: { id } });
       return {
@@ -413,6 +420,7 @@ export class PendingActionsService {
 
     const rejected = await this.repo.findOneOrFail({ where: { id } });
     await this.notifyResolution(rejected, null, 'rejected');
+    await this.notifyVisitorLive(rejected, 'rejected');
     return rejected;
   }
 
@@ -513,6 +521,83 @@ export class PendingActionsService {
     } catch (error) {
       this.logger.error(
         `No se pudo notificar la resolución de la acción pendiente "${action.id}": ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Avisa EN VIVO al visitante que sigue en la llamada de citófono que su
+   * solicitud escalada fue resuelta — gap de UX cerrado en esta tarea: antes,
+   * `notifyResolution` solo avisaba a los conserjes (notificación in-app),
+   * nunca al agente de voz que sigue conversando con el visitante.
+   *
+   * Reusa EXACTAMENTE el mismo canal/patrón que
+   * `DigitalConciergeService.respondToVisitor` (`visitor:response:<sessionId>`,
+   * ver su docstring) y el mismo mecanismo de entrega que ya usa
+   * `AbrirAccesoTool` para dirigir un evento al hub de la llamada
+   * (`HubGateway.sendToHub` si el hub propio de la sesión está conectado, si
+   * no `sendToOrganization` — nunca un broadcast global, mismo criterio anti
+   * cross-tenant que el hallazgo H2). NO se agrega un canal nuevo: es el
+   * MISMO evento que ya escucha el cliente de voz
+   * (`vigilia-hub/src/services/websocket-client.service.ts`), así que Sofía
+   * puede reaccionar a la respuesta sin cambios en el hub.
+   *
+   * Best-effort por diseño (mismo criterio que `notifyResolution`/
+   * `notifyEscalation`): si la acción no tiene `sessionId` (canal de texto,
+   * sin llamada en curso), si la `ConciergeSession` ya no existe/no pertenece
+   * al tenant de la acción, o si ya no está `ACTIVE` (la llamada ya terminó),
+   * NO emite nada y NUNCA lanza — este aviso es una mejora de UX, jamás debe
+   * poder tumbar la aprobación/rechazo, que es la operación crítica.
+   */
+  private async notifyVisitorLive(
+    action: PendingAction,
+    outcome: 'approved' | 'rejected',
+  ): Promise<void> {
+    if (!action.sessionId) {
+      return;
+    }
+
+    try {
+      const session = await this.conciergeService.findSessionForTenant(
+        action.sessionId,
+        { tenantId: action.tenantId, isSuperAdmin: false },
+      );
+
+      if (session.status !== SessionStatus.ACTIVE) {
+        return;
+      }
+
+      const event = `visitor:response:${action.sessionId}`;
+      const payload = {
+        sessionId: action.sessionId,
+        pendingActionId: action.id,
+        toolName: action.toolName,
+        outcome,
+        message:
+          outcome === 'approved'
+            ? 'El residente autorizó la solicitud, procesando...'
+            : 'El residente rechazó la solicitud.',
+        timestamp: new Date(),
+      };
+
+      if (session.hubId && this.hubGateway.isHubConnected(session.hubId)) {
+        this.hubGateway.sendToHub(session.hubId, event, payload);
+      } else {
+        this.hubGateway.sendToOrganization(
+          session.organizationId,
+          event,
+          payload,
+        );
+      }
+    } catch (error) {
+      // No terminal: la sesión pudo cerrarse entre la escalada y la
+      // aprobación (`findSessionForTenant` lanza `NotFoundException`/
+      // `ForbiddenException` en ese caso) — se registra y se continúa, la
+      // aprobación/rechazo ya se resolvió antes de llegar acá.
+      this.logger.warn(
+        `No se pudo avisar en vivo al visitante de la sesión "${action.sessionId}" (acción pendiente "${action.id}"): ${
           error instanceof Error ? error.message : String(error)
         }`,
       );

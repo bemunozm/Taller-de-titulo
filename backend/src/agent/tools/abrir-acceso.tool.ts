@@ -176,12 +176,11 @@ export class AbrirAccesoTool
 
     const verifiedIdentity = await this.resolveVerifiedIdentity(session);
 
-    const hasVerifiedPreApprovedVisit =
-      await this.hasVerifiedPreApprovedVisit(
-        ctx,
-        session.destinationHouse,
-        verifiedIdentity,
-      );
+    const hasVerifiedPreApprovedVisit = await this.hasVerifiedPreApprovedVisit(
+      ctx,
+      session.destinationHouse,
+      verifiedIdentity,
+    );
 
     return !hasVerifiedPreApprovedVisit;
   };
@@ -256,11 +255,11 @@ export class AbrirAccesoTool
    * `session.verifiedQrCode`, poblados por el flujo que hoy conecta LPR/QR
    * con el hub), esta es la ÚNICA función que debe cambiar.
    */
-  private async resolveVerifiedIdentity(
+  private resolveVerifiedIdentity(
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- la sesión es el punto de extensión: cuando exista el vínculo real, se lee desde acá (ver DEUDA arriba).
     _session: ConciergeSession,
   ): Promise<VerifiedVisitorIdentity | null> {
-    return null;
+    return Promise.resolve(null);
   }
 
   /**

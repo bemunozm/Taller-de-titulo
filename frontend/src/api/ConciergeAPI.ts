@@ -53,6 +53,40 @@ export interface EndSessionResponse {
 }
 
 /**
+ * Credenciales de hub del kiosko-web (`web-kiosk`, aprovisionado vía
+ * `POST /hubs` en el backend — ver `frontend/.env.example`). El totem se
+ * autentica ante `ConciergeAuthGuard`/`HubAuthGuard` con los MISMOS headers
+ * que ya usa `vigilia-hub` (`X-Hub-Secret` + `X-Hub-Id`, ver
+ * `vigilia-hub/src/services/concierge-client.service.ts#hubHeaders`) — no un
+ * mecanismo nuevo. Se leen de env (`import.meta.env`, nunca hardcodeadas) y
+ * se validan acá para fallar temprano y explícito si el totem no fue
+ * provisionado, en vez de dejar que cada llamada reviente en un 401 opaco.
+ *
+ * NOTA DE SEGURIDAD: un secret embebido en el bundle web es extraíble por
+ * cualquiera con acceso al totem (DevTools, bundle servido, etc.). Es
+ * aceptable SOLO porque este kiosko es un dispositivo dedicado con acceso
+ * físico controlado (conserjería/entrada del condominio) — NUNCA usar este
+ * patrón para una vista pública accesible desde internet sin control físico.
+ */
+function getKioskHubHeaders(): Record<string, string> {
+  const hubId = import.meta.env.VITE_KIOSK_HUB_ID as string | undefined;
+  const hubSecret = import.meta.env.VITE_KIOSK_HUB_SECRET as string | undefined;
+
+  if (!hubId || !hubSecret) {
+    throw new Error(
+      'Faltan las credenciales de hub del kiosko (VITE_KIOSK_HUB_ID / VITE_KIOSK_HUB_SECRET). ' +
+        'El totem del conserje digital necesita estas variables de entorno para autenticarse ' +
+        'contra el backend — ver frontend/.env.example.'
+    );
+  }
+
+  return {
+    'X-Hub-Secret': hubSecret,
+    'X-Hub-Id': hubId,
+  };
+}
+
+/**
  * API para el sistema de Conserje Digital
  *
  * Fase 1, Bloque A1 (docs/modulos/agente-cerebro.md §7): antes usaba una
@@ -66,11 +100,16 @@ export interface EndSessionResponse {
  * FamilyAPI/UnitAPI/etc.) o quedarían en 401 pese a que el residente sí tiene
  * sesión.
  *
- * SUPUESTO PENDIENTE (reportado en la tarea): `startSession`/`executeTool`/
- * `endSession` los llama también el kiosko `DigitalConciergeView.tsx`, que
- * hoy es una ruta pública SIN login — para ese flujo, `withCredentials` no
- * alcanza (no hay sesión que enviar) y seguirá en 401 hasta que se agregue
- * un paso de autenticación al kiosko (cambio de frontend fuera de este bloque).
+ * RESUELTO (decisión de Benjamin, cierre fases 1-2): `startSession`/
+ * `getAgentConfig`/`executeTool`/`endSession` los llama el kiosko
+ * `DigitalConciergeView.tsx` — una vista pública SIN sesión de better-auth.
+ * En vez de agregarle login humano, el kiosko se trata como un DEVICE del
+ * condominio (tipo `web-kiosk`) con secret propio, y manda
+ * `X-Hub-Secret`/`X-Hub-Id` (vía `getKioskHubHeaders()`) para que
+ * `ConciergeAuthGuard` lo enrute a `HubAuthGuard` — el mismo camino que ya
+ * usa `vigilia-hub`. `respondToVisitor`/`checkSessionStatus` NO llevan estos
+ * headers: los sigue llamando un residente ya autenticado por cookie, no el
+ * kiosko.
  */
 export class ConciergeAPI {
   /**
@@ -78,10 +117,14 @@ export class ConciergeAPI {
    * Retorna el sessionId y el token efímero para WebRTC
    */
   static async startSession(socketId?: string): Promise<ConciergeSessionResponse> {
-    const response = await api.post('/concierge/session/start', {
-      metadata: navigator.userAgent, // Info del dispositivo
-      socketId, // Socket ID para notificaciones en tiempo real
-    });
+    const response = await api.post(
+      '/concierge/session/start',
+      {
+        metadata: navigator.userAgent, // Info del dispositivo
+        socketId, // Socket ID para notificaciones en tiempo real
+      },
+      { headers: getKioskHubHeaders() }
+    );
     return response.data;
   }
 
@@ -92,7 +135,11 @@ export class ConciergeAPI {
    * "clientes delgados").
    */
   static async getAgentConfig(houseNumber: string): Promise<AgentConfigResponse> {
-    const response = await api.post(`/concierge/agent-config/${houseNumber}`);
+    const response = await api.post(
+      `/concierge/agent-config/${houseNumber}`,
+      undefined,
+      { headers: getKioskHubHeaders() }
+    );
     return response.data;
   }
 
@@ -107,7 +154,8 @@ export class ConciergeAPI {
   ): Promise<ToolExecutionResponse> {
     const response = await api.post(
       `/concierge/session/${sessionId}/execute-tool`,
-      { toolName, parameters }
+      { toolName, parameters },
+      { headers: getKioskHubHeaders() }
     );
     return response.data;
   }
@@ -121,7 +169,8 @@ export class ConciergeAPI {
   ): Promise<EndSessionResponse> {
     const response = await api.post(
       `/concierge/session/${sessionId}/end`,
-      { finalStatus }
+      { finalStatus },
+      { headers: getKioskHubHeaders() }
     );
     return response.data;
   }

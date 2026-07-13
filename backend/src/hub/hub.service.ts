@@ -5,7 +5,7 @@ import { Repository } from 'typeorm';
 import { hashPassword } from '../auth/utils/auth.util';
 import { CreateHubDto } from './dto/create-hub.dto';
 import { UpdateHubDto } from './dto/update-hub.dto';
-import { Hub } from './entities/hub.entity';
+import { Hub, HubType } from './entities/hub.entity';
 
 /** Vista pública de un `Hub` — nunca incluye `secretHash`. */
 export type PublicHub = Omit<Hub, 'secretHash'>;
@@ -52,6 +52,9 @@ export class HubsService {
       location: dto.location,
       description: dto.description ?? null,
       organizationId: dto.organizationId,
+      // Retrocompat: sin `type` explícito, se asume `physical-hub` (todo hub
+      // provisionado antes de esta tarea era una Raspberry Pi física).
+      type: dto.type ?? HubType.PHYSICAL_HUB,
       secretHash: await hashPassword(secret),
       active: true,
     });

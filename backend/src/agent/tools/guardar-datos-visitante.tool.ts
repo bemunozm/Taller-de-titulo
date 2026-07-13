@@ -5,12 +5,32 @@ import type { AuthorizedContext } from '../types/authorized-context.type';
 import type { VigiliaTool } from '../types/vigilia-tool.type';
 
 const inputSchema = z.object({
-  nombre: z.string().min(1).optional().describe('Nombre completo del visitante.'),
-  rut: z.string().min(1).optional().describe('RUT o pasaporte del visitante, tal como lo dictó.'),
-  telefono: z.string().min(1).optional().describe('Teléfono de contacto del visitante.'),
-  patente: z.string().min(1).optional().describe('Patente del vehículo, si el visitante viene motorizado.'),
+  nombre: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('Nombre completo del visitante.'),
+  rut: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('RUT o pasaporte del visitante, tal como lo dictó.'),
+  telefono: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('Teléfono de contacto del visitante.'),
+  patente: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('Patente del vehículo, si el visitante viene motorizado.'),
   motivo: z.string().min(1).optional().describe('Motivo de la visita.'),
-  casa: z.string().min(1).optional().describe('Número/código de la casa o departamento de destino.'),
+  casa: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('Número/código de la casa o departamento de destino.'),
 });
 type GuardarDatosVisitanteInput = z.infer<typeof inputSchema>;
 
@@ -24,6 +44,14 @@ const outputSchema = z.object({
     motivo: z.string().nullable(),
     casa: z.string().nullable(),
   }),
+  // Cierre de brecha Fase 1 → Fase 2 (ver `DigitalConciergeService.saveVisitorData`
+  // y `common/utils/chilean-format.util.ts`): `ok: false` indica que uno de
+  // los campos declarados por voz (rut/telefono/patente) no pasó la
+  // validación de dominio y NO se guardó — `campo`/`mensaje` le dicen a
+  // Sofía (agent/prompts/sofia.prompt.ts) qué pedirle de nuevo al visitante.
+  ok: z.boolean(),
+  campo: z.enum(['rut', 'telefono', 'patente']).optional(),
+  mensaje: z.string().optional(),
 });
 type GuardarDatosVisitanteOutput = z.infer<typeof outputSchema>;
 
@@ -48,7 +76,8 @@ type GuardarDatosVisitanteOutput = z.infer<typeof outputSchema>;
  */
 @Injectable()
 export class GuardarDatosVisitanteTool
-  implements VigiliaTool<GuardarDatosVisitanteInput, GuardarDatosVisitanteOutput>
+  implements
+    VigiliaTool<GuardarDatosVisitanteInput, GuardarDatosVisitanteOutput>
 {
   readonly name = 'guardar_datos_visitante';
   readonly description =
@@ -75,7 +104,10 @@ export class GuardarDatosVisitanteTool
       );
     }
 
-    const session = await this.conciergeService.findSessionForTenant(ctx.sessionId, ctx);
+    const session = await this.conciergeService.findSessionForTenant(
+      ctx.sessionId,
+      ctx,
+    );
     return this.conciergeService.saveVisitorData(session, input);
   }
 }

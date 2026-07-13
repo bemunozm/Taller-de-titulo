@@ -68,20 +68,51 @@ export class DetectionsService {
     // `create()` solo instancia la entidad; `save()` persiste en la BD.
     const saved = await this.detectionsRepo.save(ent);
 
+    // FIX aislamiento cross-tenant en la apertura física autónoma del portón
+    // (rama feature/cierre-fases-1-2, hallazgo reportado): hasta acá, la
+    // búsqueda de vehículo/visita para decidir si abrir el portón se hacía
+    // con `skipTenantScope: true` (TODOS los condominios) — una visita o
+    // vehículo pre-aprobado del condominio B abría el portón físico del
+    // condominio A si una cámara de A leía esa patente. El `organizationId`
+    // de la CÁMARA (resource-derived, `saved.organizationId` arriba) es la
+    // fuente de tenant confiable en este flujo (el worker LPR no tiene
+    // `request.user`), así que se usa para acotar ambas búsquedas al MISMO
+    // condominio de la cámara — ver `VehiclesService.findByPlate` y
+    // `VisitsService.findByPlate`/`validateAccess`, que ahora aceptan este
+    // scope explícito además de `skipTenantScope`.
+    //
+    // Fail-closed: si la cámara no tiene organizationId (legacy, pre-tarea
+    // #19), no hay ningún tenant confiable con el cual acotar la búsqueda —
+    // abrir igual (o buscar sin scope) reintroduciría el mismo leak. Se
+    // deriva directo a aprobación manual del conserje, sin ejecutar ninguna
+    // búsqueda de vehículo/visita (createPendingDetectionForConcierge ya
+    // maneja bien organizationId === null, ver sendDetectionNotifications).
+    if (!saved.organizationId) {
+      this.logger.warn(
+        `Detección de patente ${dto.plate} en cámara sin organizationId (legacy, pre-tarea #19) — fail-closed, requiere aprobación manual del conserje`,
+      );
+      return await this.createPendingDetectionForConcierge(
+        saved,
+        'Cámara sin condominio asignado - requiere aprobación manual',
+      );
+    }
+
+    const cameraOrganizationId = saved.organizationId;
+
     // Validar acceso siguiendo este orden de prioridad:
     // 1. Vehículo residente registrado y activo
     // 2. Visita vehicular válida y dentro del período
     // 3. Auto check-in si es entrada (PENDING → ACTIVE)
     // 4. Auto check-out si es salida (ACTIVE → COMPLETED)
     // 5. Denegado en cualquier otro caso
-    
+
     let decision: string;
     let reason: string;
     let residente: User | null = null;
     let isExit = false; // Flag para identificar si es una salida
 
-    // 1. Verificar si es un vehículo registrado
-    const vehicle = await this.vehiclesService.findByPlate(dto.plate);
+    // 1. Verificar si es un vehículo registrado (scopeado al condominio de la cámara)
+    const vehicle = await this.vehiclesService.findByPlate(dto.plate, { organizationId: cameraOrganizationId });
     
     if (vehicle && vehicle.active) {
       // Verificar el tipo de vehículo
@@ -93,15 +124,15 @@ export class DetectionsService {
       } else if (vehicle.vehicleType === 'visitante' || vehicle.accessLevel === 'temporal') {
         // Vehículo de visitante, verificar si tiene visita válida
         try {
-          // Tarea de aislamiento tenant (branch fix/visits-tenant-isolation):
-          // este endpoint lo llama el worker LPR sin sesión de usuario
-          // (ServiceApiKeyGuard, no puebla request.user) — TenantContextService
-          // no puede resolver el condominio del caller. `skipTenantScope`
-          // preserva el comportamiento resource-derived existente (igual que
-          // resolveCameraOrganizationId arriba): la patente ya es el criterio
-          // de búsqueda, no hace falta acotar por tenant para no romper el
-          // flujo de apertura automática.
-          const visitValidation = await this.visitsService.validateAccess(dto.plate, 'plate', { skipTenantScope: true });
+          // Fix cross-tenant (rama feature/cierre-fases-1-2 — ver docstring
+          // grande arriba, sobre `saved`): el worker LPR sin sesión de
+          // usuario (ServiceApiKeyGuard, no puebla request.user) no puede
+          // resolver el tenant vía TenantContextService, pero SÍ conoce el
+          // organizationId de la cámara (resource-derived). Se acota la
+          // búsqueda de la visita a ESE condominio en vez de saltarse el
+          // scoping (antes `skipTenantScope: true` buscaba en TODOS los
+          // condominios — la causa raíz del leak).
+          const visitValidation = await this.visitsService.validateAccess(dto.plate, 'plate', { organizationId: cameraOrganizationId });
 
           if (visitValidation.valid && visitValidation.visit) {
             const visit = visitValidation.visit;
@@ -111,14 +142,14 @@ export class DetectionsService {
             // Determinar si es entrada o salida basado en el estado de la visita
             if (visit.status === 'pending' || visit.status === 'ready') {
               // Entrada: Visita pendiente o lista para reingreso → registrar check-in
-              await this.visitsService.checkIn(visit.id, { skipTenantScope: true });
+              await this.visitsService.checkIn(visit.id, { organizationId: cameraOrganizationId });
               reason = visit.status === 'pending'
                 ? `Entrada autorizada - ${visit.visitorName}`
                 : `Reingreso autorizado - ${visit.visitorName}`;
               isExit = false;
             } else if (visit.status === 'active') {
               // Salida: Visita activa → registrar check-out
-              await this.visitsService.checkOut(visit.id, { skipTenantScope: true });
+              await this.visitsService.checkOut(visit.id, { organizationId: cameraOrganizationId });
               reason = `Salida registrada - ${visit.visitorName}`;
               isExit = true;
             } else {
@@ -144,9 +175,9 @@ export class DetectionsService {
     } else if (!vehicle) {
       // No existe el vehículo, verificar si hay una visita programada
       try {
-        // Ver comentario equivalente más arriba: worker LPR sin sesión de
-        // usuario, bypass explícito del scoping por tenant.
-        const visitValidation = await this.visitsService.validateAccess(dto.plate, 'plate', { skipTenantScope: true });
+        // Ver comentario equivalente más arriba: mismo fix cross-tenant,
+        // scopeado explícitamente al condominio de la cámara.
+        const visitValidation = await this.visitsService.validateAccess(dto.plate, 'plate', { organizationId: cameraOrganizationId });
 
         if (visitValidation.valid && visitValidation.visit) {
           const visit = visitValidation.visit;
@@ -156,14 +187,14 @@ export class DetectionsService {
           // Determinar si es entrada o salida basado en el estado de la visita
           if (visit.status === 'pending' || visit.status === 'ready') {
             // Entrada: Visita pendiente o lista para reingreso → registrar check-in
-            await this.visitsService.checkIn(visit.id, { skipTenantScope: true });
+            await this.visitsService.checkIn(visit.id, { organizationId: cameraOrganizationId });
             reason = visit.status === 'pending'
               ? `Entrada autorizada - ${visit.visitorName}`
               : `Reingreso autorizado - ${visit.visitorName}`;
             isExit = false;
           } else if (visit.status === 'active') {
             // Salida: Visita activa → registrar check-out
-            await this.visitsService.checkOut(visit.id, { skipTenantScope: true });
+            await this.visitsService.checkOut(visit.id, { organizationId: cameraOrganizationId });
             reason = `Salida registrada - ${visit.visitorName}`;
             isExit = true;
           } else {
@@ -210,7 +241,7 @@ export class DetectionsService {
     }
 
     // Enviar notificaciones según el tipo de detección
-    await this.sendDetectionNotifications(dto.plate, decision, reason, isExit, residente, vehicle);
+    await this.sendDetectionNotifications(dto.plate, decision, reason, isExit, residente, vehicle, saved.organizationId);
 
     // AUTO-APERTURA INTEGRADADA AL HUB:
     // Si la placa está autorizada, mandamos evento directo a la Raspberry Pi saltándonos a Sofía
@@ -316,6 +347,15 @@ export class DetectionsService {
    * Enviar notificaciones de detección según el tipo de vehículo
    * - Si es un vehículo de visita: notificar a la familia y al conserje
    * - Cualquier otra detección: notificar solo al conserje
+   *
+   * Fix cross-tenant (mismo leak que `createPendingDetectionForConcierge`,
+   * cerrado en el mismo follow-up): notificar a los conserjes vía
+   * `notifyByRoleForOrganization` (filtra por la tabla `member`) en vez de
+   * `notifyByRole`, que ignora la organización y llegaba a los conserjes de
+   * TODOS los condominios en CADA detección de patente (no solo las
+   * pendientes). El aviso directo al host (`notificationsService.create` más
+   * abajo) no necesita este scoping: va a un `recipientId` puntual ya
+   * resuelto (el residente/host de la visita), no es un broadcast por rol.
    */
   private async sendDetectionNotifications(
     plate: string,
@@ -324,24 +364,26 @@ export class DetectionsService {
     isExit: boolean,
     residente: User | null,
     vehicle: any,
+    organizationId: string | null,
   ) {
     try {
       const action = isExit ? 'salida' : 'entrada';
       const actionCapitalized = isExit ? 'Salida' : 'Entrada';
-      
+
       // Determinar el tipo de notificación según la decisión
-      const notificationType = decision === 'Permitido' 
-        ? NotificationType.VEHICLE_DETECTED 
+      const notificationType = decision === 'Permitido'
+        ? NotificationType.VEHICLE_DETECTED
         : NotificationType.UNKNOWN_VEHICLE;
 
       // Prioridad alta para accesos denegados, normal para permitidos
-      const priority = decision === 'Permitido' 
-        ? NotificationPriority.NORMAL 
+      const priority = decision === 'Permitido'
+        ? NotificationPriority.NORMAL
         : NotificationPriority.HIGH;
 
       // Si el vehículo es de tipo visitante y hay un residente (host) asociado
       if (vehicle?.vehicleType === 'visitante' && residente) {
-        // Notificar solo al host (creador de la visita)
+        // Notificar solo al host (creador de la visita) — recipientId puntual,
+        // no un broadcast por rol, no requiere scoping por organización.
         await this.notificationsService.create({
           recipientId: residente.id,
           type: notificationType,
@@ -356,20 +398,33 @@ export class DetectionsService {
             detectionType: 'visit',
           },
         });
-        
+
         this.logger.log(`Notificación de visita enviada al host para patente ${plate}`);
       }
 
-      // Siempre notificar a todos los conserjes
-      await this.notificationsService.notifyByRole(
-        'Conserje',
-        notificationType,
-        `Detección de Vehículo - ${actionCapitalized}`,
-        `Se detectó la ${action} del vehículo con patente ${plate}. Decisión: ${decision}. ${reason}`,
-        { priority },
-      );
+      // Notificar a los conserjes del MISMO condominio que la detección.
+      // Fail-closed en cámaras legacy sin organización asignada
+      // (organizationId === null, pre-tarea #19): en vez de dejar que
+      // `notifyByRoleForOrganization` compare "null === null" (que en teoría
+      // podría calzar con un conserje sin membresía registrada), se opta
+      // explícitamente por NO notificar a nadie — preferible a arriesgar un
+      // broadcast o un match accidental cross-tenant.
+      if (organizationId === null) {
+        this.logger.warn(
+          `Detección de patente ${plate} sin organizationId (cámara legacy) — no se notifica a conserjes (fail-closed)`,
+        );
+      } else {
+        await this.notificationsService.notifyByRoleForOrganization(
+          'Conserje',
+          organizationId,
+          notificationType,
+          `Detección de Vehículo - ${actionCapitalized}`,
+          `Se detectó la ${action} del vehículo con patente ${plate}. Decisión: ${decision}. ${reason}`,
+          { priority },
+        );
 
-      this.logger.log(`Notificación enviada a conserjes para detección ${plate}`);
+        this.logger.log(`Notificación enviada a conserjes para detección ${plate}`);
+      }
     } catch (error) {
       this.logger.error(`Error al enviar notificaciones de detección: ${error.message}`, error.stack);
       // No lanzar el error para no interrumpir el flujo de detección
@@ -412,9 +467,15 @@ export class DetectionsService {
       );
     }
     
-    // Notificar a todos los conserjes
-    const notifications = await this.notificationsService.notifyByRole(
+    // Fix cross-tenant (follow-up post-auditoría Fase 0/1): notificar SOLO a
+    // los conserjes del condominio de la detección (vía `notifyByRoleForOrganization`,
+    // que filtra por la tabla `member`) — antes se usaba `notifyByRole`, que
+    // notifica a TODOS los conserjes de la plataforma sin importar su
+    // organización, filtrando conserjes de otros condominios con la
+    // detección pendiente de otro.
+    const notifications = await this.notificationsService.notifyByRoleForOrganization(
       'Conserje',
+      detection.organizationId,
       NotificationType.UNKNOWN_VEHICLE,
       'Vehículo No Reconocido - Requiere Aprobación',
       `Se detectó el vehículo con patente ${detection.plate}. ${reason}. Por favor, revisa y toma una decisión.`,

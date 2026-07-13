@@ -3,7 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { HubAuthGuard } from './hub-auth.guard';
-import { Hub } from '../entities/hub.entity';
+import { Hub, HubType } from '../entities/hub.entity';
 import { hashPassword } from '../../auth/utils/auth.util';
 
 /**
@@ -59,6 +59,16 @@ describe('HubAuthGuard', () => {
 
     const ctx = makeContext({ 'x-hub-id': 'hub-A', 'x-hub-secret': 'secret-hub-A' });
     await expect(guard.canActivate(ctx)).resolves.toBe(true);
+  });
+
+  it('autentica un hub type="web-kiosk" igual que un physical-hub (el type no participa en la autenticación)', async () => {
+    hubRepository.findOne.mockResolvedValue(mockHub({ hubId: 'kiosk-A', type: HubType.WEB_KIOSK }));
+
+    const ctx = makeContext({ 'x-hub-id': 'kiosk-A', 'x-hub-secret': 'secret-hub-A' });
+    await expect(guard.canActivate(ctx)).resolves.toBe(true);
+
+    const request = (ctx.switchToHttp().getRequest as () => any)();
+    expect(request.hub).toEqual({ hubId: 'kiosk-A', organizationId: '11111111-1111-4111-8111-111111111111' });
   });
 
   it('rechaza cuando el hubId anunciado no coincide con el dueño del secret (impersonación)', async () => {

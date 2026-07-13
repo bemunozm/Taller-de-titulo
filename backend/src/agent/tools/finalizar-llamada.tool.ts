@@ -62,6 +62,7 @@ export class FinalizarLlamadaTool
 
   async execute(
     ctx: AuthorizedContext,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- firma exigida por VigiliaTool.execute; el inputSchema es z.object({}), no hay input real que leer.
     _input: FinalizarLlamadaInput,
   ): Promise<FinalizarLlamadaOutput> {
     if (!ctx.sessionId) {
@@ -74,7 +75,10 @@ export class FinalizarLlamadaTool
     // de tools de escritura de este bloque) — endSession() en sí no es
     // tenant-aware (opera solo por sessionId), así que la defensa vive acá.
     await this.conciergeService.findSessionForTenant(ctx.sessionId, ctx);
-    await this.conciergeService.endSession(ctx.sessionId, SessionStatus.COMPLETED);
+    await this.conciergeService.endSession(
+      ctx.sessionId,
+      SessionStatus.COMPLETED,
+    );
 
     return {
       finalizada: true,

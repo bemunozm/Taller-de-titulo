@@ -18,6 +18,7 @@ import {
   ConciergeSession,
   SessionStatus,
 } from '../digital-concierge/entities/concierge-session.entity';
+import { HubGateway } from '../hub/hub.gateway';
 import type { AuthorizedContext } from './types/authorized-context.type';
 import type { VigiliaTool } from './types/vigilia-tool.type';
 
@@ -82,6 +83,9 @@ describe('PendingActionsService', () => {
   let conciergeService: jest.Mocked<
     Pick<DigitalConciergeService, 'findSessionForTenant'>
   >;
+  let hubGateway: jest.Mocked<
+    Pick<HubGateway, 'isHubConnected' | 'sendToHub' | 'sendToOrganization'>
+  >;
   let idCounter: number;
 
   const baseCtx: AuthorizedContext = {
@@ -99,6 +103,7 @@ describe('PendingActionsService', () => {
     sessionId: 'session-1',
     status: SessionStatus.ACTIVE,
     organizationId: 'condo-A',
+    hubId: null,
   } as ConciergeSession;
 
   function makeTool(
@@ -167,6 +172,11 @@ describe('PendingActionsService', () => {
     conciergeService = {
       findSessionForTenant: jest.fn().mockResolvedValue(activeSession),
     };
+    hubGateway = {
+      isHubConnected: jest.fn().mockReturnValue(false),
+      sendToHub: jest.fn().mockReturnValue(true),
+      sendToOrganization: jest.fn(),
+    };
 
     service = new PendingActionsService(
       repo as unknown as Repository<PendingAction>,
@@ -174,6 +184,7 @@ describe('PendingActionsService', () => {
       notificationsService as unknown as NotificationsService,
       logsService as unknown as LogsService,
       conciergeService as unknown as DigitalConciergeService,
+      hubGateway as unknown as HubGateway,
     );
   });
 
@@ -564,6 +575,151 @@ describe('PendingActionsService', () => {
         expect.any(String),
         expect.anything(),
       );
+    });
+  });
+
+  /**
+   * Gap de UX cerrado en esta tarea: hasta ahora `approve`/`reject` solo
+   * notificaban a los conserjes (in-app) — el visitante que sigue en la
+   * llamada de citófono nunca se enteraba en vivo. `notifyVisitorLive` reusa
+   * el MISMO canal (`visitor:response:<sessionId>`) y mecanismo
+   * (`HubGateway.sendToHub`/`sendToOrganization`) que
+   * `DigitalConciergeService.respondToVisitor` — acá se mockea `HubGateway`
+   * directo (mismo patrón que `abrir-acceso.tool.spec.ts`), NO
+   * `DigitalConciergeService.respondToVisitor`.
+   */
+  describe('aviso en vivo al visitante (visitor:response:<sessionId>)', () => {
+    it('approve() con sessionId y sesión ACTIVE emite visitor:response:<sessionId> con outcome "approved"', async () => {
+      const tool = makeTool();
+      toolRegistry.get.mockReturnValue(tool);
+      const action = await service.create(tool, baseCtx, { x: 'a' }); // baseCtx.sessionId === 'session-1'
+
+      await service.approve(
+        action.id,
+        { tenantId: 'condo-A', isSuperAdmin: false },
+        'user-1',
+      );
+
+      expect(hubGateway.sendToOrganization).toHaveBeenCalledWith(
+        'condo-A',
+        'visitor:response:session-1',
+        expect.objectContaining({
+          sessionId: 'session-1',
+          outcome: 'approved',
+          toolName: 'abrir_porton_test',
+        }),
+      );
+      expect(hubGateway.sendToHub).not.toHaveBeenCalled();
+    });
+
+    it('approve() dirige el evento al hub propio de la sesión cuando está conectado (mismo criterio que abrir_acceso)', async () => {
+      conciergeService.findSessionForTenant.mockResolvedValue({
+        ...activeSession,
+        hubId: 'hub-1',
+      } as ConciergeSession);
+      hubGateway.isHubConnected.mockReturnValue(true);
+
+      const tool = makeTool();
+      toolRegistry.get.mockReturnValue(tool);
+      const action = await service.create(tool, baseCtx, { x: 'a' });
+
+      await service.approve(
+        action.id,
+        { tenantId: 'condo-A', isSuperAdmin: false },
+        'user-1',
+      );
+
+      expect(hubGateway.sendToHub).toHaveBeenCalledWith(
+        'hub-1',
+        'visitor:response:session-1',
+        expect.objectContaining({ outcome: 'approved' }),
+      );
+      expect(hubGateway.sendToOrganization).not.toHaveBeenCalled();
+    });
+
+    it('reject() con sessionId y sesión ACTIVE emite visitor:response:<sessionId> con outcome "rejected"', async () => {
+      const tool = makeTool();
+      const action = await service.create(tool, baseCtx, { x: 'a' });
+
+      await service.reject(
+        action.id,
+        { tenantId: 'condo-A', isSuperAdmin: false },
+        'user-1',
+      );
+
+      expect(hubGateway.sendToOrganization).toHaveBeenCalledWith(
+        'condo-A',
+        'visitor:response:session-1',
+        expect.objectContaining({
+          sessionId: 'session-1',
+          outcome: 'rejected',
+        }),
+      );
+    });
+
+    it('acciones sin sessionId (canal de texto): approve()/reject() no emiten nada', async () => {
+      const ctxSinSesion: AuthorizedContext = {
+        ...baseCtx,
+        sessionId: undefined,
+      };
+
+      const tool1 = makeTool();
+      toolRegistry.get.mockReturnValue(tool1);
+      const approved = await service.create(tool1, ctxSinSesion, { x: 'a' });
+      await service.approve(
+        approved.id,
+        { tenantId: 'condo-A', isSuperAdmin: false },
+        'user-1',
+      );
+
+      const tool2 = makeTool();
+      const rejected = await service.create(tool2, ctxSinSesion, { x: 'b' });
+      await service.reject(
+        rejected.id,
+        { tenantId: 'condo-A', isSuperAdmin: false },
+        'user-1',
+      );
+
+      expect(hubGateway.sendToHub).not.toHaveBeenCalled();
+      expect(hubGateway.sendToOrganization).not.toHaveBeenCalled();
+      expect(conciergeService.findSessionForTenant).not.toHaveBeenCalled();
+    });
+
+    it('sesión ya no ACTIVE al momento de avisar: no emite (best-effort, no rompe el reject)', async () => {
+      const tool = makeTool();
+      const action = await service.create(tool, baseCtx, { x: 'a' });
+      conciergeService.findSessionForTenant.mockResolvedValue({
+        ...activeSession,
+        status: SessionStatus.COMPLETED,
+      } as ConciergeSession);
+
+      const rejected = await service.reject(
+        action.id,
+        { tenantId: 'condo-A', isSuperAdmin: false },
+        'user-1',
+      );
+
+      expect(rejected.status).toBe(PendingActionStatus.REJECTED);
+      expect(hubGateway.sendToHub).not.toHaveBeenCalled();
+      expect(hubGateway.sendToOrganization).not.toHaveBeenCalled();
+    });
+
+    it('la sesión ya no existe/no pertenece al tenant al momento de avisar: no emite ni rompe el reject', async () => {
+      const tool = makeTool();
+      const action = await service.create(tool, baseCtx, { x: 'a' });
+      conciergeService.findSessionForTenant.mockRejectedValue(
+        new NotFoundException('sesión no encontrada'),
+      );
+
+      const rejected = await service.reject(
+        action.id,
+        { tenantId: 'condo-A', isSuperAdmin: false },
+        'user-1',
+      );
+
+      expect(rejected.status).toBe(PendingActionStatus.REJECTED);
+      expect(hubGateway.sendToHub).not.toHaveBeenCalled();
+      expect(hubGateway.sendToOrganization).not.toHaveBeenCalled();
     });
   });
 });

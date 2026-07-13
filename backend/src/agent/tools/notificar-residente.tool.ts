@@ -68,7 +68,10 @@ export class NotificarResidenteTool
       );
     }
 
-    const session = await this.conciergeService.findSessionForTenant(ctx.sessionId, ctx);
+    const session = await this.conciergeService.findSessionForTenant(
+      ctx.sessionId,
+      ctx,
+    );
     return this.conciergeService.notifyResident(session, input, ctx);
   }
 }

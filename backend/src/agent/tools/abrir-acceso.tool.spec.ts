@@ -125,7 +125,10 @@ describe('AbrirAccesoTool', () => {
       | null,
   ): jest.SpyInstance {
     return jest
-      .spyOn(tool as unknown as { resolveVerifiedIdentity: unknown }, 'resolveVerifiedIdentity' as never)
+      .spyOn(
+        tool as unknown as { resolveVerifiedIdentity: unknown },
+        'resolveVerifiedIdentity' as never,
+      )
       .mockResolvedValue(identity as never);
   }
 

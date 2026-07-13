@@ -1,10 +1,11 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan, MoreThan } from 'typeorm';
+import { Repository, LessThan, MoreThan, FindOptionsWhere } from 'typeorm';
 import { Visit, VisitType, VisitStatus } from './entities/visit.entity';
 import { CreateVisitDto } from './dto/create-visit.dto';
 import { UpdateVisitDto } from './dto/update-visit.dto';
 import { UsersService } from '../users/users.service';
+import { User } from '../users/entities/user.entity';
 import { FamiliesService } from '../families/families.service';
 import { VehiclesService } from '../vehicles/vehicles.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -12,6 +13,7 @@ import { NotificationType } from '../notifications/entities/notification.entity'
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { TenantContextService } from '../common/tenant/tenant-context.service';
 import { scopeWhere, applyTenantFilter, stampOrganizationId } from '../common/tenant/tenant-context.util';
+import type { TenantContext } from '../common/tenant/tenant-context.types';
 import * as crypto from 'crypto';
 
 /**
@@ -32,9 +34,29 @@ import * as crypto from 'crypto';
  * DigitalConciergeService) — mismo criterio que
  * `CamerasService.resolveCameraByIdOrMount`/`getCameraByIdOrMount`, dejados
  * deliberadamente sin scoping por la misma razón (ver su docstring).
+ *
+ * FIX aislamiento cross-tenant en apertura autónoma del portón (rama
+ * feature/cierre-fases-1-2, hallazgo reportado sobre `skipTenantScope`):
+ * `skipTenantScope` es un bypass TOTAL — sirve para el Conserje Digital, que
+ * NO tiene ningún tenant confiable que ofrecer (visitante anónimo en el
+ * citófono). El worker LPR SÍ tiene un tenant confiable — el `organizationId`
+ * de la CÁMARA que detectó la patente (resource-derived, ver
+ * `DetectionsService.resolveCameraOrganizationId`) — así que en vez de saltar
+ * el scoping por completo, `organizationId` acota la búsqueda a ESE
+ * condominio específico. `DetectionsService.createDetection` pasa este campo
+ * en vez de `skipTenantScope` para las búsquedas de vehículo/visita del
+ * camino de apertura física; `skipTenantScope` queda reservado para los
+ * call-sites que de verdad no pueden determinar ningún tenant.
  */
 interface TenantScopeOptions {
   skipTenantScope?: boolean;
+  /**
+   * Scope explícito por organizationId — tiene prioridad sobre
+   * `skipTenantScope` si ambos vinieran seteados (no debería pasar en la
+   * práctica). Reutiliza `applyTenantFilter`/`scopeWhere` construyendo un
+   * `TenantContext` sintético `{ organizationId, isSuperAdmin: false }`.
+   */
+  organizationId?: string;
 }
 
 @Injectable()
@@ -64,9 +86,18 @@ export class VisitsService {
    * controller.
    */
   private async loadVisitEntity(id: string, options?: TenantScopeOptions): Promise<Visit> {
-    const where = options?.skipTenantScope
-      ? { id }
-      : scopeWhere({ id }, await this.tenantContext.getContext());
+    let where: FindOptionsWhere<Visit> | FindOptionsWhere<Visit>[];
+    if (options?.organizationId) {
+      // Defense-in-depth: aunque el `id` ya fue resuelto por un
+      // findByPlate/findByQRCode previamente scopeado, se re-verifica el
+      // organizationId al cargar por id (p.ej. checkIn/checkOut del camino
+      // LPR, ver DetectionsService).
+      where = { id, organizationId: options.organizationId };
+    } else if (options?.skipTenantScope) {
+      where = { id };
+    } else {
+      where = scopeWhere({ id }, await this.tenantContext.getContext());
+    }
 
     const visit = await this.visitRepository.findOne({
       where,
@@ -78,6 +109,39 @@ export class VisitsService {
     }
 
     return visit;
+  }
+
+  /**
+   * Fix de seguridad (follow-up post-auditoría Fase 0/1, ver
+   * docs/modulos/auth-multitenant.md): `UsersService.findOne` que resuelve el
+   * host NO está scopeado por tenant (a propósito — lo usan flujos internos
+   * de todo tipo). Sin esta validación, un admin del condominio A podía pasar
+   * un `hostId` de un usuario del condominio B y `create`/`update` terminaban
+   * atribuyendo el recurso a B (la familia del host manda sobre el
+   * organizationId, ver docstring de `create`).
+   *
+   * Mismo criterio que el "Fix M1" de
+   * `DigitalConciergeService` (comparar `host.family?.organizationId` contra
+   * el tenant del creador) — pero acá SOLO se aplica cuando hay un creador
+   * humano autenticado con organización concreta
+   * (`!ctx.isSuperAdmin && ctx.organizationId !== null`). Los flujos SIN
+   * sesión de usuario (Conserje Digital citofono, worker LPR) resuelven
+   * `TenantContextService.getContext()` como `EMPTY_TENANT_CONTEXT`
+   * (`organizationId: null`) — para ellos no hay "creador" que validar, el
+   * tenant se deriva enteramente del recurso (familia del host), así que la
+   * validación se salta sin romper esos call-sites.
+   */
+  private assertHostBelongsToCreatorTenant(host: User, ctx: TenantContext): void {
+    if (ctx.isSuperAdmin || ctx.organizationId === null) {
+      return;
+    }
+
+    const hostOrganizationId = host.family?.organizationId ?? null;
+    if (hostOrganizationId !== ctx.organizationId) {
+      throw new ForbiddenException(
+        'El anfitrión seleccionado pertenece a otro condominio',
+      );
+    }
   }
 
   /**
@@ -99,6 +163,11 @@ export class VisitsService {
     if (!host) {
       throw new NotFoundException(`Usuario anfitrión con ID ${hostId} no encontrado`);
     }
+
+    // Fix cross-tenant (ver docstring de assertHostBelongsToCreatorTenant):
+    // rechazar si el host resuelto no pertenece al condominio del creador.
+    const creatorCtx = await this.tenantContext.getContext();
+    this.assertHostBelongsToCreatorTenant(host, creatorCtx);
 
     // Asignar automáticamente la familia del anfitrión
     const family = host.family || null;
@@ -130,7 +199,7 @@ export class VisitsService {
     // `request.user`), así que la familia del host (que si vive en un
     // condominio ya tiene su `organizationId`, scopeado desde Fase 0) es la
     // única fuente confiable en ambos casos.
-    const ctx = await this.tenantContext.getContext();
+    const ctx = creatorCtx;
     stampOrganizationId(visit, { ...ctx, organizationId: family?.organizationId ?? ctx.organizationId });
 
     // Generar código QR único para TODAS las visitas (peatonales y vehiculares)
@@ -287,7 +356,13 @@ export class VisitsService {
       .andWhere('visit.validFrom <= :now', { now: new Date() })
       .andWhere('visit.validUntil >= :now', { now: new Date() });
 
-    if (!options?.skipTenantScope) {
+    if (options?.organizationId) {
+      // Camino LPR (ver DetectionsService.createDetection): acota la
+      // búsqueda al condominio de la CÁMARA que detectó la patente —
+      // reutiliza applyTenantFilter con un TenantContext sintético en vez de
+      // buscar la patente en TODOS los condominios (fix cross-tenant).
+      applyTenantFilter(query, 'visit', { organizationId: options.organizationId, isSuperAdmin: false });
+    } else if (!options?.skipTenantScope) {
       const ctx = await this.tenantContext.getContext();
       applyTenantFilter(query, 'visit', ctx);
     }
@@ -364,6 +439,14 @@ export class VisitsService {
       if (!host) {
         throw new NotFoundException(`Usuario anfitrión con ID ${updateVisitDto.hostId} no encontrado`);
       }
+
+      // Fix cross-tenant (ver docstring de assertHostBelongsToCreatorTenant):
+      // mismo criterio que en `create` — el único caller de `update` es
+      // VisitsController (autenticado), así que `ctx` siempre refleja al
+      // creador humano cuando corresponde validar.
+      const updaterCtx = await this.tenantContext.getContext();
+      this.assertHostBelongsToCreatorTenant(host, updaterCtx);
+
       visit.host = host;
 
       // Actualizar automáticamente la familia del nuevo anfitrión

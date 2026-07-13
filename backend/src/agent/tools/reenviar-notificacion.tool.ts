@@ -43,6 +43,7 @@ export class ReenviarNotificacionTool
 
   async execute(
     ctx: AuthorizedContext,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- firma exigida por VigiliaTool.execute; el inputSchema es z.object({}), no hay input real que leer.
     _input: ReenviarNotificacionInput,
   ): Promise<ReenviarNotificacionOutput> {
     if (!ctx.sessionId) {
@@ -51,7 +52,10 @@ export class ReenviarNotificacionTool
       );
     }
 
-    const session = await this.conciergeService.findSessionForTenant(ctx.sessionId, ctx);
+    const session = await this.conciergeService.findSessionForTenant(
+      ctx.sessionId,
+      ctx,
+    );
     return this.conciergeService.resendNotification(session);
   }
 }
