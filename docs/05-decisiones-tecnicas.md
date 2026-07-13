@@ -41,7 +41,8 @@ Decisiones abiertas y en discusión. Formato mini-ADR. Estado: 🟢 decidido · 
 
 ---
 
-## D3 — Modelos de visión 🟡
+## D3 — Modelos de visión 🟡 *research hecho (2026-07-12) — pendiente benchmark propio*
+> **Research SOTA completo:** ver [modulos/vision.md](modulos/vision.md) (deep-research verificado). Resumen: YOLO26 (ene-2026) supersede a YOLO11; en RPi5 la palanca más grande es el **runtime** (NCNN/OpenVINO ~2× sobre ONNX), luego migrar a **YOLO26n** (+15% FPS); OCR → `cct-xs-v2` + charset chileno de 18 letras; VLM de anomalías → bajar a gpt-4o-mini/Gemini Flash (mantener en la nube); RF-DETR/transformers descartados en RPi5-CPU. **Condición:** ninguna cifra pública es sobre patentes chilenas → decidir con un benchmark propio sobre el piloto.
 **Contexto:** hoy YOLOv11 + fast-plate-ocr (relativamente antiguos), para patentes, OCR y anomalías.
 
 **Propuesta de Benjamin:** evaluar la última YOLO (variante nano) para detección de patentes, extracción de texto y anomalías/seguridad.
