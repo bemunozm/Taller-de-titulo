@@ -14,6 +14,7 @@ import { SmsService } from '../../common/services/sms.service';
 import { QRCodeService } from '../../common/services/qrcode.service';
 import { HubGateway } from '../../hub/hub.gateway';
 import { User } from '../../users/entities/user.entity';
+import type { TenantScope } from '../../common/tenant/tenant-context.types';
 import {
   formatRut,
   isValidChileanPhone,
@@ -81,18 +82,13 @@ export interface SaveVisitorDataResult {
 }
 
 /**
- * Forma mínima de `AuthorizedContext` que este servicio necesita para el fix
- * M1 (defensa en profundidad, Bloque A2b — ver docstring de `notifyResident`
- * más abajo). Se define localmente en vez de importar `AuthorizedContext` de
- * `agent/types/` para no crear una dependencia de tipos del dominio hacia la
- * capa de agente (la dirección natural es agente → dominio, no al revés) —
- * cualquier objeto con estos dos campos (incluido un `AuthorizedContext`
- * completo) es asignable acá por tipado estructural.
+ * Re-exportado para no romper a los consumidores que ya importaban
+ * `TenantScope` desde este módulo (p.ej. specs de tools) — limpieza post-
+ * auditoría (dedup DUP3): la interface ahora vive en
+ * `common/tenant/tenant-context.types.ts`, compartida con
+ * `PendingActionsService`, en vez de declararse localmente acá.
  */
-export interface TenantScope {
-  tenantId: string | null;
-  isSuperAdmin: boolean;
-}
+export type { TenantScope };
 
 @Injectable()
 export class DigitalConciergeService {
@@ -479,12 +475,7 @@ export class DigitalConciergeService {
    * `null` — ver su docstring sobre el "cajón nulo").
    */
   private notifyHub(session: ConciergeSession, event: string, payload: unknown): void {
-    if (session.hubId && this.hubGateway.isHubConnected(session.hubId)) {
-      this.hubGateway.sendToHub(session.hubId, event, payload);
-      return;
-    }
-
-    this.hubGateway.sendToOrganization(session.organizationId, event, payload);
+    this.hubGateway.sendToSession(session, event, payload);
   }
 
   // ========== HERRAMIENTAS ==========
@@ -522,7 +513,13 @@ export class DigitalConciergeService {
     session: ConciergeSession,
     data: SaveVisitorDataInput,
   ): Promise<SaveVisitorDataResult> {
-    this.logger.debug('Saving visitor data...', data);
+    // No se loguea `data` — contiene PII del visitante en claro (nombre,
+    // rut, telefono, patente) y `main.ts` no fija `logLevels`, así que
+    // `debug` corre también en producción (hallazgo de limpieza post-
+    // auditoría, MENOR 1). `auditToolCall` (tool-audit.util.ts) sigue siendo
+    // la auditoría intencional que SÍ persiste estos campos en
+    // `system_logs` — esto es solo el log de diagnóstico, no se toca esa vía.
+    this.logger.debug('Saving visitor data...');
 
     let campoInvalido: SaveVisitorDataField | undefined;
     let mensajeInvalido: string | undefined;

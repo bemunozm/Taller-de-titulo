@@ -81,9 +81,19 @@ const logger = new Logger('AuthModule');
     // importa `ThrottlerModule` directamente) pueda usar `ThrottlerGuard` +
     // `@Throttle({ 'concierge-agent-chat': {...} })` en su controller, mismo
     // patrón que 'login' en AuthController.
+    //
+    // 'concierge-execute-tool' (limpieza post-auditoría, MENOR 2): mismo
+    // criterio que 'concierge-agent-chat' — `POST
+    // /concierge/session/:id/execute-tool` (DigitalConciergeController) es el
+    // canal de producción real (Realtime voice: frontend/vigilia-hub) y no
+    // tenía ningún límite de tasa, a diferencia de `/concierge/agent/chat`.
+    // Límite más alto que el de chat (60 vs 20 por minuto) porque una sola
+    // llamada por citófono puede disparar varias tools (buscar_residente,
+    // guardar_datos_visitante x N, abrir_acceso, etc.) en la misma ventana.
     ThrottlerModule.forRoot([
       { name: 'login', ttl: 60_000, limit: 5 },
       { name: 'concierge-agent-chat', ttl: 60_000, limit: 20 },
+      { name: 'concierge-execute-tool', ttl: 60_000, limit: 60 },
     ]),
     MailerModule.forRootAsync({
       imports: [ConfigModule],

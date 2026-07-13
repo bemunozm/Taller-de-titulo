@@ -253,6 +253,35 @@ export class HubGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   /**
+   * Limpieza post-auditoría (dedup DUP1): encapsula el patrón "hub propio
+   * conectado vs. broadcast por organización" que estaba triplicado en
+   * `DigitalConciergeService.notifyHub`, `AbrirAccesoTool.execute` y
+   * `PendingActionsService.notifyVisitorLive` — mismo criterio EXACTO en los
+   * tres call-sites originales: si `session.hubId` está seteado y ESE hub
+   * está conectado, se dirige SOLO a él (`sendToHub`); si no, se hace
+   * broadcast por organización (`sendToOrganization`, nunca broadcast global
+   * — ver su docstring sobre el "cajón nulo" cuando `organizationId` es
+   * `null`).
+   *
+   * Recibe solo los dos campos que necesita (no una `ConciergeSession`
+   * completa) para no acoplar `HubGateway` a esa entidad — cualquier objeto
+   * con esta forma (incluida una `ConciergeSession`) es asignable acá por
+   * tipado estructural.
+   */
+  sendToSession(
+    session: { hubId: string | null; organizationId: string | null },
+    event: string,
+    data: any,
+  ): void {
+    if (session.hubId && this.isHubConnected(session.hubId)) {
+      this.sendToHub(session.hubId, event, data);
+      return;
+    }
+
+    this.sendToOrganization(session.organizationId, event, data);
+  }
+
+  /**
    * Broadcast a todos los hubs conectados. OJO: NO usar para eventos que
    * disparen una acción física dirigida a UN condominio (p.ej. abrir
    * portón/puerta) — usar `sendToOrganization` en esos casos (hallazgo H2).

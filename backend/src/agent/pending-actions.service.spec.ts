@@ -84,7 +84,10 @@ describe('PendingActionsService', () => {
     Pick<DigitalConciergeService, 'findSessionForTenant'>
   >;
   let hubGateway: jest.Mocked<
-    Pick<HubGateway, 'isHubConnected' | 'sendToHub' | 'sendToOrganization'>
+    Pick<
+      HubGateway,
+      'isHubConnected' | 'sendToHub' | 'sendToOrganization' | 'sendToSession'
+    >
   >;
   let idCounter: number;
 
@@ -176,6 +179,24 @@ describe('PendingActionsService', () => {
       isHubConnected: jest.fn().mockReturnValue(false),
       sendToHub: jest.fn().mockReturnValue(true),
       sendToOrganization: jest.fn(),
+      // Réplica fiel de `HubGateway.sendToSession` real (limpieza post-
+      // auditoría, dedup DUP1): delega en los mocks de arriba en vez de
+      // mockearse por separado, así las aserciones existentes sobre
+      // `sendToHub`/`sendToOrganization` siguen validando el mismo criterio
+      // (hub propio conectado vs. broadcast por organización) sin cambios.
+      sendToSession: jest.fn(
+        (
+          session: { hubId: string | null; organizationId: string | null },
+          event: string,
+          data: unknown,
+        ) => {
+          if (session.hubId && hubGateway.isHubConnected(session.hubId)) {
+            hubGateway.sendToHub(session.hubId, event, data);
+            return;
+          }
+          hubGateway.sendToOrganization(session.organizationId, event, data);
+        },
+      ),
     };
 
     service = new PendingActionsService(

@@ -1,4 +1,5 @@
 import { Controller, Post, Body, Param, Logger, UseGuards, Req } from '@nestjs/common';
+import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import type { Request } from 'express';
 import {
   AuthorizedContextFactory,
@@ -124,8 +125,16 @@ export class DigitalConciergeController {
    * de validación Zod, o de negocio se traduce a `{ success: false, error }`
    * en vez de propagar un 4xx/5xx crudo — mismo comportamiento observable
    * que tenía el `switch` legacy.
+   *
+   * Limpieza post-auditoría (MENOR 2): este es el canal de producción real
+   * (Realtime voice vía frontend/vigilia-hub) y no tenía ningún límite de
+   * tasa, a diferencia de `/concierge/agent/chat` — throttler dedicado
+   * 'concierge-execute-tool' (registrado en auth.module.ts junto a
+   * 'concierge-agent-chat'/'login'; `ThrottlerModule` es `@Global()`).
    */
   @Post('session/:sessionId/execute-tool')
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ 'concierge-execute-tool': { limit: 60, ttl: 60_000 } })
   async executeTool(
     @Param('sessionId') sessionId: string,
     @Body() dto: ExecuteToolDto,

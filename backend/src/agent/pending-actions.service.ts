@@ -27,12 +27,7 @@ import { ToolRegistryService } from './tool-registry.service';
 import { auditToolCall, describeToolError } from './tool-audit.util';
 import type { AuthorizedContext } from './types/authorized-context.type';
 import type { VigiliaTool } from './types/vigilia-tool.type';
-
-/** Forma mínima que necesita `findForTenant` — igual criterio que `TenantScope` en digital-concierge.service.ts. */
-export interface TenantScope {
-  tenantId: string | null;
-  isSuperAdmin: boolean;
-}
+import type { TenantScope } from '../common/tenant/tenant-context.types';
 
 /**
  * Fase 2, Bloque F2.1 (docs/modulos/agente-cerebro.md §12): mecanismo de
@@ -582,15 +577,7 @@ export class PendingActionsService {
         timestamp: new Date(),
       };
 
-      if (session.hubId && this.hubGateway.isHubConnected(session.hubId)) {
-        this.hubGateway.sendToHub(session.hubId, event, payload);
-      } else {
-        this.hubGateway.sendToOrganization(
-          session.organizationId,
-          event,
-          payload,
-        );
-      }
+      this.hubGateway.sendToSession(session, event, payload);
     } catch (error) {
       // No terminal: la sesión pudo cerrarse entre la escalada y la
       // aprobación (`findSessionForTenant` lanza `NotFoundException`/
