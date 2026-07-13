@@ -18,7 +18,9 @@ describe('GuardarDatosVisitanteTool', () => {
     Pick<DigitalConciergeService, 'findSessionForTenant' | 'saveVisitorData'>
   >;
 
-  function makeCtx(overrides: Partial<AuthorizedContext> = {}): AuthorizedContext {
+  function makeCtx(
+    overrides: Partial<AuthorizedContext> = {},
+  ): AuthorizedContext {
     return {
       tenantId: 'condo-A',
       isSuperAdmin: false,
@@ -31,7 +33,9 @@ describe('GuardarDatosVisitanteTool', () => {
     };
   }
 
-  function makeSession(overrides: Partial<ConciergeSession> = {}): ConciergeSession {
+  function makeSession(
+    overrides: Partial<ConciergeSession> = {},
+  ): ConciergeSession {
     return {
       id: 'session-row-1',
       sessionId: 'session-1',
@@ -94,7 +98,8 @@ describe('GuardarDatosVisitanteTool', () => {
       ok: false,
       campo: 'rut',
       mensaje: 'El RUT "12345678-9" no tiene un dígito verificador válido.',
-      message: 'Uno de los datos entregados no es válido, no se guardó ese campo',
+      message:
+        'Uno de los datos entregados no es válido, no se guardó ese campo',
       saved: {
         nombre: null,
         rut: null,

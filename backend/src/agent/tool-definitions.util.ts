@@ -43,6 +43,7 @@ export function buildRealtimeToolDefinitions(
       string,
       unknown
     >;
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- se destructura solo para excluir `$schema` de `parameters` (ver docstring arriba).
     const { $schema: _$schema, ...parameters } = jsonSchema;
 
     return {
