@@ -4,7 +4,7 @@ Decisiones abiertas y en discusión. Formato mini-ADR. Estado: 🟢 decidido · 
 
 ---
 
-## D1 — Framework del agente (cerebro) 🟡
+## D1 — Framework del agente (cerebro) 🟢 *implementado (F1)*
 **Contexto:** hoy el agente está atado a OpenAI y duplicado en clientes. Se quiere un cerebro en el backend, provider-agnóstico.
 
 **Propuesta de Benjamin:** [Vercel AI SDK](https://ai-sdk.dev/) + AI Gateway.
@@ -16,9 +16,13 @@ Decisiones abiertas y en discusión. Formato mini-ADR. Estado: 🟢 decidido · 
 
 **Lean:** AI SDK core como base; evaluar Mastra si necesitamos más andamiaje. Gateway opcional.
 
+**DECISIÓN (Benjamin, 2026-07-12):** **AI SDK core**, y se **adelanta a Fase 1** (no Fase 2). Razón: el cerebro hoy vive en los clientes atado a OpenAI; llevarlo al backend es *reconstruir*, no mover → hacerlo sobre la base definitiva de una vez evita reescribir lo migrado. Multiagente/LangGraph/RAG solo si la métrica lo justifica (ver [modulos/agente-cerebro.md](modulos/agente-cerebro.md#9-cuándo-no-sobre-ingenierizar-criterios)). Diseño completo del módulo en [modulos/agente-cerebro.md](modulos/agente-cerebro.md).
+
+**IMPLEMENTADO (F1):** `ai@7` + `@ai-sdk/openai` en el backend NestJS; catálogo `VigiliaTool<In,Out>` con **Zod in/out** + `ToolDispatcherService` (scope→Zod→ejecuta→Zod→audita) + `ToolLoopAgent`. Gateway **no** usado (providers directo). Multiagente/LangGraph/RAG: no fue necesario.
+
 ---
 
-## D2 — Capa de voz en tiempo real 🟡
+## D2 — Capa de voz en tiempo real 🟢 *opción (a) implementada desde F1*
 **Contexto:** el cerebro (D1) razona con texto/tools; hablar con el visitante en el citófono necesita **speech-to-speech de baja latencia**. Son problemas distintos.
 
 **Opciones:**
@@ -26,6 +30,10 @@ Decisiones abiertas y en discusión. Formato mini-ADR. Estado: 🟢 decidido · 
 - (b) Desacoplar STT → cerebro (AI SDK, cualquier modelo) → TTS: 100% provider-agnóstico pero **más latencia** (malo para una llamada).
 
 **Lean:** (a) — voz realtime como transporte, tools resueltas por el backend. Reconcilia "cerebro agnóstico" con "mejor voz". Revisar si el AI SDK/Gateway ya expone una vía realtime aceptable.
+
+**Alcance (2026-07-12):** la voz realtime se queda en **Fase 2** (no se adelanta como D1). En Fase 1 el core del agente (texto/tools sobre AI SDK) ya resuelve los tool-calls en el backend; hoy los resuelve el **cliente** (frontend SDK / vigilia-hub WS crudo) → mover esa resolución al backend es parte de F1, y consolidar el transporte de audio (WebRTC/WS) es F2. Ver [modulos/agente-cerebro.md](modulos/agente-cerebro.md#8-corte-fase-1-vs-fase-2).
+
+**IMPLEMENTADO (desde F1):** opción **(a)** — OpenAI Realtime como transporte de voz en los clientes (kiosko web WebRTC / vigilia-hub WS crudo); los tool-calls se resuelven en el **backend** vía `execute-tool`, y el prompt + las definiciones de tools se sirven desde `agent-config`. El backend **no toca el audio**. Lo que resta (unificar el hub al SDK oficial) es refinamiento opcional.
 
 **Voz en la Raspberry (decidido 🟢):** la RPi NO corre ASR. Es un **puente de audio delgado** (captura mic del citófono + reproduce respuesta); el speech-to-speech ocurre en la nube (modelo realtime). Lo único local: **VAD** liviano (`webrtcvad` / Silero) para turnos. Excepción: si no hay internet confiable en la conserjería, STT offline con **Vosk** (mejor que whisper.cpp en RPi, tiene español) — degrada UX, no es el default del piloto.
 

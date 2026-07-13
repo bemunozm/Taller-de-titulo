@@ -1,6 +1,6 @@
 # Fases 1–2 — Agente-cerebro en el backend: diseño y plan de migración
 
-> Estado: 🟡 en diseño (para revisar antes de implementar). Basado en el mapa del código actual (jul-2026) + patrones rescatados del brainstorming de plataforma de agentes multiempresa.
+> Estado: 🟢 **implementado** — F1 (PR #49) + F2 núcleo (PR #51) + hardening (PR #52), todo en `main`. Basado en el mapa del código actual (jul-2026) + patrones rescatados del brainstorming de plataforma de agentes multiempresa.
 
 ## 1. Objetivo
 Consolidar el "conserje digital" (el agente de IA que atiende el citófono) como **única fuente de verdad en el backend**, reconstruido sobre un framework provider-agnóstico (Vercel AI SDK) con un **catálogo de tools tipadas (Zod)**. Hoy el cerebro está **duplicado en los clientes** y atado a OpenAI; los clientes deben quedar como **transportes delgados** (I/O de audio + ejecutor remoto), sin lógica de agente.
