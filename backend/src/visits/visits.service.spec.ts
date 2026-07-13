@@ -152,4 +152,123 @@ describe('VisitsService — aislamiento cross-tenant por hostId', () => {
       expect(visitRepository.save).toHaveBeenCalled();
     });
   });
+
+  /**
+   * FIX cross-tenant (rama feature/cierre-fases-1-2): apertura autónoma del
+   * portón por visita vehicular pre-aprobada. `DetectionsService` (ver su
+   * spec, describe 'apertura autónoma...') llamaba a
+   * `validateAccess(plate, 'plate', { skipTenantScope: true })`, que delega en
+   * `findByPlate`. Este describe caracteriza el comportamiento REAL de
+   * `findByPlate` frente al scoping por tenant, usando un mock de
+   * QueryBuilder (createQueryBuilder/leftJoinAndSelect/where/andWhere/getOne
+   * encadenados) porque el método arma la query manualmente en vez de usar
+   * `repository.find`.
+   *
+   * HALLAZGO ORIGINAL (ya corregido — ver commits de esta rama): con
+   * `skipTenantScope: true` (el modo que usaba TODO el camino del worker LPR)
+   * la query no agregaba ningún filtro por `organizationId` — buscaba la
+   * patente en TODOS los condominios de la plataforma. En la práctica: una
+   * visita vehicular pre-aprobada creada en el condominio B con la patente X
+   * abría el portón del condominio A si una cámara de A detectaba esa misma
+   * patente X.
+   *
+   * FIX: `DetectionsService.createDetection` ahora pasa `organizationId`
+   * (el de la CÁMARA que detectó la patente, resource-derived) en vez de
+   * `skipTenantScope`. `findByPlate`/`validateAccess` aceptan este scope
+   * explícito y lo aplican vía `applyTenantFilter` con un `TenantContext`
+   * sintético `{ organizationId, isSuperAdmin: false }` — la query SÍ filtra
+   * por ese condominio específico, sin necesidad de `TenantContextService`
+   * (que no puede resolver nada sin `request.user`). `skipTenantScope` queda
+   * reservado para call-sites que de verdad no tienen NINGÚN tenant confiable
+   * (p.ej. Conserje Digital, visitante anónimo en el citófono).
+   */
+  describe('findByPlate — aislamiento tenant', () => {
+    let qb: {
+      leftJoinAndSelect: jest.Mock;
+      where: jest.Mock;
+      andWhere: jest.Mock;
+      getOne: jest.Mock;
+    };
+
+    beforeEach(() => {
+      qb = {
+        leftJoinAndSelect: jest.fn(),
+        where: jest.fn(),
+        andWhere: jest.fn(),
+        getOne: jest.fn().mockResolvedValue(null),
+      };
+      // Encadenable: cada método de la query devuelve el mismo mock.
+      qb.leftJoinAndSelect.mockReturnValue(qb);
+      qb.where.mockReturnValue(qb);
+      qb.andWhere.mockReturnValue(qb);
+
+      (visitRepository as unknown as { createQueryBuilder: jest.Mock }).createQueryBuilder = jest
+        .fn()
+        .mockReturnValue(qb);
+    });
+
+    it('[FIX] con organizationId explícito (camino LPR tras el fix) SÍ filtra por ESE condominio, sin consultar TenantContextService', async () => {
+      await service.findByPlate('ABCD12', { organizationId: 'org-camara-A' });
+
+      // El worker LPR no tiene request.user — el scope viene explícito desde
+      // afuera (organizationId de la CÁMARA), no se resuelve ningún contexto.
+      expect(tenantContext.getContext).not.toHaveBeenCalled();
+      expect(qb.andWhere).toHaveBeenCalledWith('visit."organizationId" = :tenantOrgId', {
+        tenantOrgId: 'org-camara-A',
+      });
+    });
+
+    it('[FIX] patente de una visita de OTRO condominio (B) no matchea cuando se busca scopeado al condominio de la cámara (A)', async () => {
+      // El mock de queryBuilder no ejecuta SQL real, así que "no matchea" se
+      // verifica a nivel de contrato: el filtro aplicado exige
+      // organizationId = 'org-A' exacto (no 'org-B', no ausencia de filtro).
+      // getOne() devuelve null (setup del beforeEach) — equivalente a que la
+      // fila de la visita de 'org-B' no calce con esa condición SQL.
+      const visit = await service.findByPlate('ABCD12', { organizationId: 'org-A' });
+
+      expect(qb.andWhere).toHaveBeenCalledWith('visit."organizationId" = :tenantOrgId', {
+        tenantOrgId: 'org-A',
+      });
+      expect(qb.andWhere).not.toHaveBeenCalledWith('visit."organizationId" = :tenantOrgId', {
+        tenantOrgId: 'org-B',
+      });
+      expect(visit).toBeNull();
+    });
+
+    it('skipTenantScope sigue sin filtrar por organizationId — reservado para call-sites SIN ningún tenant confiable (Conserje Digital), ya NO usado por el camino LPR', async () => {
+      await service.findByPlate('ABCD12', { skipTenantScope: true });
+
+      expect(tenantContext.getContext).not.toHaveBeenCalled();
+
+      // Los únicos andWhere aplicados son estado + ventana de validez, NUNCA
+      // uno que referencie organizationId.
+      const andWhereClauses = qb.andWhere.mock.calls.map((call) => call[0] as string);
+      expect(andWhereClauses.some((clause) => clause.includes('organizationId'))).toBe(false);
+      expect(andWhereClauses).toEqual([
+        'visit.status IN (:...statuses)',
+        'visit.validFrom <= :now',
+        'visit.validUntil >= :now',
+      ]);
+    });
+
+    it('con sesión de usuario (sin skipTenantScope ni organizationId explícito) SÍ filtra por el organizationId del contexto tenant', async () => {
+      setCtx({ organizationId: 'org-A', isSuperAdmin: false });
+
+      await service.findByPlate('ABCD12');
+
+      expect(tenantContext.getContext).toHaveBeenCalled();
+      expect(qb.andWhere).toHaveBeenCalledWith('visit."organizationId" = :tenantOrgId', {
+        tenantOrgId: 'org-A',
+      });
+    });
+
+    it('super-admin (sin skipTenantScope) tampoco filtra por organizationId — bypass real intencional', async () => {
+      setCtx({ organizationId: null, isSuperAdmin: true });
+
+      await service.findByPlate('ABCD12');
+
+      const andWhereClauses = qb.andWhere.mock.calls.map((call) => call[0] as string);
+      expect(andWhereClauses.some((clause) => clause.includes('organizationId'))).toBe(false);
+    });
+  });
 });

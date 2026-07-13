@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, FindOptionsWhere } from 'typeorm';
 import { Vehicle } from './entities/vehicle.entity';
 import { CreateVehicleDto } from './dto/create-vehicle.dto';
 import { User } from '../users/entities/user.entity';
@@ -19,9 +19,16 @@ export class VehiclesService {
     private readonly usersService: UsersService,
     private readonly notificationsService: NotificationsService,
     // Tarea #19 (docs/modulos/auth-multitenant.md §7): scoping por tenant en
-    // create/listAll. `findByPlate`/`findByOwnerIds` NO se scopean: los usa
-    // DetectionsService en el flujo del worker LPR (sin sesión de usuario,
-    // resource-derived desde la cámara) — ver reporte de la tarea #19.
+    // create/listAll. `findByOwnerIds` sigue sin scopear (uso interno vía
+    // ownerIds ya resueltos por tenant en el caller). `findByPlate` acepta
+    // ahora un `organizationId` EXPLÍCITO opcional (fix cross-tenant,
+    // feature/cierre-fases-1-2): el worker LPR (DetectionsService, sin
+    // request.user) lo usa pasando el organizationId de la CÁMARA que
+    // detectó la patente — ver docstring de findByPlate abajo. Sin ese
+    // parámetro, el comportamiento es exactamente el mismo que antes
+    // (ningún filtro), para no romper a otros callers (VisitsService.create/
+    // update) que resuelven/crean el vehículo por patente sin conocer un
+    // tenant de referencia.
     private readonly tenantContext: TenantContextService,
   ) {}
 
@@ -235,8 +242,21 @@ export class VehiclesService {
     }
   }
 
-  async findByPlate(plate: string) {
-    return this.repo.findOne({ where: { plate }, relations: ['owner'] });
+  /**
+   * Buscar vehículo por patente.
+   *
+   * `options.organizationId`: fix cross-tenant (feature/cierre-fases-1-2) —
+   * cuando se provee, acota la búsqueda a ESE condominio (usado por
+   * DetectionsService en el camino de apertura autónoma del portón, con el
+   * organizationId de la CÁMARA). Sin este parámetro, la búsqueda es global
+   * (comportamiento previo, preservado para los demás callers).
+   */
+  async findByPlate(plate: string, options?: { organizationId?: string }) {
+    const where: FindOptionsWhere<Vehicle> = { plate };
+    if (options?.organizationId) {
+      where.organizationId = options.organizationId;
+    }
+    return this.repo.findOne({ where, relations: ['owner'] });
   }
 
   async findByFamily(familyId: string) {

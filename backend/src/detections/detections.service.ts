@@ -68,20 +68,51 @@ export class DetectionsService {
     // `create()` solo instancia la entidad; `save()` persiste en la BD.
     const saved = await this.detectionsRepo.save(ent);
 
+    // FIX aislamiento cross-tenant en la apertura física autónoma del portón
+    // (rama feature/cierre-fases-1-2, hallazgo reportado): hasta acá, la
+    // búsqueda de vehículo/visita para decidir si abrir el portón se hacía
+    // con `skipTenantScope: true` (TODOS los condominios) — una visita o
+    // vehículo pre-aprobado del condominio B abría el portón físico del
+    // condominio A si una cámara de A leía esa patente. El `organizationId`
+    // de la CÁMARA (resource-derived, `saved.organizationId` arriba) es la
+    // fuente de tenant confiable en este flujo (el worker LPR no tiene
+    // `request.user`), así que se usa para acotar ambas búsquedas al MISMO
+    // condominio de la cámara — ver `VehiclesService.findByPlate` y
+    // `VisitsService.findByPlate`/`validateAccess`, que ahora aceptan este
+    // scope explícito además de `skipTenantScope`.
+    //
+    // Fail-closed: si la cámara no tiene organizationId (legacy, pre-tarea
+    // #19), no hay ningún tenant confiable con el cual acotar la búsqueda —
+    // abrir igual (o buscar sin scope) reintroduciría el mismo leak. Se
+    // deriva directo a aprobación manual del conserje, sin ejecutar ninguna
+    // búsqueda de vehículo/visita (createPendingDetectionForConcierge ya
+    // maneja bien organizationId === null, ver sendDetectionNotifications).
+    if (!saved.organizationId) {
+      this.logger.warn(
+        `Detección de patente ${dto.plate} en cámara sin organizationId (legacy, pre-tarea #19) — fail-closed, requiere aprobación manual del conserje`,
+      );
+      return await this.createPendingDetectionForConcierge(
+        saved,
+        'Cámara sin condominio asignado - requiere aprobación manual',
+      );
+    }
+
+    const cameraOrganizationId = saved.organizationId;
+
     // Validar acceso siguiendo este orden de prioridad:
     // 1. Vehículo residente registrado y activo
     // 2. Visita vehicular válida y dentro del período
     // 3. Auto check-in si es entrada (PENDING → ACTIVE)
     // 4. Auto check-out si es salida (ACTIVE → COMPLETED)
     // 5. Denegado en cualquier otro caso
-    
+
     let decision: string;
     let reason: string;
     let residente: User | null = null;
     let isExit = false; // Flag para identificar si es una salida
 
-    // 1. Verificar si es un vehículo registrado
-    const vehicle = await this.vehiclesService.findByPlate(dto.plate);
+    // 1. Verificar si es un vehículo registrado (scopeado al condominio de la cámara)
+    const vehicle = await this.vehiclesService.findByPlate(dto.plate, { organizationId: cameraOrganizationId });
     
     if (vehicle && vehicle.active) {
       // Verificar el tipo de vehículo
@@ -93,15 +124,15 @@ export class DetectionsService {
       } else if (vehicle.vehicleType === 'visitante' || vehicle.accessLevel === 'temporal') {
         // Vehículo de visitante, verificar si tiene visita válida
         try {
-          // Tarea de aislamiento tenant (branch fix/visits-tenant-isolation):
-          // este endpoint lo llama el worker LPR sin sesión de usuario
-          // (ServiceApiKeyGuard, no puebla request.user) — TenantContextService
-          // no puede resolver el condominio del caller. `skipTenantScope`
-          // preserva el comportamiento resource-derived existente (igual que
-          // resolveCameraOrganizationId arriba): la patente ya es el criterio
-          // de búsqueda, no hace falta acotar por tenant para no romper el
-          // flujo de apertura automática.
-          const visitValidation = await this.visitsService.validateAccess(dto.plate, 'plate', { skipTenantScope: true });
+          // Fix cross-tenant (rama feature/cierre-fases-1-2 — ver docstring
+          // grande arriba, sobre `saved`): el worker LPR sin sesión de
+          // usuario (ServiceApiKeyGuard, no puebla request.user) no puede
+          // resolver el tenant vía TenantContextService, pero SÍ conoce el
+          // organizationId de la cámara (resource-derived). Se acota la
+          // búsqueda de la visita a ESE condominio en vez de saltarse el
+          // scoping (antes `skipTenantScope: true` buscaba en TODOS los
+          // condominios — la causa raíz del leak).
+          const visitValidation = await this.visitsService.validateAccess(dto.plate, 'plate', { organizationId: cameraOrganizationId });
 
           if (visitValidation.valid && visitValidation.visit) {
             const visit = visitValidation.visit;
@@ -111,14 +142,14 @@ export class DetectionsService {
             // Determinar si es entrada o salida basado en el estado de la visita
             if (visit.status === 'pending' || visit.status === 'ready') {
               // Entrada: Visita pendiente o lista para reingreso → registrar check-in
-              await this.visitsService.checkIn(visit.id, { skipTenantScope: true });
+              await this.visitsService.checkIn(visit.id, { organizationId: cameraOrganizationId });
               reason = visit.status === 'pending'
                 ? `Entrada autorizada - ${visit.visitorName}`
                 : `Reingreso autorizado - ${visit.visitorName}`;
               isExit = false;
             } else if (visit.status === 'active') {
               // Salida: Visita activa → registrar check-out
-              await this.visitsService.checkOut(visit.id, { skipTenantScope: true });
+              await this.visitsService.checkOut(visit.id, { organizationId: cameraOrganizationId });
               reason = `Salida registrada - ${visit.visitorName}`;
               isExit = true;
             } else {
@@ -144,9 +175,9 @@ export class DetectionsService {
     } else if (!vehicle) {
       // No existe el vehículo, verificar si hay una visita programada
       try {
-        // Ver comentario equivalente más arriba: worker LPR sin sesión de
-        // usuario, bypass explícito del scoping por tenant.
-        const visitValidation = await this.visitsService.validateAccess(dto.plate, 'plate', { skipTenantScope: true });
+        // Ver comentario equivalente más arriba: mismo fix cross-tenant,
+        // scopeado explícitamente al condominio de la cámara.
+        const visitValidation = await this.visitsService.validateAccess(dto.plate, 'plate', { organizationId: cameraOrganizationId });
 
         if (visitValidation.valid && visitValidation.visit) {
           const visit = visitValidation.visit;
@@ -156,14 +187,14 @@ export class DetectionsService {
           // Determinar si es entrada o salida basado en el estado de la visita
           if (visit.status === 'pending' || visit.status === 'ready') {
             // Entrada: Visita pendiente o lista para reingreso → registrar check-in
-            await this.visitsService.checkIn(visit.id, { skipTenantScope: true });
+            await this.visitsService.checkIn(visit.id, { organizationId: cameraOrganizationId });
             reason = visit.status === 'pending'
               ? `Entrada autorizada - ${visit.visitorName}`
               : `Reingreso autorizado - ${visit.visitorName}`;
             isExit = false;
           } else if (visit.status === 'active') {
             // Salida: Visita activa → registrar check-out
-            await this.visitsService.checkOut(visit.id, { skipTenantScope: true });
+            await this.visitsService.checkOut(visit.id, { organizationId: cameraOrganizationId });
             reason = `Salida registrada - ${visit.visitorName}`;
             isExit = true;
           } else {

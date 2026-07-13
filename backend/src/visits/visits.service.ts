@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan, MoreThan } from 'typeorm';
+import { Repository, LessThan, MoreThan, FindOptionsWhere } from 'typeorm';
 import { Visit, VisitType, VisitStatus } from './entities/visit.entity';
 import { CreateVisitDto } from './dto/create-visit.dto';
 import { UpdateVisitDto } from './dto/update-visit.dto';
@@ -34,9 +34,29 @@ import * as crypto from 'crypto';
  * DigitalConciergeService) — mismo criterio que
  * `CamerasService.resolveCameraByIdOrMount`/`getCameraByIdOrMount`, dejados
  * deliberadamente sin scoping por la misma razón (ver su docstring).
+ *
+ * FIX aislamiento cross-tenant en apertura autónoma del portón (rama
+ * feature/cierre-fases-1-2, hallazgo reportado sobre `skipTenantScope`):
+ * `skipTenantScope` es un bypass TOTAL — sirve para el Conserje Digital, que
+ * NO tiene ningún tenant confiable que ofrecer (visitante anónimo en el
+ * citófono). El worker LPR SÍ tiene un tenant confiable — el `organizationId`
+ * de la CÁMARA que detectó la patente (resource-derived, ver
+ * `DetectionsService.resolveCameraOrganizationId`) — así que en vez de saltar
+ * el scoping por completo, `organizationId` acota la búsqueda a ESE
+ * condominio específico. `DetectionsService.createDetection` pasa este campo
+ * en vez de `skipTenantScope` para las búsquedas de vehículo/visita del
+ * camino de apertura física; `skipTenantScope` queda reservado para los
+ * call-sites que de verdad no pueden determinar ningún tenant.
  */
 interface TenantScopeOptions {
   skipTenantScope?: boolean;
+  /**
+   * Scope explícito por organizationId — tiene prioridad sobre
+   * `skipTenantScope` si ambos vinieran seteados (no debería pasar en la
+   * práctica). Reutiliza `applyTenantFilter`/`scopeWhere` construyendo un
+   * `TenantContext` sintético `{ organizationId, isSuperAdmin: false }`.
+   */
+  organizationId?: string;
 }
 
 @Injectable()
@@ -66,9 +86,18 @@ export class VisitsService {
    * controller.
    */
   private async loadVisitEntity(id: string, options?: TenantScopeOptions): Promise<Visit> {
-    const where = options?.skipTenantScope
-      ? { id }
-      : scopeWhere({ id }, await this.tenantContext.getContext());
+    let where: FindOptionsWhere<Visit> | FindOptionsWhere<Visit>[];
+    if (options?.organizationId) {
+      // Defense-in-depth: aunque el `id` ya fue resuelto por un
+      // findByPlate/findByQRCode previamente scopeado, se re-verifica el
+      // organizationId al cargar por id (p.ej. checkIn/checkOut del camino
+      // LPR, ver DetectionsService).
+      where = { id, organizationId: options.organizationId };
+    } else if (options?.skipTenantScope) {
+      where = { id };
+    } else {
+      where = scopeWhere({ id }, await this.tenantContext.getContext());
+    }
 
     const visit = await this.visitRepository.findOne({
       where,
@@ -327,7 +356,13 @@ export class VisitsService {
       .andWhere('visit.validFrom <= :now', { now: new Date() })
       .andWhere('visit.validUntil >= :now', { now: new Date() });
 
-    if (!options?.skipTenantScope) {
+    if (options?.organizationId) {
+      // Camino LPR (ver DetectionsService.createDetection): acota la
+      // búsqueda al condominio de la CÁMARA que detectó la patente —
+      // reutiliza applyTenantFilter con un TenantContext sintético en vez de
+      // buscar la patente en TODOS los condominios (fix cross-tenant).
+      applyTenantFilter(query, 'visit', { organizationId: options.organizationId, isSuperAdmin: false });
+    } else if (!options?.skipTenantScope) {
       const ctx = await this.tenantContext.getContext();
       applyTenantFilter(query, 'visit', ctx);
     }
