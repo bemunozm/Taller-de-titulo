@@ -10,9 +10,14 @@ __pycache__/
 venv/
 
 # LPR runtime data (no versionar detecciones/logs/modelos)
+# OJO: NO ignorar `storage/` a secas — es un PAQUETE DE CÓDIGO
+# (storage/fs_storage.py, storage/__init__.py). Ignorarlo haría que archivos
+# nuevos del paquete se perdieran en silencio. Aquí solo se ignoran los
+# directorios de datos/artefactos que produce el worker.
 detecciones/
 logs/
-storage/
+crops/
+frames/
 *.pt
 
 # Env
