@@ -86,13 +86,14 @@ def post_anomaly(backend_url: str, payload: dict, dry_run: bool = True) -> int:
     elif not url.endswith('/anomalies'):
         url += '/anomalies'
 
-    # El DTO de anomalía es más flexible pero requiere cameraId y anomalyType
+    # El DTO de anomalía es más flexible pero requiere cameraId y anomalyType.
+    # NO se envía mountPath: contenía la URL RTSP con credenciales y el backend
+    # identifica la cámara por cameraId.
     dto = {
         'cameraId': payload.get('cameraId'),
         'anomalyType': payload.get('anomalyType'),
         'confidence': payload.get('confidence'),
         'detectionTimestamp': payload.get('detectionTimestamp'),
-        'mountPath': payload.get('mountPath'),
         'meta': payload.get('meta', {})
     }
     
