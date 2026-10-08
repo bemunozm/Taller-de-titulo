@@ -20,7 +20,7 @@ Consecuencias directas:
 - **Orquestación (D1):** **Vercel AI SDK core** (`ai` + `@ai-sdk/openai`, `@ai-sdk/anthropic`, …). Provider-agnóstico, tool-calling de primera clase con **Zod**, streaming, TypeScript-nativo → encaja directo en NestJS. Loop explícito que controlamos nosotros, sin magia de framework. Gateway (`@ai-sdk/gateway`) opcional. Mastra/LangGraph **no** al inicio (ver §9).
 - **Voz realtime (D2):** el modelo realtime (hoy OpenAI Realtime) se mantiene como **transporte de voz**, pero sus tool-calls dejan de resolverse en el cliente y pasan a **resolverse en el backend** (única fuente de verdad de tools/lógica). El transporte de audio (WebRTC en web, WS en la RPi) es una decisión **aparte** de dónde vive el prompt/tools.
 - **Router multi-modelo:** modelo fuerte (p. ej. Claude Sonnet / GPT realtime) para razonar/tool-use; modelos baratos para clasificar/traducir. Control de costo por condominio.
-- **Observabilidad de IA:** tracing/eval/costo del agente (estilo Langfuse/OTel) → alimenta las métricas de Fase 4.
+- **Observabilidad de IA:** tracing/eval/costo del agente (estilo Langfuse/OTel) → alimenta las métricas de Fase 7 (renumerada el 2026-10-08; antes Fase 4).
 
 ## 4. Arquitectura objetivo
 

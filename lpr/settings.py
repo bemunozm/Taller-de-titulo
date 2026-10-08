@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Optional
 from types import SimpleNamespace
@@ -18,10 +19,25 @@ class Settings(BaseSettings):
     WORKER_BACKEND_URL: Optional[str] = Field(None, min_length=1)
     WORKER_BACKEND_TOKEN: Optional[str] = None
     WORKER_MANAGER_SECRET: Optional[str] = None
+    # Escape hatch solo-dev: permite arrancar el manager SIN secreto. En
+    # producción debe quedar en False (fail-closed).
+    WORKER_MANAGER_ALLOW_NO_SECRET: bool = False
     WORKER_MANAGER_PORT: int = 8000
     WORKER_MANAGER_HOST: str = '0.0.0.0'
     WORKER_MANAGER_RELOAD: bool = False
     WORKER_MANAGER_WORKERS: int = 1
+
+    # Supervisión de procesos (Fase 3.C — operabilidad). El manager hacía
+    # Popen y nunca poll()/wait(): un worker caído quedaba zombie y /health
+    # mentía. Este hilo cosecha procesos muertos y los reinicia con backoff,
+    # hasta un tope de reinicios por cámara dentro de una ventana.
+    LPR_SUPERVISOR_INTERVAL: float = Field(5.0, gt=0)
+    LPR_SUPERVISOR_MAX_RESTARTS: int = Field(5, ge=0)
+    LPR_SUPERVISOR_RESTART_WINDOW_SECONDS: float = Field(300.0, gt=0)
+    LPR_SUPERVISOR_BACKOFF_BASE_SECONDS: float = Field(2.0, gt=0)
+    LPR_SUPERVISOR_BACKOFF_MAX_SECONDS: float = Field(60.0, gt=0)
+    # Límite duro de procesos worker concurrentes que el manager acepta arrancar.
+    LPR_MAX_PROCS: int = Field(8, ge=1)
 
     # LPR worker
     LPR_RTSP_URL: Optional[str] = None
@@ -46,6 +62,10 @@ class Settings(BaseSettings):
     LPR_OCR_CONF_THRESHOLD: float = 0.98
     LPR_CONFIRM_FRAMES: int = 3
     LPR_CONFIRM_SECONDS: float = 5.0
+    # Ventana de avistamiento: tras este tiempo sin ver una patente, se olvida
+    # su conteo. Acota `plate_sightings` al paso ACTUAL de un vehículo para que
+    # la confirmación multi-frame no se degrade con el uptime del proceso.
+    LPR_SIGHTING_TTL_SECONDS: float = 30.0
     LPR_COMBINED_ALPHA: float = 0.75
     LPR_COMBINED_THRESHOLD: float = 0.3
     # plate regex may be empty in .env; treat empty as unset/None
@@ -64,8 +84,39 @@ class Settings(BaseSettings):
     # texto plano solo se muestra una vez en esa respuesta.
     LPR_SERVICE_API_KEY: Optional[str] = None
 
+    # Reconexión RTSP (Fase 3.C — operabilidad). Antes el stream se abría una
+    # sola vez: si caía, `cap.read()` devolvía False para siempre (o
+    # bloqueaba indefinidamente sin timeouts) y el worker quedaba "vivo" pero
+    # ciego. Ver `utils/capture.py`.
+    LPR_STREAM_OPEN_TIMEOUT_MS: int = Field(10000, gt=0)
+    LPR_STREAM_READ_TIMEOUT_MS: int = Field(8000, gt=0)
+    # Lecturas fallidas consecutivas antes de forzar una reconexión.
+    LPR_STREAM_MAX_READ_FAILURES: int = Field(15, ge=1)
+    # Si no llega un frame nuevo en N segundos, forzar reconexión aunque
+    # `read()` no esté devolviendo False (stream congelado).
+    LPR_STREAM_STALE_SECONDS: float = Field(20.0, gt=0)
+    # Intentos de reapertura por ciclo de reconexión antes de rendirse y
+    # terminar el proceso (para que el supervisor del manager lo reinicie).
+    LPR_STREAM_RECONNECT_MAX_ATTEMPTS: int = Field(5, ge=1)
+    LPR_STREAM_RECONNECT_BACKOFF_SECONDS: float = Field(2.0, gt=0)
+
+    # Guardián — refetch periódico de zonas/config (Fase 3.C). Antes
+    # `_fetch_zones()` solo corría en `__init__`: editar zonas o el toggle
+    # `enableGuardian` en la UI no tenía efecto hasta reiniciar el proceso.
+    LPR_ZONES_REFETCH_SECONDS: float = Field(60.0, gt=0)
+
+    # Retención de disco (Fase 3.C). Sin esto, detecciones/crops/frames
+    # crecen sin cota y llenan la SD de la Raspberry Pi.
+    LPR_RETENTION_DAYS: float = Field(7, ge=0)
+    LPR_RETENTION_MAX_MB: float = Field(2000, ge=0)
+    LPR_RETENTION_CHECK_INTERVAL_SECONDS: float = Field(3600.0, gt=0)
+
     # Logging
     LOG_LEVEL: str = 'INFO'
+    # Rotación de logs (Fase 3.C): antes el log crecía sin cota (~48MB/día/cámara
+    # medido con verbose=True en YOLO). Ver utils/logging_setup.py.
+    LPR_LOG_MAX_BYTES: int = Field(10_000_000, gt=0)
+    LPR_LOG_BACKUP_COUNT: int = Field(3, ge=0)
 
     # Cloudinary
     CLOUDINARY_CLOUD_NAME: Optional[str] = None
@@ -155,6 +206,10 @@ def build_worker_config(rtsp_url: Optional[str], camera_id: Optional[str], backe
     cam = camera_id if camera_id is not None else settings.LPR_CAMERA_ID
     if not cam:
         cam = 'cam-unknown'
+    # Sanear el cameraId: todo path/nombre de archivo se construye a partir de él
+    # (defensa contra path traversal si el worker se lanza directo, sin pasar por
+    # el validador del manager). Un UUID / UUID_guardia legítimo no se altera.
+    cam = re.sub(r'[^A-Za-z0-9_-]', '_', str(cam))
     backend = settings.LPR_BACKEND_URL or backend_url or settings.WORKER_BACKEND_URL or 'http://127.0.0.1:3000/lpr/events'
     poll = float(settings.LPR_POLL_INTERVAL or (poll_interval or 1.0))
     dry = bool(settings.LPR_DRY_RUN)

@@ -34,7 +34,7 @@ def load_detector(model_ref: str):
 
 
 def detect(detector, frame: np.ndarray, min_conf: float = 0.3) -> List[Detection]:
-    results = detector(frame)
+    results = detector(frame, verbose=False)
     boxes: List[Detection] = []
     for res in results:
         if hasattr(res, 'boxes'):

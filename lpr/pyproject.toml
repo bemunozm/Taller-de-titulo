@@ -9,7 +9,59 @@ description = "Lightweight LPR package for project"
 authors = [
   { name = "Proyecto Taller de Titulo", email = "ben.munozm@gmail.com" }
 ]
+requires-python = ">=3.11"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["lpr*"]
+# Dependencias de runtime. Se mantienen sincronizadas a mano con
+# requirements.txt (mismas versiones). requirements.txt es el punto de entrada
+# para `pip install -r` y lleva los comentarios/guía de ARM; esta lista es la
+# que consume `pip install .` / `pip install -e .`.
+dependencies = [
+  "torch==2.8.0",
+  "torchvision==0.23.0",
+  "ultralytics==8.3.0",
+  "opencv-python-headless==4.11.0.86",
+  "fast-plate-ocr[onnx]==1.1.0",
+  "onnxruntime==1.26.0",
+  "huggingface-hub==0.35.3",
+  "numpy==2.4.4",
+  "Pillow==12.2.0",
+  "requests==2.33.1",
+  "fastapi==0.136.1",
+  "uvicorn[standard]==0.47.0",
+  "pydantic==2.13.4",
+  "pydantic-settings==2.14.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.0.3"]
+
+# -----------------------------------------------------------------------------
+# Empaquetado (setuptools)
+# -----------------------------------------------------------------------------
+# LIMITACIÓN CONOCIDA: este pyproject.toml vive DENTRO del propio paquete
+# (`lpr/pyproject.toml`), no en la raíz del repo. Por eso el auto-descubrimiento
+# `packages.find` con `where=["."]` fallaba: al escanear desde aquí encuentra
+# `api`, `processor`, etc. como paquetes de nivel raíz, y el filtro `include=
+# ["lpr*"]` los descartaba todos → `top_level.txt` vacío → `pip install -e .`
+# no instalaba NADA (de ahí los hacks de sys.path en el código).
+#
+# Lo correcto sería mover este archivo a la raíz del repo, pero la tarea pide NO
+# moverlo. Solución que funciona desde aquí: remapear con `package-dir` para que
+# el CONTENIDO de este directorio SEA el paquete `lpr`, y listar los subpaquetes
+# de forma explícita. Así `import lpr`, `import lpr.settings` e
+# `import lpr.processor.worker` resuelven tras instalar.
+#
+# `processor/` y `tests/` no tienen `__init__.py`; `processor` se declara igual
+# como subpaquete-namespace (PEP 420) para que `lpr.processor.worker` sea
+# importable. `tests/` se deja fuera a propósito (no se empaqueta).
+[tool.setuptools]
+package-dir = { lpr = "." }
+packages = [
+  "lpr",
+  "lpr.api",
+  "lpr.detector",
+  "lpr.ocr",
+  "lpr.storage",
+  "lpr.utils",
+  "lpr.processor",
+]

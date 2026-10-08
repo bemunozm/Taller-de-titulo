@@ -1,21 +1,56 @@
-torch>=2.0.0
-torchvision>=0.15.0
-transformers>=4.30.0
-huggingface-hub>=0.15.0
-ultralytics>=8.1.0
-opencv-python-headless>=4.7.0
-Pillow>=9.5.0
-requests>=2.31.0
+# =============================================================================
+# lpr — runtime dependencies (pinned for reproducible edge deploys)
+# =============================================================================
+# Todas las versiones están fijadas (== / ~=) para que `pip install -r
+# requirements.txt` produzca el mismo entorno en una Raspberry Pi limpia.
+# Mantener sincronizado con la lista `dependencies` de pyproject.toml.
+#
+# --- ARM / Raspberry Pi (aarch64) --------------------------------------------
+# En RPi5 / ARM64, `torch` y `torchvision` suelen necesitar un índice de wheels
+# aparte (o los paquetes del sistema). Si `pip install torch` falla en la Pi,
+# instalar torch/torchvision primero desde el índice oficial, por ejemplo:
+#   pip install torch==2.8.0 torchvision==0.23.0 \
+#       --index-url https://download.pytorch.org/whl/cpu
+# y luego `pip install -r requirements.txt` para el resto.
+#
+# --- Deuda técnica (Fase 5) --------------------------------------------------
+# La meta a futuro es SACAR torch/torchvision del runtime a favor de ONNX
+# (ultralytics exporta a .onnx y fast-plate-ocr ya corre sobre onnxruntime).
+# Eso elimina ~cientos de MB de dependencias nativas en ARM.
+# =============================================================================
 
-# Añadidos necesarios detectados por el análisis de código
-numpy>=1.25.0
-# fast-plate-ocr (se recomienda la variante onnx según su documentación)
-fast-plate-ocr[onnx]
+# --- Visión / ML -------------------------------------------------------------
+# NOTA: no instalados en esta máquina de desarrollo → fijados a una versión
+# estable reciente y compatible entre sí (torch 2.8.0 ↔ torchvision 0.23.0).
+torch==2.8.0
+torchvision==0.23.0
+# YOLO (detector de patentes). 8.3.x es la línea estable madura usada hoy.
+ultralytics==8.3.0
+# OpenCV headless (sin GUI) — el requerido en edge/servidor.
+opencv-python-headless==4.11.0.86
+# OCR de patentes sobre onnxruntime (modelo cct-s-v1 → requiere fast-plate-ocr >= 1.0).
+fast-plate-ocr[onnx]==1.1.0
+# Runtime ONNX (lo arrastra fast-plate-ocr[onnx]; se fija explícito por reproducibilidad).
+onnxruntime==1.26.0
+# Descarga de modelos desde Hugging Face Hub. Se fija en la línea 0.x: la 1.x
+# es una reescritura con cambios incompatibles que ultralytics/fast-plate-ocr
+# aún no adoptan.
+huggingface-hub==0.35.3
 
-# Manager HTTP
-fastapi>=0.95.0
-uvicorn[standard]>=0.23.0
-pydantic>=1.10.0
+# --- Utilidades base ---------------------------------------------------------
+numpy==2.4.4
+Pillow==12.2.0
+requests==2.33.1
 
-# Optional (GPU builds)
-# For CUDA-enabled PyTorch, install the appropriate torch wheel from https://pytorch.org
+# --- Manager / API HTTP ------------------------------------------------------
+fastapi==0.136.1
+uvicorn[standard]==0.47.0
+pydantic==2.13.4
+# CAUSA RAÍZ del arranque fallido: settings.py hace `from pydantic_settings
+# import BaseSettings`; en pydantic v2 esa clase vive en este paquete aparte.
+pydantic-settings==2.14.1
+
+# --- Dev / testing (no se instala en producción) -----------------------------
+# Instalar con: pip install -r requirements.txt pytest==9.0.3
+#   o bien:     pip install -e ".[dev]"
+# pytest==9.0.3

@@ -41,8 +41,10 @@ Decisiones abiertas y en discusión. Formato mini-ADR. Estado: 🟢 decidido · 
 
 ---
 
-## D3 — Modelos de visión 🟡 *research hecho (2026-07-12) — pendiente benchmark propio*
+## D3 — Modelos de visión 🟡 *research hecho (2026-07-12); benchmark movido a Fase 5*
 > **Research SOTA completo:** ver [modulos/vision.md](modulos/vision.md) (deep-research verificado). Resumen: YOLO26 (ene-2026) supersede a YOLO11; en RPi5 la palanca más grande es el **runtime** (NCNN/OpenVINO ~2× sobre ONNX), luego migrar a **YOLO26n** (+15% FPS); OCR → `cct-xs-v2` + charset chileno de 18 letras; VLM de anomalías → bajar a gpt-4o-mini/Gemini Flash (mantener en la nube); RF-DETR/transformers descartados en RPi5-CPU. **Condición:** ninguna cifra pública es sobre patentes chilenas → decidir con un benchmark propio sobre el piloto.
+>
+> **Reencuadre (2026-07-17):** la auditoría integral de `lpr/` ([modulos/vision-auditoria.md](modulos/vision-auditoria.md)) mostró que **medir/migrar modelos ahora es prematuro**: el pipeline emite detecciones sin filtrar y no puede reportar sus fallos, así que cualquier benchmark mediría ruido. Además el análisis edge confirmó que **"cuántos modelos hay" no es el cuello de botella** (los pesos son el ~4% de la RAM; torch+ultralytics el ~60%): la palanca es el **runtime ONNX** (`onnxruntime` ya está instalado vía `fast-plate-ocr[onnx]`), no fusionar modelos. Por eso: la **robustez del pipeline es Fase 3**, y el **runtime + reglas + benchmark propio es Fase 5**. El charset chileno (mejora de precisión a costo cero) se adelanta a Fase 3.A.
 **Contexto:** hoy YOLOv11 + fast-plate-ocr (relativamente antiguos), para patentes, OCR y anomalías.
 
 **Propuesta de Benjamin:** evaluar la última YOLO (variante nano) para detección de patentes, extracción de texto y anomalías/seguridad.

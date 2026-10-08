@@ -1,6 +1,7 @@
 import logging
 import time
 import os
+import sys
 import json
 import cv2
 import numpy as np
@@ -9,6 +10,7 @@ from pathlib import Path
 from ultralytics import YOLO
 
 from lpr.utils.images import frame_to_pil, pil_to_base64
+from lpr.utils.capture import reconnect_capture
 from lpr.api.client import post_event, post_anomaly
 from lpr.settings import settings
 import requests
@@ -43,6 +45,10 @@ class GuardianWorker:
         # Zonas de intrusión
         self.guardian_zones = []
         self.zones_last_fetched = 0
+        # Si el backend deshabilita el Guardián para esta cámara, se respeta.
+        # Por defecto habilitado (fail-safe: ante un fetch fallido preferimos
+        # vigilar de más que apagar la seguridad en silencio).
+        self.guardian_enabled = True
         self._fetch_zones()
 
         # --- MEJORAS SAAS ---
@@ -67,9 +73,11 @@ class GuardianWorker:
             if resp.status_code == 200:
                 data = resp.json()
                 logging.info(f"[VIGILIA-DEBUG] [ZONE-FETCH] Raw data received: {json.dumps(data)}")
-                if data.get('enableGuardian') is False:
-                    logging.warning('Guardián deshabilitado en BD para esta cámara.')
-                
+                # Solo un `false` explícito deshabilita; ausente o true => habilitado.
+                self.guardian_enabled = data.get('enableGuardian') is not False
+                if not self.guardian_enabled:
+                    logging.warning('Guardián deshabilitado en BD para %s — no se procesarán frames.', self.cfg.camera_id)
+
                 # list of polygons (lists of dicts {x: float, y: float})
                 zones = data.get('guardianZones', [])
                 valid_zones = []
@@ -77,28 +85,80 @@ class GuardianWorker:
                     if len(z) >= 3:
                         valid_zones.append(z)
                 self.guardian_zones = valid_zones
-                self.zones_last_fetched = time.time()
                 logging.info('Descargadas %d zonas de intrusión para %s', len(valid_zones), self.cfg.camera_id)
         except Exception as e:
             logging.error('Error obteniendo zonas del Guardián: %s', e)
+        finally:
+            # Marcar el intento SIEMPRE (éxito o fallo) para que el refetch
+            # respete `LPR_ZONES_REFETCH_SECONDS`. Sin esto, con el backend
+            # caído se reintentaba el GET bloqueante en CADA frame → colapso de FPS.
+            self.zones_last_fetched = time.time()
 
     def start_capture_loop(self, cap):
         last_frame_ts = 0
+        last_successful_read_ts = time.time()
+        last_frame_sig = None
+        consecutive_failures = 0
+        max_failures = int(settings.LPR_STREAM_MAX_READ_FAILURES)
+        stale_seconds = float(settings.LPR_STREAM_STALE_SECONDS)
+        zones_refetch_seconds = float(settings.LPR_ZONES_REFETCH_SECONDS)
         try:
             while True:
                 ret, frame = cap.read()
+                now = time.time()
                 if not ret:
-                    logging.warning('Frame no recibido - reconectando...')
+                    consecutive_failures += 1
+                    logging.warning('Frame no recibido (%d/%d) - reconectando...', consecutive_failures, max_failures)
+                    if consecutive_failures >= max_failures:
+                        cap = reconnect_capture(self.cfg.rtsp_url, cap)
+                        if cap is None:
+                            logging.error(
+                                'No se pudo reconectar el stream RTSP tras varios intentos; '
+                                'terminando proceso para que el supervisor lo reinicie limpio'
+                            )
+                            sys.exit(1)
+                        consecutive_failures = 0
+                        last_frame_sig = None
+                        last_successful_read_ts = time.time()
                     time.sleep(1)
                     continue
-                now = time.time()
+                consecutive_failures = 0
+                # Stream CONGELADO: ret=True con el mismo frame en buffer. Firma
+                # barata (muestra dispersa); solo un frame NUEVO refresca stale.
+                try:
+                    sig = frame[::32, ::32].tobytes()
+                except Exception:
+                    sig = None
+                if sig is None or sig != last_frame_sig:
+                    last_frame_sig = sig
+                    last_successful_read_ts = now
+                elif (now - last_successful_read_ts) > stale_seconds:
+                    logging.warning('Stream congelado (%.0fs sin frames nuevos) - reconectando...',
+                                    now - last_successful_read_ts)
+                    cap = reconnect_capture(self.cfg.rtsp_url, cap)
+                    if cap is None:
+                        logging.error('No se pudo reconectar el stream congelado; terminando proceso '
+                                      'para que el supervisor lo reinicie limpio')
+                        sys.exit(1)
+                    last_frame_sig = None
+                    last_successful_read_ts = time.time()
+                    continue
+
+                # Refetch periódico de zonas/config del Guardián: antes
+                # `_fetch_zones()` solo corría en `__init__`, así que editar
+                # zonas o el toggle enableGuardian en la UI no tenía efecto
+                # hasta reiniciar el proceso (zones_last_fetched se escribía
+                # pero nunca se releía).
+                if now - self.zones_last_fetched > zones_refetch_seconds:
+                    self._fetch_zones()
+
                 # Un FPS bajo es suficiente para tracking de personas/merodeo (ej: 2 a 5 FPS)
                 if now - last_frame_ts < self.cfg.poll_interval:
                     time.sleep(0.005)
                     continue
                 last_frame_ts = now
                 self.frame_count += 1
-                
+
                 # Heartbeat cada 30 segundos
                 if now - self.last_heartbeat > 30:
                     fps = self.frame_count / (now - self.last_heartbeat)
@@ -107,25 +167,35 @@ class GuardianWorker:
                     self.frame_count = 0
 
                 self.submit_frame(frame)
-                if self.processing_future is not None and self.processing_future.done():
-                    try:
-                        self.processing_future.result()
-                    except Exception:
-                        logging.exception('Error worker')
         finally:
             try:
                 self.executor.shutdown(wait=False)
             except Exception:
                 pass
 
+    def _on_frame_done(self, fut):
+        """Hace visible cualquier excepción del pipeline (ver LprWorker)."""
+        try:
+            fut.result()
+        except Exception:
+            logging.exception('Error procesando frame en el Guardián')
+
     def submit_frame(self, frame: np.ndarray):
-        self.latest_frame = frame.copy()
-        if self.processing_future is None or self.processing_future.done():
-            self.processing_future = self.executor.submit(self._process_frame, self.latest_frame)
+        # descartar el frame si el executor sigue ocupado con el anterior
+        if self.processing_future is not None and not self.processing_future.done():
+            return
+        fut = self.executor.submit(self._process_frame, frame)
+        fut.add_done_callback(self._on_frame_done)
+        self.processing_future = fut
 
     def _process_frame(self, frame: np.ndarray):
         now_ts = time.time()
-        
+
+        # Respetar el toggle del backend: si el Guardián está deshabilitado
+        # para esta cámara, no se procesa nada.
+        if not self.guardian_enabled:
+            return
+
         # --- CONTROL DE FPS (IA) ---
         # No procesamos IA más rápido de lo necesario (5 FPS es suficiente para seguridad)
         if now_ts - self.last_ia_proc_time < (1.0 / self.target_ia_fps):
@@ -174,7 +244,7 @@ class GuardianWorker:
 
         # classes=0 (sólo personas), persist=True (mantener IDs entre frames)
         # imgsz=960 es un buen balance entre velocidad y detección a lo lejos
-        results = self.model.track(frame, classes=[0], persist=True, tracker="bytetrack.yaml", verbose=True, imgsz=960)
+        results = self.model.track(frame, classes=[0], persist=True, tracker="bytetrack.yaml", verbose=False, imgsz=960)
         
         if not results or not results[0].boxes:
             logging.info(f"[VIGILIA-DEBUG] [TRACK-DEBUG] No se detectaron personas en este frame.")
@@ -299,7 +369,8 @@ class GuardianWorker:
             'anomalyType': anomaly_type,
             'confidence': conf,
             'meta': meta,
-            'mountPath': self.cfg.rtsp_url,
+            # NO se envía la URL RTSP (credenciales de la cámara); el backend
+            # identifica la cámara por `cameraId`.
             'detectionTimestamp': int(now_ts * 1000),
             'detection_path': det_path,
         }
