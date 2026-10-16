@@ -1,5 +1,6 @@
 import * as dns from 'dns/promises';
 import axios from 'axios';
+import type { HubConfig } from '../config';
 import { Logger } from '../utils/logger';
 
 export class ConnectivityService {
@@ -8,7 +9,11 @@ export class ConnectivityService {
   private lastCheckTime = 0;
   private readonly CHECK_INTERVAL_MS: number;
 
-  constructor() {
+  /**
+   * @param config URL del backend validada al arrancar (`loadHubConfig`,
+   *   Fase 4 · P6.M).
+   */
+  constructor(private readonly config: Pick<HubConfig, 'backendUrl'>) {
     this.CHECK_INTERVAL_MS = parseInt(
       process.env.CONNECTIVITY_CHECK_INTERVAL_MS || '30000',
       10
@@ -33,13 +38,10 @@ export class ConnectivityService {
       await dns.lookup('google.com');
       
       // Método 2: Verificar backend específicamente
-      const backendUrl = process.env.BACKEND_URL;
-      if (backendUrl) {
-        await axios.head(`${backendUrl}/health`, { 
-          timeout: 2000,
-          validateStatus: () => true // Aceptar cualquier status
-        });
-      }
+      await axios.head(`${this.config.backendUrl}/health`, {
+        timeout: 2000,
+        validateStatus: () => true // Aceptar cualquier status
+      });
 
       if (!this.isOnline) {
         this.logger.log('✅ CONEXIÓN RESTAURADA');

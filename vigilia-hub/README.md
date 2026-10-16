@@ -84,8 +84,8 @@ Empieza a desarrollar **HOY** sin esperar componentes:
 > **📖 Documentación completa de hardware**: Ver [docs/hardware/](./docs/hardware/)
 
 ### Software
-- Raspberry Pi OS (Bullseye o superior)
-- Node.js 18+
+- Raspberry Pi OS **64-bit** (Bookworm). 32-bit (`armv7l`) no está soportado
+- Node.js 22 LTS (>= 22.12)
 - ALSA tools (`arecord`, `aplay`)
 - Sox (conversión de sample rate)
 
@@ -113,7 +113,8 @@ El script verifica:
 - ✅ Sistema operativo compatible
 - ✅ Hardware detectado (RPi 3/4)
 - ✅ GPIO disponible y permisos
-- ✅ Node.js 18+ instalado
+- ✅ Sistema 64-bit (`aarch64` / `arm64`)
+- ✅ Node.js 22.12+ instalado
 - ✅ Herramientas necesarias (git, wiringpi, alsa, sox)
 - ✅ Conectividad de red
 - ✅ Espacio en disco suficiente
@@ -189,8 +190,11 @@ npm run test:hardware
 # Actualizar sistema
 sudo apt update && sudo apt upgrade -y
 
-# Instalar Node.js 18
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+# Requiere Raspberry Pi OS 64-bit: debe decir aarch64 (32-bit no soportado)
+uname -m
+
+# Instalar Node.js 22 LTS (>= 22.12)
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 
 # Instalar ALSA y Sox
@@ -218,8 +222,11 @@ cd /home/pi/vigilia-hub
 
 # Copiar archivos del proyecto
 
-# Instalar dependencias
-npm install
+# Instalar dependencias (reproducible, según package-lock.json)
+npm ci
+# pigpio (GPIO real) es dependencia opcional: npm la intenta compilar, pero no
+# falla si no puede. En la Raspberry verifica que cargó (ver INSTALLATION.md 5.2):
+node -e "require('pigpio')" && echo "pigpio OK"
 
 # Configurar variables de entorno
 cp .env.example .env
@@ -229,18 +236,20 @@ nano .env
 ### 4. Configurar archivo .env
 
 ```bash
-# Backend
-BACKEND_URL=http://192.168.1.100:3000
+# Backend (producción: https://, solo el origen; ver .env.example)
+NODE_ENV=production
+BACKEND_URL=https://vigilia.tu-dominio.cl
 HUB_ID=hub-rpi3-001
-HUB_SECRET=tu_secret_compartido_con_backend
+HUB_SECRET=<secret de 64 caracteres que devuelve POST /hubs al provisionar>
+# En desarrollo (NODE_ENV=development) se acepta BACKEND_URL=http://192.168.1.100:3000
 
-# OpenAI
-OPENAI_API_KEY=sk-...
+# (Sin API key de OpenAI: el hub pide un token efímero al backend)
 
-# Audio
-AUDIO_DEVICE=hw:1,0
-AUDIO_SAMPLE_RATE_CAPTURE=48000
-AUDIO_SAMPLE_RATE_OUTPUT=24000
+# Audio (ver .env.example)
+AUDIO_DEVICE=plughw:CARD=Headphones,DEV=0
+CAPTURE_DEVICE=plughw:CARD=Device,DEV=0
+SAMPLE_RATE=24000
+TARGET_SAMPLE_RATE=24000
 AUDIO_CHANNELS=1
 
 # GPIO
@@ -380,12 +389,9 @@ aplay -D hw:1,0 test.wav
 ### Verificar Conectividad
 
 ```bash
-# Ping al backend
-curl http://tu-backend:3000/health
-
-# Test de OpenAI
-curl https://api.openai.com/v1/models \
-  -H "Authorization: Bearer $OPENAI_API_KEY"
+# TLS + credencial del hub (no hay /health público): 200 con {hubId, type, organizationId}
+# o 401 si hubId/secret son incorrectos. Procedimiento completo, leyendo el
+# secret del .env sin dejarlo en el historial: INSTALLATION.md, "6.4 Test de Conectividad".
 ```
 
 ## 📊 Máquina de Estados
@@ -456,14 +462,10 @@ curl -v https://tu-backend.com
 
 ### OpenAI no responde
 
-```bash
-# Verificar API key
-curl https://api.openai.com/v1/models \
-  -H "Authorization: Bearer $OPENAI_API_KEY"
-
-# Verificar límites de rate
-# (Por defecto: 100 requests/min)
-```
+El hub no usa una API key de OpenAI propia: obtiene un token efímero del
+backend con las credenciales del hub. Si falla, revisa primero la conectividad
+y la credencial (INSTALLATION.md, "6.4 Test de Conectividad"), los logs del hub
+(`sudo journalctl -u vigilia-hub -n 100`) y la clave de OpenAI en el **backend**.
 
 ## 📝 Logs
 
@@ -481,7 +483,7 @@ Rotación automática:
 - **Watchdog timers**: Desactivan relés automáticamente después de 3min
 - **Multiple handlers**: SIGINT, SIGTERM, uncaughtException, unhandledRejection
 - **Modo seguro**: En cualquier error, vuelve a TRANSPARENT
-- **Auth**: HUB_SECRET compartido con backend para autenticación
+- **Auth**: secret PROPIO de cada hub (`POST /api/v1/hubs`; el backend solo guarda su hash), enviado en `auth: {hubId, hubSecret}` al namespace `/hub` y como `X-Hub-Id`/`X-Hub-Secret` por HTTP. Ver DEPLOYMENT.md
 
 ## 📦 Estructura del Proyecto
 

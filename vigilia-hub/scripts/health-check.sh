@@ -172,7 +172,7 @@ if [ -f "/opt/vigilia-hub/.env" ]; then
     info "Archivo .env existe"
     
     # Verificar variables críticas
-    CRITICAL_VARS=("BACKEND_URL" "HUB_SECRET" "OPENAI_API_KEY")
+    CRITICAL_VARS=("BACKEND_URL" "HUB_ID" "HUB_SECRET")
     for var in "${CRITICAL_VARS[@]}"; do
         if grep -q "^${var}=" /opt/vigilia-hub/.env; then
             info "Variable $var configurada"
@@ -180,6 +180,15 @@ if [ -f "/opt/vigilia-hub/.env" ]; then
             error "Variable $var NO configurada"
         fi
     done
+
+    # El .env contiene HUB_SECRET: solo el usuario del servicio debe leerlo.
+    ENV_PERMS=$(stat -c %a /opt/vigilia-hub/.env)
+    if [ "$ENV_PERMS" = "600" ]; then
+        info "Permisos de .env correctos (600)"
+    else
+        warn ".env tiene permisos $ENV_PERMS (esperado 600)"
+        echo "   Corregir con: chmod 600 /opt/vigilia-hub/.env"
+    fi
 else
     error "Archivo .env no existe"
 fi

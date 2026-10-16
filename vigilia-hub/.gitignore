@@ -34,5 +34,8 @@ data/*.json
 tmp/
 temp/
 
+# Reportes de cobertura (npm run test:coverage, CI y scripts/gate.sh)
+/coverage/
+
 # CodeGraph (indice local; codegraph.json se versiona)
 .codegraph/

@@ -298,7 +298,7 @@ mindmap
       Dual Relay Module
       CD74HC4067 Multiplexer
     Software
-      Node.js 18+
+      Node.js 22 LTS
       TypeScript
       ALSA arecord/aplay
       Sox

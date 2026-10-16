@@ -1,7 +1,42 @@
 import WebSocket from 'ws';
 import axios from 'axios';
+import type { HubConfig } from '../config';
 import { Logger } from '../utils/logger';
+import { hubAuthHeaders } from '../utils/hub-auth-headers';
+import {
+  buildHouseContextMessage,
+  parseExpectedVisitorsCount,
+} from '../utils/house-context';
 import { WebSocketClientService, type ToolExecutionResult } from './websocket-client.service';
+
+/** Evento del servidor Realtime: `type` y campos que dependen del tipo. */
+interface RealtimeServerEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
+/** Evento que el hub envía a la sesión Realtime. */
+type RealtimeClientEvent = { type: string } & Record<string, unknown>;
+
+/** `obj[key]` si `obj` es un objeto y el valor es un string. */
+function stringField(obj: unknown, key: string): string | undefined {
+  if (typeof obj !== 'object' || obj === null) {
+    return undefined;
+  }
+  const value = (obj as Record<string, unknown>)[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/** Interpreta un mensaje del WebSocket de OpenAI; `null` si no es un evento. */
+export function parseRealtimeEvent(raw: string): RealtimeServerEvent | null {
+  const parsed: unknown = JSON.parse(raw);
+  if (typeof parsed !== 'object' || parsed === null) {
+    return null;
+  }
+  return typeof (parsed as { type?: unknown }).type === 'string'
+    ? (parsed as RealtimeServerEvent)
+    : null;
+}
 
 /**
  * Definición de tool en formato Realtime (OpenAI function-calling).
@@ -27,6 +62,55 @@ interface AgentConfig {
   tools: RealtimeToolDefinition[];
 }
 
+/** Prefijo del evento con la respuesta del residente (`visitor:response:<sessionId>`). */
+export const VISITOR_RESPONSE_EVENT_PREFIX = 'visitor:response:';
+
+/**
+ * Qué se le indica al visitante tras `visitor:response:<sessionId>`:
+ *  - `enter`: aprobada y el acceso se abrió automáticamente: puede pasar.
+ *  - `denied`: rechazada: no ingresa.
+ *  - `wait`: cualquier otra cosa (aprobada pero el acceso NO se abrió
+ *    automáticamente, o payload inesperado): que espere; conserjería fue
+ *    avisada.
+ */
+export type VisitorResponseOutcome = 'enter' | 'denied' | 'wait';
+
+/**
+ * Fase 4 · P4 (fail-closed): solo "pase" si `approved === true &&
+ * entryRegistered === true`. Un rechazo explícito (`approved === false`) no
+ * ingresa. Todo lo demás (aprobada sin apertura automática, campos ausentes
+ * o de otro tipo) se trata como acceso NO abierto: que espere.
+ */
+export function classifyVisitorResponse(data: unknown): VisitorResponseOutcome {
+  if (typeof data !== 'object' || data === null) {
+    return 'wait';
+  }
+  const { approved, entryRegistered } = data as {
+    approved?: unknown;
+    entryRegistered?: unknown;
+  };
+  if (approved === true && entryRegistered === true) {
+    return 'enter';
+  }
+  if (approved === false) {
+    return 'denied';
+  }
+  return 'wait';
+}
+
+/** Instrucción de sistema para el modelo según la respuesta del residente. */
+export function visitorResponseInstruction(outcome: VisitorResponseOutcome): string {
+  const header = 'ATENCIÓN: EL SISTEMA HA RECIBIDO LA RESPUESTA DEL RESIDENTE.';
+  switch (outcome) {
+    case 'enter':
+      return `${header} La visita fue APROBADA y el acceso se abrió automáticamente: el visitante puede ingresar. Procede INMEDIATAMENTE al paso 5 del flujo e indícale que puede pasar.`;
+    case 'denied':
+      return `${header} La visita fue RECHAZADA: el visitante NO debe ingresar. Procede INMEDIATAMENTE al paso 5 del flujo y comunícaselo con amabilidad.`;
+    case 'wait':
+      return `${header} El acceso NO se abrió automáticamente: NO le digas que pase ni que la puerta se abrirá. Pídele amablemente que espere un momento, explícale que el acceso no se abrió automáticamente y que ya se avisó a conserjería para que lo atienda.`;
+  }
+}
+
 /**
  * Cliente para OpenAI Realtime API usando WebSocket directo.
  *
@@ -48,7 +132,9 @@ export class ConciergeClientService {
   private ws: WebSocket | null = null;
   private currentSessionId: string | null = null;
   private conversationActive = false;
-  private backendUrl: string;
+  private readonly backendUrl: string;
+  /** Solo en desarrollo (`loadHubConfig` la prohíbe en producción). */
+  private readonly debugOpenAiKey: string | null;
   private audioHandlers: ((audioBuffer: Buffer) => void)[] = [];
   private audioDoneHandlers: (() => void)[] = [];
   private speechStartedHandlers: (() => void)[] = [];
@@ -63,16 +149,16 @@ export class ConciergeClientService {
   private readonly REALTIME_MODEL = 'gpt-realtime-mini-2025-12-15';
   private readonly REALTIME_WS_URL = 'wss://api.openai.com/v1/realtime';
 
+  /**
+   * @param config configuración validada al arrancar (`loadHubConfig`):
+   *   `backendUrl` (https en producción) y `debugOpenAiKey`.
+   */
   constructor(
-    private readonly websocketClient: WebSocketClientService
+    private readonly websocketClient: WebSocketClientService,
+    config: Pick<HubConfig, 'backendUrl' | 'debugOpenAiKey'>,
   ) {
-    const backendUrl = process.env.BACKEND_API_URL;
-
-    if (!backendUrl) {
-      throw new Error('BACKEND_API_URL no configurado en .env');
-    }
-
-    this.backendUrl = backendUrl;
+    this.backendUrl = config.backendUrl;
+    this.debugOpenAiKey = config.debugOpenAiKey;
     this.logger.log('✅ Concierge Client inicializado (WebSocket nativo)');
     this.logger.log(`📡 Backend URL: ${this.backendUrl}`);
     this.logger.log(`🤖 Modelo: ${this.REALTIME_MODEL}`);
@@ -86,8 +172,7 @@ export class ConciergeClientService {
    * manda los suyos.
    */
   private hubHeaders(): Record<string, string> {
-    const { hubId, hubSecret } = this.websocketClient.getHubCredentials();
-    return { 'X-Hub-Secret': hubSecret, 'X-Hub-Id': hubId };
+    return hubAuthHeaders(this.websocketClient.getHubCredentials());
   }
 
   /**
@@ -121,17 +206,19 @@ export class ConciergeClientService {
       let ephemeralToken: string;
       let sessionId: string;
 
-      // 🔍 DEBUG: Permitir uso directo de API Key para descartar problemas de tokens efímeros
-      if (process.env.DEBUG_OPENAI_KEY) {
+      // 🔍 DEBUG: Permitir uso directo de API Key para descartar problemas de
+      // tokens efímeros. Solo en desarrollo: `loadHubConfig` la prohíbe en
+      // producción.
+      if (this.debugOpenAiKey) {
         this.logger.warn('⚠️ MODO DEBUG ACTIVADO: Usando API Key directa (Bypassing Backend) ⚠️');
-        ephemeralToken = process.env.DEBUG_OPENAI_KEY;
+        ephemeralToken = this.debugOpenAiKey;
         sessionId = `debug_${Date.now()}`;
         this.currentSessionId = sessionId;
       } else {
         this.logger.log('🎫 Solicitando token efímero al backend...');
-        
+
         // Obtener token efímero y sessionId del backend
-        const response = await axios.post(
+        const response = await axios.post<{ ephemeralToken: string; sessionId: string }>(
           `${this.backendUrl}/api/v1/concierge/session/start`,
           { socketId: this.websocketClient.getSocketId() },
           { headers: this.hubHeaders() },
@@ -140,7 +227,8 @@ export class ConciergeClientService {
         ephemeralToken = response.data.ephemeralToken;
         sessionId = response.data.sessionId;
         this.currentSessionId = sessionId;
-        this.logger.log(`✅ Token efímero obtenido. SessionId: ${sessionId}`);
+        // Fase 4 · P6.M: sin el sessionId (identifica la sesión ante el backend).
+        this.logger.log('✅ Token efímero y sesión obtenidos del backend');
       }
       
       this.logger.log('🤖 Conectando a OpenAI Realtime API via WebSocket...');
@@ -184,7 +272,11 @@ export class ConciergeClientService {
     } catch (error) {
       this.logger.error('❌ Error conectando a OpenAI:', error);
       if (axios.isAxiosError(error)) {
-        this.logger.error(`Detalles del error HTTP: ${error.response?.status} - ${JSON.stringify(error.response?.data)}`);
+        // Fase 4 · P6.M: en error solo el status; el cuerpo, en debug (redactado).
+        this.logger.error(`Detalles del error HTTP: status=${error.response?.status ?? 'n/a'}`);
+        this.logger.debug('Cuerpo del error HTTP del backend', {
+          responseBody: error.response?.data,
+        });
       }
       throw error;
     }
@@ -192,13 +284,16 @@ export class ConciergeClientService {
 
   /**
    * Suscribe a los eventos del backend para la sesión actual
+   * (`visitor:response:<sessionId>`). Fase 4 · P4: el mensaje al visitante es
+   * fail-closed (ver `classifyVisitorResponse`).
    */
   private subscribeToBackendEvents(sessionId: string): void {
-      const eventName = `visitor:response:${sessionId}`;
-      
-      this.websocketClient.onEvent(eventName, (data: any) => {
-          this.logger.log(`🔔 Evento de residente recibido! Decisión: ${data.approved ? 'APROBADA' : 'RECHAZADA'}`);
-          
+      const eventName = `${VISITOR_RESPONSE_EVENT_PREFIX}${sessionId}`;
+
+      this.websocketClient.onEvent(eventName, (data: unknown) => {
+          const outcome = classifyVisitorResponse(data);
+          this.logger.log(`🔔 Respuesta del residente recibida: ${outcome}`);
+
           this.clearWaitingTimeout(); // Detener temporizador si contesta
 
           if (!this.conversationActive) {
@@ -215,7 +310,7 @@ export class ConciergeClientService {
                   content: [
                       {
                           type: 'input_text',
-                          text: `ATENCIÓN: EL SISTEMA HA RECIBIDO LA RESPUESTA DEL RESIDENTE. La visita ha sido ${data.approved ? 'APROBADA (Debe ingresar)' : 'RECHAZADA (No debe ingresar)'}. Procede INMEDIATAMENTE al paso 5 del flujo y dáselo a conocer al visitante basado en esta respuesta oficial.`
+                          text: visitorResponseInstruction(outcome)
                       }
                   ]
               }
@@ -304,7 +399,12 @@ export class ConciergeClientService {
       }
     };
 
-    this.logger.log('📤 Enviando configuración de sesión:', JSON.stringify(sessionConfig, null, 2));
+    // Fase 4 · P6.M: en info solo metadatos; el `session.update` completo
+    // (prompt y tools) va en debug y con `instructions` redactado.
+    this.logger.log(
+      `📤 Enviando configuración de sesión (instrucciones: ${this.agentConfig.instructions.length} caracteres, ${this.agentConfig.tools.length} tools)`,
+    );
+    this.logger.debug('📤 session.update', { sessionUpdate: sessionConfig });
     this.sendEvent(sessionConfig);
 
     this.logger.log('📋 Sesión de OpenAI configurada exitosamente');
@@ -313,7 +413,7 @@ export class ConciergeClientService {
   /**
    * Método auxiliar para enviar eventos al WebSocket
    */
-  private sendEvent(event: any): void {
+  private sendEvent(event: RealtimeClientEvent): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       this.logger.error('❌ WebSocket no está abierto, no se puede enviar evento');
       return;
@@ -333,7 +433,11 @@ export class ConciergeClientService {
     // Mensaje recibido del WebSocket
     this.ws.on('message', (data: WebSocket.Data) => {
       try {
-        const event = JSON.parse(data.toString());
+        const event = parseRealtimeEvent(data.toString());
+        if (!event) {
+          this.logger.warn('Mensaje de WebSocket sin tipo de evento: se ignora');
+          return;
+        }
         this.handleRealtimeEvent(event);
       } catch (error) {
         this.logger.error('❌ Error parseando mensaje de WebSocket:', error);
@@ -355,18 +459,25 @@ export class ConciergeClientService {
   /**
    * Maneja eventos de la Realtime API
    */
-  private handleRealtimeEvent(event: any): void {
+  /**
+   * Maneja eventos de la Realtime API.
+   *
+   * Fase 4 · P6.M: en `info` solo metadatos (tipo de evento, largos, nombre
+   * de la tool). El evento completo va en `debug`, y el formato del logger
+   * redacta transcripciones, textos, argumentos, instrucciones y tokens.
+   */
+  private handleRealtimeEvent(event: RealtimeServerEvent): void {
     const { type } = event;
 
     // Filtrar eventos ruidosos (deltas)
     if (!type.includes('delta') && !type.includes('input_audio_buffer')) {
-      this.logger.log(`📥 Evento: ${type}`, JSON.stringify(event, null, 2));
+      this.logger.debug(`📥 Evento: ${type}`, { event });
     }
 
     switch (type) {
       // Sesión
       case 'session.created':
-        this.logger.log(`✅ Sesión creada: ${event.session?.id}`);
+        this.logger.log('✅ Sesión de OpenAI creada');
         break;
 
       case 'session.updated':
@@ -375,42 +486,50 @@ export class ConciergeClientService {
 
       // Respuestas
       case 'response.created':
-        this.logger.log(`🎬 Respuesta iniciada: ${event.response?.id}`);
+        this.logger.log('🎬 Respuesta iniciada');
         this.isInterrupted = false; // Nueva respuesta, resetear flag
         this.isResponseActive = true; // <-- NUEVO
         break;
 
-      case 'response.done':
-        this.logger.log(`✅ Respuesta completa: ${event.response?.id}`);
-        this.logger.log('Detalles:', JSON.stringify(event.response, null, 2));
+      case 'response.done': {
+        const output = (event.response as { output?: unknown } | undefined)?.output;
+        this.logger.log(
+          `✅ Respuesta completa (status: ${stringField(event.response, 'status') ?? 'n/a'}, items: ${
+            Array.isArray(output) ? output.length : 0
+          })`,
+        );
+        this.logger.debug('Detalles de la respuesta', { response: event.response });
         this.isResponseActive = false; // <-- NUEVO
         break;
+      }
 
       case 'response.content_part.added':
-        this.logger.log(`📝 Content part agregado: ${event.part?.type}`);
+        this.logger.log(`📝 Content part agregado: ${stringField(event.part, 'type') ?? 'n/a'}`);
         break;
 
       case 'response.output_item.added':
-        this.logger.log(`📝 Output item agregado: ${event.item?.type}`);
+        this.logger.log(`📝 Output item agregado: ${stringField(event.item, 'type') ?? 'n/a'}`);
         break;
 
       case 'response.output_item.done':
-        this.logger.log(`✅ Output item completado: ${event.item?.type}`);
+        this.logger.log(`✅ Output item completado: ${stringField(event.item, 'type') ?? 'n/a'}`);
         break;
 
       // Audio
       case 'response.audio.delta':
-      case 'response.output_audio.delta':
+      case 'response.output_audio.delta': {
         if (this.isInterrupted) {
           // Ignorar audio si el usuario interrumpió
           return;
         }
         this.logger.debug('🔊 Audio delta recibido');
-        if (event.delta) {
-          const audioBuffer = Buffer.from(event.delta, 'base64');
+        const delta = stringField(event, 'delta');
+        if (delta) {
+          const audioBuffer = Buffer.from(delta, 'base64');
           this.audioHandlers.forEach(handler => handler(audioBuffer));
         }
         break;
+      }
 
       case 'response.audio.done':
       case 'response.output_audio.done':
@@ -418,14 +537,19 @@ export class ConciergeClientService {
         this.audioDoneHandlers.forEach(handler => handler());
         break;
 
-      // Transcripción
+      // Transcripción: en info solo el largo, nunca el texto (es la voz del
+      // visitante: nombre, RUT, teléfono).
       case 'conversation.item.input_audio_transcription.completed':
-        this.logger.log(`👤 Usuario: ${event.transcript}`);
+        this.logger.log(
+          `👤 Transcripción del usuario recibida (${stringField(event, 'transcript')?.length ?? 0} caracteres)`,
+        );
         break;
 
       case 'conversation.item.input_audio_transcription.failed':
-        // FIX: Concatenar error al mensaje para que el logger personalizado lo muestre
-        this.logger.warn(`⚠️ Transcripción fallida: ${JSON.stringify(event.error, null, 2)}`);
+        this.logger.warn('⚠️ Transcripción fallida', {
+          code: stringField(event.error, 'code'),
+          errorType: stringField(event.error, 'type'),
+        });
         break;
 
       // VAD
@@ -452,17 +576,27 @@ export class ConciergeClientService {
         // Acumular argumentos si es necesario
         break;
 
-      case 'response.function_call_arguments.done':
-        this.handleToolCall(event);
-        break;
-
-      // Errores
-      case 'error':
-        // Log detallado de CUALQUIER error
-        this.logger.error('❌ Error de OpenAI (Detalle Completo):', JSON.stringify(event, null, 2));
-        if (event.error?.code) {
-             this.logger.error(`Error Code: ${event.error.code} - Message: ${event.error.message}`);
+      case 'response.function_call_arguments.done': {
+        const name = stringField(event, 'name');
+        const callId = stringField(event, 'call_id');
+        const args = stringField(event, 'arguments');
+        if (name === undefined || callId === undefined || args === undefined) {
+          this.logger.warn('Tool call sin name/call_id/arguments: se ignora');
+          break;
         }
+        void this.handleToolCall({ name, call_id: callId, arguments: args });
+        break;
+      }
+
+      // Errores: código y mensaje de OpenAI (no traen datos del visitante);
+      // el evento completo, en debug.
+      case 'error':
+        this.logger.error(
+          `❌ Error de OpenAI: ${stringField(event.error, 'code') ?? 'sin código'} - ${
+            stringField(event.error, 'message') ?? 'sin mensaje'
+          }`,
+        );
+        this.logger.debug('Detalle del error de OpenAI', { event });
         break;
 
       default:
@@ -488,13 +622,21 @@ export class ConciergeClientService {
 
     let args: Record<string, unknown>;
     try {
-      args = JSON.parse(argsString);
+      const parsed: unknown = JSON.parse(argsString);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        this.logger.error(`Argumentos de la tool ${name} no son un objeto: se ignora`);
+        return;
+      }
+      args = parsed as Record<string, unknown>;
     } catch (error) {
       this.logger.error('Error parseando argumentos de tool call:', error);
       return;
     }
 
-    this.logger.log(`🔧 Tool call: ${name}(${JSON.stringify(args)})`);
+    // Fase 4 · P6.M: en info el nombre de la tool, sin argumentos (datos del
+    // visitante). En debug, solo qué campos trae.
+    this.logger.log(`🔧 Tool call: ${name}`);
+    this.logger.debug(`🔧 Campos de ${name}`, { argKeys: Object.keys(args) });
 
     try {
       const result: ToolExecutionResult = await this.websocketClient.executeTool(
@@ -570,12 +712,45 @@ export class ConciergeClientService {
   }
 
   /**
+   * Pide al backend la cantidad de visitas esperadas de la casa
+   * (`{ expectedVisitorsCount }`, corrección P7: sin nombres). `null` si no
+   * se pudo obtener o la respuesta no tiene esa forma.
+   */
+  private async fetchExpectedVisitorsCount(houseNumber: string): Promise<number | null> {
+    try {
+      this.logger.log('🔍 Consultando visitas esperadas de la casa...');
+      const response = await axios.post<unknown>(
+        `${this.backendUrl}/api/v1/concierge/context/${encodeURIComponent(houseNumber)}`,
+        {},
+        { headers: this.hubHeaders() },
+      );
+      const expectedVisitorsCount = parseExpectedVisitorsCount(response.data);
+      this.logger.log(
+        expectedVisitorsCount === null
+          ? '⚠️ Contexto de la casa con un formato inesperado: se ignora'
+          : `✅ Contexto de la casa obtenido (${expectedVisitorsCount} visitas esperadas)`,
+      );
+      return expectedVisitorsCount;
+    } catch (error) {
+      this.logger.warn('⚠️ No se pudo obtener el contexto de la casa', {
+        status: axios.isAxiosError(error) ? error.response?.status : undefined,
+      });
+      return null;
+    }
+  }
+
+  /**
    * Inicia una conversación con el número de casa marcado.
    *
    * El prompt "Sofía" (con houseNumber ya interpolado) se cargó en
    * `configureSession()` a partir de `agentConfig.instructions` — acá solo
-   * se inyecta el HISTORIAL de visitas, que es dato dinámico obtenido en
+   * se inyecta el contexto de la casa, que es dato dinámico obtenido en
    * caliente y no forma parte del prompt fijo que devuelve el backend.
+   *
+   * Fase 4 · P6.M: el contexto va como mensaje `user` delimitado y marcado
+   * como datos (`buildHouseContextMessage`), nunca como `system`. Corrección
+   * P7 (cyber B8): solo la cantidad de visitas registradas, sin nombres. El
+   * prompt de Sofía dice que nunca otorga acceso.
    */
   async startConversation(houseNumber: string): Promise<void> {
     if (this.conversationActive) {
@@ -584,39 +759,25 @@ export class ConciergeClientService {
     }
 
     this.logger.log(`🎙️ Iniciando conversación para casa ${houseNumber}`);
-    
+
     this.conversationActive = true;
     this.targetHouse = houseNumber;
-    
-    let contextStr = 'Sin contexto histórico previo o fallo en obtenerlo.';
-    try {
-      this.logger.log('🔍 Consultando historial de visitantes a la casa...');
-      const response = await axios.post(
-        `${this.backendUrl}/api/v1/concierge/context/${houseNumber}`,
-        {},
-        { headers: this.hubHeaders() },
-      );
-      contextStr = response.data.context;
-      this.logger.log(`✅ Historial inyectado en prompt: ${contextStr}`);
-    } catch (e) {
-      this.logger.warn('⚠️ No se pudo obtener el historial de visitas para el contexto.');
-    }
 
-    // Inyectar el historial de visitas como mensaje de sistema adicional
-    // (dato dinámico; el prompt base ya viene fijado desde configureSession())
-    this.logger.log('📤 Agregando historial de visitas al contexto...');
+    const expectedVisitorsCount = await this.fetchExpectedVisitorsCount(houseNumber);
+
+    this.logger.log('📤 Agregando contexto de la casa (datos, no instrucciones)...');
     this.sendEvent({
       type: 'conversation.item.create',
       item: {
         type: 'message',
-        role: 'system',
+        role: 'user',
         content: [
           {
             type: 'input_text',
-            text: `HISTORIAL DE VISITAS OBTENIDO DE LA BASE DE DATOS PARA LA CASA ${houseNumber}: ${contextStr}`
-          }
-        ]
-      }
+            text: buildHouseContextMessage(expectedVisitorsCount),
+          },
+        ],
+      },
     });
 
     // Solicitar respuesta inicial. El saludo y el resto del flujo ya están
@@ -722,7 +883,7 @@ export class ConciergeClientService {
     // Notificar al backend que finalizó la sesión
     if (this.currentSessionId) {
       // Limpiar listener de Socket.IO
-      this.websocketClient.offEvent(`visitor:response:${this.currentSessionId}`);
+      this.websocketClient.offEvent(`${VISITOR_RESPONSE_EVENT_PREFIX}${this.currentSessionId}`);
 
       try {
         await axios.post(
@@ -730,9 +891,9 @@ export class ConciergeClientService {
           { finalStatus: 'completed' },
           { headers: this.hubHeaders() },
         );
-        this.logger.log(`✅ Sesión ${this.currentSessionId} finalizada en el backend`);
-      } catch (error: any) {
-        this.logger.error(`Error finalizando sesión en backend: ${error.message}`);
+        this.logger.log('✅ Sesión finalizada en el backend');
+      } catch (error: unknown) {
+        this.logger.error('Error finalizando sesión en backend', error);
       }
       this.currentSessionId = null;
     }

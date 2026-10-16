@@ -1,4 +1,7 @@
-import * as dotenv from 'dotenv';
+// Primero: carga el .env ANTES de importar el logger (lee LOG_LEVEL al
+// importarse) y antes de validar la configuración.
+import 'dotenv/config';
+import { HubConfigError, loadHubConfig, type HubConfig } from './config';
 import { Logger } from './utils/logger';
 import { LocalCacheService } from './services/local-cache.service';
 import { ConnectivityService } from './services/connectivity.service';
@@ -11,15 +14,18 @@ import { ConciergeClientService } from './services/concierge-client.service';
 import { AudioRouterService } from './services/audio-router.service';
 import { DoorControllerService } from './services/door-controller.service';
 
-// Cargar variables de entorno
-dotenv.config();
-
 const logger = new Logger('Main');
 
 /**
  * Sistema principal del HUB
  */
 class VigiliaHubApplication {
+  /**
+   * Fase 4 · P6.M: configuración validada UNA vez al arrancar
+   * (`loadHubConfig`); los servicios la reciben por constructor.
+   */
+  constructor(private readonly config: HubConfig) {}
+
   private localCache!: LocalCacheService;
   private connectivity!: ConnectivityService;
   private gpioController!: GPIOControllerService;
@@ -40,8 +46,8 @@ class VigiliaHubApplication {
     try {
       // 1. Servicios de conectividad y caché
       logger.log('📡 Inicializando conectividad y caché...');
-      this.connectivity = new ConnectivityService();
-      this.localCache = new LocalCacheService();
+      this.connectivity = new ConnectivityService(this.config);
+      this.localCache = new LocalCacheService(this.config);
       
       await Promise.all([
         this.connectivity.start(),
@@ -58,8 +64,8 @@ class VigiliaHubApplication {
 
       // 3. Clientes de comunicación
       logger.log('☁️ Conectando a servicios externos...');
-      this.websocketClient = new WebSocketClientService(this.connectivity);
-      this.conciergeClient = new ConciergeClientService(this.websocketClient);
+      this.websocketClient = new WebSocketClientService(this.connectivity, this.config);
+      this.conciergeClient = new ConciergeClientService(this.websocketClient, this.config);
 
       await this.websocketClient.connect();
       // NOTA: conciergeClient se conecta bajo demanda cuando se inicia una conversación
@@ -160,7 +166,20 @@ class VigiliaHubApplication {
  * Punto de entrada
  */
 async function main() {
-  const app = new VigiliaHubApplication();
+  let config: HubConfig;
+  try {
+    config = loadHubConfig(process.env, (warning) => logger.warn(`⚠️ ${warning}`));
+  } catch (error) {
+    // Fail-fast: sin configuración válida el hub no arranca. El mensaje
+    // nombra las variables, nunca sus valores (sin stack: es ruido acá).
+    if (error instanceof HubConfigError) {
+      logger.error(error.message);
+    } else {
+      logger.error('Configuración inválida', error);
+    }
+    process.exit(1);
+  }
+  const app = new VigiliaHubApplication(config);
   await app.initialize();
 }
 
