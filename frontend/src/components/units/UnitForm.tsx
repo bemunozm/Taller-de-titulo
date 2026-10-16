@@ -2,7 +2,10 @@ import { useForm } from 'react-hook-form'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'react-toastify'
 import { createUnit, updateUnit } from '@/api/UnitAPI'
-import { type CreateUnitFormData, type Unit } from '@/types/index'
+import { type CreateUnitFormData, type OrganizationScoped, type Unit } from '@/types/index'
+import { CONDOMINIUM_REQUIRED_MESSAGE, scopeCreatePayload, withoutOrganizationId } from '@/helpers/condominium'
+import { useCondominiumScope } from '@/hooks/useCondominiumScope'
+import { CondominiumSelect } from '@/components/condominiums/CondominiumSelect'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Field, Label } from '@/components/ui/Fieldset'
@@ -13,6 +16,8 @@ interface UnitFormProps {
   unit?: Unit
   onSuccess?: () => void
 }
+
+type UnitFormValues = CreateUnitFormData & OrganizationScoped
 
 const UNIT_TYPES = [
   { value: 'Departamento', label: 'Departamento' },
@@ -26,6 +31,8 @@ const UNIT_TYPES = [
 export function UnitForm({ unit, onSuccess }: UnitFormProps) {
   const queryClient = useQueryClient()
   const isEditing = !!unit
+  // Super-admin creando: elige el condominio (obligatorio); nadie más lo envía.
+  const { chooseCondominium } = useCondominiumScope(isEditing)
 
   const {
     register,
@@ -33,13 +40,15 @@ export function UnitForm({ unit, onSuccess }: UnitFormProps) {
     formState: { errors },
     watch,
     setValue,
-  } = useForm<CreateUnitFormData>({
+    setError,
+  } = useForm<UnitFormValues>({
     defaultValues: {
       block: unit?.block || undefined,
       number: unit?.number || '',
       floor: unit?.floor || undefined,
       type: unit?.type || undefined,
       active: unit?.active ?? true,
+      organizationId: '',
     },
   })
 
@@ -74,7 +83,7 @@ export function UnitForm({ unit, onSuccess }: UnitFormProps) {
     },
   })
 
-  const onSubmit = (data: CreateUnitFormData) => {
+  const onSubmit = (data: UnitFormValues) => {
     // Convertir strings vacíos y valores inválidos a undefined
     const formData = {
       ...data,
@@ -84,16 +93,29 @@ export function UnitForm({ unit, onSuccess }: UnitFormProps) {
     }
 
     if (isEditing) {
-      updateMutation.mutate({ id: unit.id, formData })
-    } else {
-      createMutation.mutate(formData)
+      // `PATCH /units/:id` con organizationId → 400: nunca viaja al editar.
+      updateMutation.mutate({ id: unit.id, formData: withoutOrganizationId(formData) })
+      return
     }
+    if (chooseCondominium && !data.organizationId) {
+      setError('organizationId', { type: 'required', message: CONDOMINIUM_REQUIRED_MESSAGE })
+      return
+    }
+    createMutation.mutate(scopeCreatePayload(formData, chooseCondominium))
   }
 
   const isLoading = createMutation.isPending || updateMutation.isPending
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
+      {chooseCondominium && (
+        <CondominiumSelect
+          {...register('organizationId')}
+          errorMessage={errors.organizationId?.message}
+          description="La unidad se crea en este condominio."
+        />
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Field>
           <Label>Bloque (Opcional)</Label>

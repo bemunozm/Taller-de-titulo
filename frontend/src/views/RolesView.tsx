@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { listRoles } from '@/api/RoleAPI'
 import { RoleTable } from '@/components/roles/RoleTable'
+import { Protected } from '@/components/auth/Protected'
 import { Button } from '@/components/ui/Button'
 import { Heading, Subheading } from '@/components/ui/Heading'
 import { 
@@ -21,7 +22,7 @@ export function RolesView() {
   })
 
   const handleCreate = () => {
-    navigate('/roles/create')
+    navigate('/settings/roles/create')
   }
 
   // Calcular estadísticas
@@ -56,14 +57,16 @@ export function RolesView() {
           <div>
             <Heading>Gestión de Roles</Heading>
             <Subheading>
-              Administra los roles y permisos del sistema
+              Roles y permisos del sistema. Los roles de sistema no se modifican; los personalizados los gestiona el Super Administrador.
             </Subheading>
           </div>
         </div>
-        <Button color="indigo" onClick={handleCreate}>
-          <PlusIcon className="w-5 h-5" />
-          Nuevo Rol
-        </Button>
+        <Protected superAdminOnly>
+          <Button color="indigo" onClick={handleCreate}>
+            <PlusIcon className="w-5 h-5" />
+            Nuevo Rol
+          </Button>
+        </Protected>
       </header>
 
       {/* Stats Grid */}

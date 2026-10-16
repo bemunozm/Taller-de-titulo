@@ -1,6 +1,6 @@
 import api from '@/lib/axios'
 import { isAxiosError } from 'axios'
-import type { Family, CreateFamilyFormData, UpdateFamilyFormData, AvailableUser } from '@/types/index'
+import type { Family, CreateFamilyPayload, UpdateFamilyFormData, AvailableUser } from '@/types/index'
 
 // Obtener todas las familias
 export async function getFamilies() {
@@ -29,7 +29,7 @@ export async function getFamilyById(id: string) {
 }
 
 // Crear una nueva familia
-export async function createFamily(formData: CreateFamilyFormData) {
+export async function createFamily(formData: CreateFamilyPayload) {
     try {
         const { data } = await api.post<Family>('/families', formData)
         return data
@@ -41,10 +41,26 @@ export async function createFamily(formData: CreateFamilyFormData) {
     }
 }
 
+/**
+ * Body de `PATCH /families/:id` solo con los campos de `UpdateFamilyDto`
+ * (name, description, unitId, active, digitalConciergeEnabled). Con
+ * forbidNonWhitelisted, cualquier otro (`organizationId`, `members`, `unit`...)
+ * responde 400, así que se copian uno a uno aunque el llamador pase de más.
+ */
+export function toUpdateFamilyBody(formData: UpdateFamilyFormData): UpdateFamilyFormData {
+    const body: UpdateFamilyFormData = {}
+    if (formData.name !== undefined) body.name = formData.name
+    if (formData.description !== undefined) body.description = formData.description
+    if (formData.unitId !== undefined) body.unitId = formData.unitId
+    if (formData.active !== undefined) body.active = formData.active
+    if (formData.digitalConciergeEnabled !== undefined) body.digitalConciergeEnabled = formData.digitalConciergeEnabled
+    return body
+}
+
 // Actualizar una familia
 export async function updateFamily({ id, formData }: { id: string; formData: UpdateFamilyFormData }) {
     try {
-        const { data } = await api.patch<Family>(`/families/${id}`, formData)
+        const { data } = await api.patch<Family>(`/families/${id}`, toUpdateFamilyBody(formData))
         return data
     } catch (error) {
         if (isAxiosError(error) && error.response) {

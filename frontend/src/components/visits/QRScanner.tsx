@@ -16,6 +16,15 @@ export function QRScanner({ onScan, onError, isScanning }: QRScannerProps) {
   const [error, setError] = useState<string>('')
   const hasScannedRef = useRef(false) // Para evitar múltiples escaneos
 
+  // Los callbacks viven en refs: si el padre pasa funciones nuevas en cada
+  // render, la cámara no se reinicia (antes eran dependencias del efecto).
+  const onScanRef = useRef(onScan)
+  const onErrorRef = useRef(onError)
+  useEffect(() => {
+    onScanRef.current = onScan
+    onErrorRef.current = onError
+  }, [onScan, onError])
+
   useEffect(() => {
     // Obtener cámaras disponibles
     Html5Qrcode.getCameras()
@@ -37,13 +46,13 @@ export function QRScanner({ onScan, onError, isScanning }: QRScannerProps) {
           setSelectedCamera(backCamera?.id || devices[0].id)
         } else {
           setError('No se encontraron cámaras disponibles')
-          onError?.('No se encontraron cámaras disponibles')
+          onErrorRef.current?.('No se encontraron cámaras disponibles')
         }
       })
-      .catch((err) => {
-        console.error('Error al obtener cámaras:', err)
+      .catch(() => {
+        // El error se informa en pantalla y vía `onError`; no se escribe en consola.
         setError('Error al acceder a las cámaras')
-        onError?.('Error al acceder a las cámaras')
+        onErrorRef.current?.('Error al acceder a las cámaras')
       })
 
     return () => {
@@ -54,24 +63,28 @@ export function QRScanner({ onScan, onError, isScanning }: QRScannerProps) {
           .then(() => {
             scannerRef.current?.clear()
           })
-          .catch(console.error)
+          .catch(() => {
+            // Ya estaba detenido: nada que limpiar.
+          })
       }
     }
   }, [])
 
   useEffect(() => {
     if (!selectedCamera || !isScanning) {
-      // Si dejamos de escanear, detener el scanner
+      // Si dejamos de escanear, detener el scanner. `getState` funciona aunque
+      // nunca haya arrancado (devuelve NOT_STARTED), así que no hace falta
+      // consultar `isInitialized` (que además reiniciaría el efecto).
       const stopScanner = async () => {
-        if (scannerRef.current && isInitialized) {
+        if (scannerRef.current) {
           try {
             const state = await scannerRef.current.getState()
             if (state === 2) { // 2 = SCANNING
               await scannerRef.current.stop()
               scannerRef.current.clear()
             }
-          } catch (err) {
-            console.log('Error al detener scanner:', err)
+          } catch {
+            // Ya estaba detenido: nada que hacer.
           } finally {
             setIsInitialized(false)
           }
@@ -101,16 +114,16 @@ export function QRScanner({ onScan, onError, isScanning }: QRScannerProps) {
           selectedCamera,
           config,
           (decodedText) => {
-            // QR detectado exitosamente
-            console.log('QR escaneado:', decodedText)
-            
+            // El contenido del QR es una credencial de acceso: se entrega al
+            // callback y nunca se escribe en consola.
+
             // Evitar múltiples llamadas al callback
             if (hasScannedRef.current) return
             hasScannedRef.current = true
-            
+
             // Llamar al callback
-            onScan(decodedText)
-            
+            onScanRef.current(decodedText)
+
             // Detener el escáner después de un escaneo exitoso
             setTimeout(async () => {
               if (scannerRef.current) {
@@ -121,8 +134,8 @@ export function QRScanner({ onScan, onError, isScanning }: QRScannerProps) {
                     scannerRef.current.clear()
                     setIsInitialized(false)
                   }
-                } catch (err) {
-                  console.log('Error al detener después de escanear:', err)
+                } catch {
+                  // Ya estaba detenido: solo se refleja en el estado.
                   setIsInitialized(false)
                 }
               }
@@ -136,10 +149,10 @@ export function QRScanner({ onScan, onError, isScanning }: QRScannerProps) {
 
         setIsInitialized(true)
         setError('')
-      } catch (err) {
-        console.error('Error al iniciar escáner:', err)
+      } catch {
+        // El error se informa en pantalla y vía `onError`; no se escribe en consola.
         setError('Error al iniciar la cámara')
-        onError?.('Error al iniciar la cámara')
+        onErrorRef.current?.('Error al iniciar la cámara')
       }
     }
 
@@ -155,8 +168,8 @@ export function QRScanner({ onScan, onError, isScanning }: QRScannerProps) {
               await scannerRef.current.stop()
               scannerRef.current.clear()
             }
-          } catch (err) {
-            console.log('Cleanup - Error:', err)
+          } catch {
+            // Ya estaba detenido: nada que hacer.
           } finally {
             setIsInitialized(false)
           }
@@ -164,7 +177,7 @@ export function QRScanner({ onScan, onError, isScanning }: QRScannerProps) {
       }
       cleanup()
     }
-  }, [selectedCamera, isScanning, onScan, onError])
+  }, [selectedCamera, isScanning])
 
   if (error) {
     return (

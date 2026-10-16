@@ -4,7 +4,7 @@ import {
   EyeIcon, 
   HashtagIcon, 
   CpuChipIcon,
-  FingerPrintIcon,
+  KeyIcon,
   SignalIcon
 } from '@heroicons/react/24/outline'
 
@@ -25,22 +25,23 @@ const features = [
   },
   {
     title: 'Next-Gen LPR',
-    desc: 'Reconocimiento de matrículas con precisión militar para accesos automatizados.',
+    desc: 'Lectura de patentes que abre de forma automática solo a vehículos autorizados.',
     icon: HashtagIcon,
     color: 'bg-indigo-500',
     delay: 0.3
   },
   {
     title: 'Edge AI Computing',
-    desc: 'Procesamiento en el origen del video para latencia cero y máxima privacidad.',
+    desc: 'Procesamiento cerca de la cámara: menos latencia y menos video viajando por la red.',
     icon: CpuChipIcon,
     color: 'bg-zinc-500',
     delay: 0.4
   },
   {
-    title: 'Control Biométrico',
-    desc: 'Sincronización con dispositivos de acceso para un ecosistema unificado.',
-    icon: FingerPrintIcon,
+    // Antes "Control Biométrico": Vigilia no usa biometría (ver la política de privacidad).
+    title: 'Control de Accesos',
+    desc: 'Sincronización con el citófono y los dispositivos de acceso para un ecosistema unificado.',
+    icon: KeyIcon,
     color: 'bg-indigo-500',
     delay: 0.5
   },

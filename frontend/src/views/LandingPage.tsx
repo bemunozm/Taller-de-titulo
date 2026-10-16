@@ -7,7 +7,9 @@ import Pricing from '../components/landing/Pricing'
 import AIIntelligenceComposition from '../components/landing/AIIntelligenceComposition'
 import MobileShowcase from '../components/landing/MobileShowcase'
 import { motion } from 'motion/react'
+import { Link } from 'react-router-dom'
 import { HeartIcon } from '@heroicons/react/24/solid'
+import { PRIVACY_POLICY_ROUTE } from '@/helpers/privacyPolicy'
 
 export default function LandingPage() {
   return (
@@ -117,9 +119,18 @@ export default function LandingPage() {
               <div className="space-y-6">
                  <h5 className="text-[10px] font-black text-white uppercase tracking-widest">Legal</h5>
                  <ul className="space-y-4 text-xs font-bold text-zinc-500 uppercase tracking-widest">
-                    <li className="hover:text-indigo-400 transition-colors cursor-pointer text-[9px]">Privacidad</li>
-                    <li className="hover:text-indigo-400 transition-colors cursor-pointer text-[9px]">Términos</li>
-                    <li className="hover:text-indigo-400 transition-colors cursor-pointer text-[9px]">Cumplimiento GDPR</li>
+                    {/* Sin "Términos": no hay términos de servicio publicados. */}
+                    <li className="text-[9px]">
+                       <Link to={PRIVACY_POLICY_ROUTE} className="rounded-sm hover:text-indigo-400 transition-colors focus-visible:text-indigo-400 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-indigo-400">
+                          Privacidad
+                       </Link>
+                    </li>
+                    {/* Sin sellos de cumplimiento no acreditados (antes "Cumplimiento GDPR"): solo lo publicado. */}
+                    <li className="text-[9px]">
+                       <Link to={`${PRIVACY_POLICY_ROUTE}#derechos`} className="rounded-sm hover:text-indigo-400 transition-colors focus-visible:text-indigo-400 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-indigo-400">
+                          Tus derechos · Ley 21.719
+                       </Link>
+                    </li>
                  </ul>
               </div>
            </div>

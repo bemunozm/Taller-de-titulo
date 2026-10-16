@@ -1,285 +1,293 @@
-import { io, Socket } from 'socket.io-client'
-import type { NotificationPayload } from '@/types/index'
+import { io, type ManagerOptions, type Socket, type SocketOptions } from 'socket.io-client'
+import { parseAnomalyHighlight, type AnomalyHighlight } from '@/helpers/securityAlerts'
 
-type NotificationCallback = (notification: NotificationPayload) => void
-type VisitorApprovalCallback = (data: any) => void
+type SocketFactory = (url: string, options: Partial<ManagerOptions & SocketOptions>) => Socket
+type NotificationHandler = (payload: unknown) => void
+type AnomalyHighlightHandler = (highlight: AnomalyHighlight) => void
+type StatusListener = () => void
 
-class WebSocketService {
+/**
+ * - `idle`: sin sesión (o sin `VITE_WS_URL`), no hay socket.
+ * - `connecting`: socket creado, esperando el primer CONNECT.
+ * - `connected`.
+ * - `reconnecting`: red caída (socket.io reintenta solo) o recuperación tras
+ *   un cierre del servidor con la sesión HTTP todavía válida.
+ * - `session-ended`: el servidor rechazó o cerró el socket y la sesión ya no
+ *   vale (o se agotaron las recuperaciones). Se espera un nuevo login.
+ */
+export type RealtimeStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'session-ended'
+
+export interface RealtimeSession {
+  /** Usuario dueño de la sesión: otro id es otra sesión y otro socket. */
+  userId: string
+  /**
+   * Revalida la sesión por HTTP después de que el servidor rechazara o
+   * cerrara el socket. Resuelve `true` solo si sigue siendo la de `userId`.
+   */
+  verifySession: () => Promise<boolean>
+}
+
+export const NOTIFICATION_EVENT = 'notification'
+export const ANOMALY_HIGHLIGHT_EVENT = 'security:anomaly_highlight'
+
+/** Red caída: socket.io reintenta solo, 2 s → máx. 30 s, sin tope de intentos. */
+export const REALTIME_RECONNECT_DELAY_MS = 2_000
+export const REALTIME_RECONNECT_DELAY_MAX_MS = 30_000
+/**
+ * Rechazo o cierre del servidor con la sesión HTTP aún válida: hasta 3
+ * reintentos (2 s, 4 s, 8 s, ±20 %) y luego se espera un nuevo login.
+ */
+export const REALTIME_RECOVERY_BASE_MS = 2_000
+export const REALTIME_RECOVERY_MAX_ATTEMPTS = 3
+/** Tiempo conectado tras el que se reinicia el presupuesto de recuperaciones. */
+export const REALTIME_STABLE_CONNECTION_MS = 30_000
+
+function resolveSocketUrl(): string | null {
+  const raw: unknown = import.meta.env.VITE_WS_URL
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return null
+  }
+  return raw.trim().replace(/\/+$/, '')
+}
+
+async function isSessionStillValid(session: RealtimeSession): Promise<boolean> {
+  try {
+    return await session.verifySession()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Socket de la app de residentes y conserjes: namespace raíz, autenticado en
+ * el handshake por la cookie de sesión de better-auth (`withCredentials`).
+ * Hay un solo socket por pestaña y lo gobierna `RealtimeConnection` según el
+ * estado de login: conecta con un usuario autenticado y se cierra en logout.
+ * El servidor asigna las salas; el cliente no emite nada (sin `register` ni
+ * `join_room`).
+ *
+ * Ante un rechazo del middleware (`connect_error` con el socket inactivo,
+ * p. ej. `unauthorized`) o un `io server disconnect` (sesión expirada,
+ * cerrada o revocada), socket.io no reintenta y este servicio tampoco lo hace
+ * a ciegas: revalida la sesión por HTTP y solo si sigue vigente reintenta,
+ * con backoff y un máximo de `REALTIME_RECOVERY_MAX_ATTEMPTS`. Si no, se
+ * queda en `session-ended` hasta el próximo login.
+ *
+ * El kiosko usa su propio socket en `/hub` (`KioskSocketService`).
+ */
+export class WebSocketService {
+  private readonly createSocket: SocketFactory
   private socket: Socket | null = null
-  private listeners: Set<NotificationCallback> = new Set()
-  private visitorApprovalListeners: Set<VisitorApprovalCallback> = new Set()
-  private reconnectAttempts = 0
-  private maxReconnectAttempts = 5
-  private reconnectDelay = 3000
-  private isIntentionalDisconnect = false
-  private onConnectCallback: (() => void) | null = null
+  private session: RealtimeSession | null = null
+  private status: RealtimeStatus = 'idle'
+  private recoveryAttempts = 0
+  private recoveryTimer: ReturnType<typeof setTimeout> | null = null
+  private stableTimer: ReturnType<typeof setTimeout> | null = null
+  private isVerifying = false
+  private readonly notificationHandlers = new Set<NotificationHandler>()
+  private readonly anomalyHandlers = new Set<AnomalyHighlightHandler>()
+  private readonly statusListeners = new Set<StatusListener>()
+
+  constructor(createSocket: SocketFactory = io) {
+    this.createSocket = createSocket
+  }
 
   /**
-   * Conecta al servidor WebSocket
-   * @param token Token JWT del usuario autenticado
+   * Abre el socket de la sesión. Es idempotente para el mismo usuario
+   * (también mientras conecta); con otro usuario cierra el anterior.
    */
-  connect(token?: string): void {
-    if (this.socket?.connected) {
-      console.log('[WebSocket] Ya está conectado')
+  connect(session: RealtimeSession): void {
+    if (this.socket && this.session?.userId === session.userId) {
+      this.session = session
       return
     }
 
-    console.log('[WebSocket] Conectando al servidor...')
-    this.isIntentionalDisconnect = false
+    this.disconnect()
 
-    const wsUrl = import.meta.env.VITE_WS_URL || 'http://localhost:3000'
-
-    this.socket = io(wsUrl, {
-      auth: { token },
-      withCredentials: true, // envía la cookie de sesión de better-auth (Fase 0 #20)
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionAttempts: this.maxReconnectAttempts,
-      reconnectionDelay: this.reconnectDelay,
-    })
-
-    this.setupListeners()
-  }
-
-  /**
-   * Conecta al servidor WebSocket sin autenticación (para vistas públicas)
-   * Usado en casos como el Conserje Digital donde no hay usuario autenticado
-   */
-  connectAnonymous(): void {
-    if (this.socket?.connected) {
-      console.log('[WebSocket] Ya está conectado')
+    const url = resolveSocketUrl()
+    if (!url) {
+      // Sin URL no hay tiempo real; las notificaciones se refrescan por polling.
       return
     }
 
-    console.log('[WebSocket] Conectando al servidor (modo anónimo)...')
-    this.isIntentionalDisconnect = false
-
-    const wsUrl = import.meta.env.VITE_WS_URL || 'http://localhost:3000'
-
-    this.socket = io(wsUrl, {
+    this.session = session
+    const socket = this.createSocket(url, {
+      withCredentials: true,
       transports: ['websocket', 'polling'],
       reconnection: true,
-      reconnectionAttempts: this.maxReconnectAttempts,
-      reconnectionDelay: this.reconnectDelay,
+      reconnectionDelay: REALTIME_RECONNECT_DELAY_MS,
+      reconnectionDelayMax: REALTIME_RECONNECT_DELAY_MAX_MS,
+    })
+    this.socket = socket
+    this.setStatus('connecting')
+
+    socket.on('connect', () => {
+      this.setStatus('connected')
+      this.clearStableTimer()
+      this.stableTimer = setTimeout(() => {
+        this.stableTimer = null
+        this.recoveryAttempts = 0
+      }, REALTIME_STABLE_CONNECTION_MS)
     })
 
-    this.setupListeners()
-  }
-
-  /**
-   * Configura los listeners de eventos del socket
-   */
-  private setupListeners(): void {
-    if (!this.socket) return
-
-    this.socket.on('connect', () => {
-      console.log('[WebSocket] Conectado exitosamente')
-      this.reconnectAttempts = 0
-      
-      // Ejecutar callbacks de conexión (por ejemplo, registrar usuario)
-      if (this.onConnectCallback) {
-        this.onConnectCallback()
-      }
-    })
-
-    this.socket.on('disconnect', (reason) => {
-      console.log('[WebSocket] Desconectado:', reason)
-      
-      if (!this.isIntentionalDisconnect && reason === 'io server disconnect') {
-        // El servidor cerró la conexión, intentar reconectar manualmente
-        console.log('[WebSocket] Intentando reconectar...')
-        this.attemptReconnect()
-      }
-    })
-
-    this.socket.on('connect_error', (error) => {
-      console.error('[WebSocket] Error de conexión:', error.message)
-      this.reconnectAttempts++
-      
-      if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-        console.error('[WebSocket] Máximo de intentos de reconexión alcanzado')
-      }
-    })
-
-    this.socket.on('notification', (payload: NotificationPayload) => {
-      console.log('[WebSocket] 📬 Notificación recibida:', payload)
-      this.notifyListeners(payload)
-    })
-
-    this.socket.on('visitor:arrival', (data: any) => {
-      console.log('[WebSocket] 🚗 Solicitud de aprobación de visitante recibida:', data)
-      console.log('[WebSocket] Número de listeners registrados:', this.visitorApprovalListeners.size)
-      this.notifyVisitorApprovalListeners(data)
-    })
-
-    this.socket.on('error', (error: Error) => {
-      console.error('[WebSocket] Error:', error)
-    })
-  }
-
-  /**
-   * Intenta reconectar al servidor
-   */
-  private attemptReconnect(): void {
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
-      setTimeout(() => {
-        console.log(`[WebSocket] Reintento ${this.reconnectAttempts + 1}/${this.maxReconnectAttempts}`)
-        this.socket?.connect()
-      }, this.reconnectDelay)
-    }
-  }
-
-  /**
-   * Registra el usuario en el servidor WebSocket
-   * Si el socket no está conectado aún, espera a que se conecte
-   * @param userId ID del usuario
-   */
-  registerUser(userId: string): void {
-    const doRegister = () => {
-      if (!this.socket?.connected) {
-        console.warn('[WebSocket] Socket no conectado al intentar registrar usuario')
+    socket.on('connect_error', () => {
+      this.clearStableTimer()
+      if (socket.active) {
+        // Error de transporte: socket.io reintenta solo con su backoff.
+        this.setStatus('reconnecting')
         return
       }
+      this.handleServerEnded(socket)
+    })
 
-      console.log('[WebSocket] Registrando usuario:', userId)
-      this.socket.emit('register', { userId })
-      
-      // Listener para confirmar registro
-      this.socket.once('register', (response: any) => {
-        if (response.success) {
-          console.log('[WebSocket] ✅ Usuario registrado exitosamente:', userId)
-        } else {
-          console.error('[WebSocket] ❌ Error al registrar usuario:', response)
+    socket.on('disconnect', (reason) => {
+      this.clearStableTimer()
+      if (reason === 'io server disconnect') {
+        this.handleServerEnded(socket)
+        return
+      }
+      this.setStatus('reconnecting')
+    })
+
+    socket.on(NOTIFICATION_EVENT, (payload: unknown) => {
+      this.notificationHandlers.forEach((handler) => {
+        try {
+          handler(payload)
+        } catch {
+          // Aislado a propósito: el error es del handler, no del socket.
         }
       })
-    }
+    })
 
-    if (this.socket?.connected) {
-      // Si ya está conectado, registrar inmediatamente
-      doRegister()
-    } else {
-      // Si no está conectado, esperar al evento 'connect'
-      console.log('[WebSocket] Esperando conexión para registrar usuario...')
-      this.onConnectCallback = doRegister
-    }
+    socket.on(ANOMALY_HIGHLIGHT_EVENT, (payload: unknown) => {
+      const highlight = parseAnomalyHighlight(payload)
+      if (!highlight) {
+        return
+      }
+      this.anomalyHandlers.forEach((handler) => {
+        try {
+          handler(highlight)
+        } catch {
+          // Aislado a propósito: el error es del handler, no del socket.
+        }
+      })
+    })
   }
 
-  /**
-   * Desconecta del servidor WebSocket
-   */
+  /** Cierre intencional (logout, sin sesión, kiosko). Los handlers suscritos se conservan. */
   disconnect(): void {
-    if (!this.socket) return
-
-    console.log('[WebSocket] Desconectando...')
-    this.isIntentionalDisconnect = true
-    this.socket.disconnect()
-    this.socket = null
-    this.listeners.clear()
-    this.visitorApprovalListeners.clear()
-    this.reconnectAttempts = 0
+    this.teardown()
+    this.session = null
+    this.recoveryAttempts = 0
+    this.setStatus('idle')
   }
 
-  /**
-   * Suscribe un callback para recibir notificaciones
-   * @param callback Función que se ejecutará cuando llegue una notificación
-   */
-  subscribe(callback: NotificationCallback): () => void {
-    this.listeners.add(callback)
-    
-    // Retorna función para desuscribirse
+  /** `notification` del usuario (payload sin validar: lo interpreta el consumidor). */
+  onNotification(handler: NotificationHandler): () => void {
+    this.notificationHandlers.add(handler)
     return () => {
-      this.listeners.delete(callback)
+      this.notificationHandlers.delete(handler)
     }
   }
 
-  /**
-   * Notifica a todos los listeners sobre una nueva notificación
-   */
-  private notifyListeners(payload: NotificationPayload): void {
-    this.listeners.forEach((callback) => {
-      try {
-        callback(payload)
-      } catch (error) {
-        console.error('[WebSocket] Error en callback de notificación:', error)
-      }
-    })
-  }
-
-  /**
-   * Suscribe un callback para recibir solicitudes de aprobación de visitantes
-   * @param callback Función que se ejecutará cuando llegue una solicitud
-   */
-  subscribeToVisitorApprovals(callback: VisitorApprovalCallback): () => void {
-    this.visitorApprovalListeners.add(callback)
-    
-    // Retorna función para desuscribirse
+  /** `security:anomaly_highlight` ya normalizado; los payloads sin id se descartan. */
+  onAnomalyHighlight(handler: AnomalyHighlightHandler): () => void {
+    this.anomalyHandlers.add(handler)
     return () => {
-      this.visitorApprovalListeners.delete(callback)
+      this.anomalyHandlers.delete(handler)
     }
   }
 
-  /**
-   * Notifica a todos los listeners sobre una solicitud de aprobación de visitante
-   */
-  private notifyVisitorApprovalListeners(data: any): void {
-    this.visitorApprovalListeners.forEach((callback) => {
-      try {
-        callback(data)
-      } catch (error) {
-        console.error('[WebSocket] Error en callback de aprobación de visitante:', error)
-      }
-    })
+  onStatusChange(listener: StatusListener): () => void {
+    this.statusListeners.add(listener)
+    return () => {
+      this.statusListeners.delete(listener)
+    }
   }
 
-  /**
-   * Verifica si el socket está conectado
-   */
+  getStatus(): RealtimeStatus {
+    return this.status
+  }
+
   isConnected(): boolean {
-    return this.socket?.connected ?? false
+    return this.status === 'connected'
   }
 
-  /**
-   * Obtiene el ID del socket actual
-   */
-  getSocketId(): string | undefined {
-    return this.socket?.id
-  }
-
-  /**
-   * Obtiene el socket para operaciones avanzadas
-   * ADVERTENCIA: Usar con precaución
-   */
-  getSocket(): Socket | null {
-    return this.socket
-  }
-
-  /**
-   * Método de debug para diagnosticar el estado del WebSocket
-   */
-  debugInfo(): void {
-    console.log('[WebSocket Debug] ===============================');
-    console.log('[WebSocket Debug] Socket exists:', !!this.socket);
-    console.log('[WebSocket Debug] Socket connected:', this.socket?.connected);
-    console.log('[WebSocket Debug] Socket ID:', this.socket?.id);
-    console.log('[WebSocket Debug] Notification listeners:', this.listeners.size);
-    console.log('[WebSocket Debug] Visitor approval listeners:', this.visitorApprovalListeners.size);
-    
-    if (this.socket) {
-      // Listar todos los eventos registrados
-      const events = (this.socket as any)._callbacks;
-      if (events) {
-        console.log('[WebSocket Debug] Registered events:', Object.keys(events));
-      }
+  /** Rechazo del middleware o `io server disconnect`: revalidar antes de reintentar. */
+  private handleServerEnded(socket: Socket): void {
+    const session = this.session
+    if (socket !== this.socket || !session || this.isVerifying || this.recoveryTimer) {
+      return
     }
-    
-    console.log('[WebSocket Debug] ===============================');
+
+    this.isVerifying = true
+    this.setStatus('reconnecting')
+
+    void isSessionStillValid(session).then((isValid) => {
+      if (socket !== this.socket) {
+        // Logout u otro usuario mientras se revalidaba: ese socket ya no existe.
+        return
+      }
+      this.isVerifying = false
+      if (!isValid || this.recoveryAttempts >= REALTIME_RECOVERY_MAX_ATTEMPTS) {
+        this.endSession()
+        return
+      }
+      this.scheduleRecovery(socket)
+    })
+  }
+
+  private scheduleRecovery(socket: Socket): void {
+    const exponential = REALTIME_RECOVERY_BASE_MS * 2 ** this.recoveryAttempts
+    const delay = exponential * (0.8 + Math.random() * 0.4)
+    this.recoveryAttempts += 1
+
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null
+      if (socket === this.socket) {
+        socket.connect()
+      }
+    }, delay)
+  }
+
+  /** La sesión terminó para el servidor: sin socket hasta el próximo `connect` (login). */
+  private endSession(): void {
+    this.teardown()
+    this.session = null
+    this.recoveryAttempts = 0
+    this.setStatus('session-ended')
+  }
+
+  private teardown(): void {
+    this.clearStableTimer()
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer)
+      this.recoveryTimer = null
+    }
+    this.isVerifying = false
+
+    const socket = this.socket
+    this.socket = null
+    if (socket) {
+      socket.removeAllListeners()
+      socket.disconnect()
+    }
+  }
+
+  private clearStableTimer(): void {
+    if (this.stableTimer) {
+      clearTimeout(this.stableTimer)
+      this.stableTimer = null
+    }
+  }
+
+  private setStatus(next: RealtimeStatus): void {
+    if (this.status === next) {
+      return
+    }
+    this.status = next
+    this.statusListeners.forEach((listener) => listener())
   }
 }
 
-// Singleton
 export const webSocketService = new WebSocketService()
-
-// Exponer para debugging en consola
-if (typeof window !== 'undefined') {
-  (window as any).webSocketDebug = () => webSocketService.debugInfo();
-}

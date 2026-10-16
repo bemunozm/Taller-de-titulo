@@ -13,7 +13,14 @@ import {
 } from '@tanstack/react-table'
 import { toast } from 'react-toastify'
 import { deleteVehicle } from '@/api/VehicleAPI'
-import { useAuth } from '@/hooks/useAuth'
+import { usePermissions } from '@/hooks/usePermissions'
+import { getApiErrorStatus } from '@/helpers/httpErrors'
+import {
+  INACTIVE_VEHICLE_DELETE_FORBIDDEN_MESSAGE,
+  getAccessLevelColor,
+  getAccessLevelLabel,
+  getVehicleTypeLabel,
+} from '@/helpers/vehicleAccess'
 import type { Vehicle } from '@/types/index'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table'
 import { Badge } from '@/components/ui/Badge'
@@ -37,7 +44,9 @@ interface VehicleTableProps {
 const columnHelper = createColumnHelper<Vehicle>()
 
 export function VehicleTable({ vehicles, onEdit }: VehicleTableProps) {
-  const { data: user } = useAuth()
+  const { user, isSuperAdmin, hasPermission } = usePermissions()
+  // Sin condominium.view-all (Residente) no se borra un vehículo inactivo (403).
+  const canViewWholeCondominium = isSuperAdmin || hasPermission('condominium.view-all')
   const queryClient = useQueryClient()
   const [sorting, setSorting] = useState<SortingState>([])
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
@@ -54,7 +63,17 @@ export function VehicleTable({ vehicles, onEdit }: VehicleTableProps) {
       setSelectedVehicleForDelete(null)
     },
     onError: (error: Error) => {
-      toast.error(error.message || 'Error al eliminar el vehículo')
+      const forbidden = getApiErrorStatus(error) === 403
+      const deletingInactive = selectedVehicleForDelete?.active === false
+      toast.error(
+        forbidden && deletingInactive && !canViewWholeCondominium
+          ? INACTIVE_VEHICLE_DELETE_FORBIDDEN_MESSAGE
+          : error.message || 'Error al eliminar el vehículo',
+      )
+      // Un 403 puede venir de una fila desactualizada (p.ej. ya inactivo): refrescar.
+      if (forbidden) {
+        queryClient.invalidateQueries({ queryKey: ['vehicles'] })
+      }
       setDeleteAlertOpen(false)
     },
   })
@@ -70,22 +89,13 @@ export function VehicleTable({ vehicles, onEdit }: VehicleTableProps) {
     }
   }
 
-  // Verificar si el usuario puede editar/eliminar un vehículo
-  const canModifyVehicle = (vehicle: Vehicle) => {
-    if (!user) return false
-    
-    // Administradores pueden editar/eliminar cualquier vehículo
-    const isAdmin = user.roles?.some(role => 
-      role.name === 'Super Administrador' || role.name === 'Administrador'
-    )
-    if (isAdmin) return true
-    
-    // Residentes solo pueden editar/eliminar sus propios vehículos
-    return vehicle.owner?.id === user.id
-  }
+  const columns = useMemo(() => {
+    // Administradores pueden editar/eliminar cualquier vehículo; el resto, solo
+    // los propios (el backend acota igual y responde 403 si no).
+    const isAdmin = isSuperAdmin || (user?.roles?.some((role) => role.name === 'Administrador') ?? false)
+    const canModifyVehicle = (vehicle: Vehicle) => !!user && (isAdmin || vehicle.owner?.id === user.id)
 
-  const columns = useMemo(
-    () => [
+    return [
       columnHelper.accessor('plate', {
         header: 'Patente',
         cell: (info) => <span className="font-mono font-semibold">{info.getValue()}</span>,
@@ -109,11 +119,21 @@ export function VehicleTable({ vehicles, onEdit }: VehicleTableProps) {
       columnHelper.accessor('vehicleType', {
         header: 'Tipo',
         cell: (info) => {
-          const type = info.getValue()
-          return type ? (
-            <Badge color="indigo">{type}</Badge>
+          const label = getVehicleTypeLabel(info.getValue())
+          return label ? <Badge color="indigo">{label}</Badge> : '-'
+        },
+      }),
+      // Lo que decide el portón: residente abre, visitante requiere visita,
+      // servicio o sin nivel escala al conserje.
+      columnHelper.accessor('accessLevel', {
+        header: 'Acceso',
+        cell: (info) => {
+          const value = info.getValue()
+          const label = getAccessLevelLabel(value)
+          return label ? (
+            <Badge color={getAccessLevelColor(value)}>{label}</Badge>
           ) : (
-            '-'
+            <span className="text-sm text-zinc-500 dark:text-zinc-400">Conserje decide</span>
           )
         },
       }),
@@ -143,7 +163,7 @@ export function VehicleTable({ vehicles, onEdit }: VehicleTableProps) {
           return (
             <div className="flex justify-end">
               <Dropdown>
-                <DropdownButton plain disabled={!canModify}>
+                <DropdownButton plain disabled={!canModify} aria-label={`Acciones del vehículo ${vehicle.plate}`}>
                   <EllipsisVerticalIcon className="w-5 h-5" />
                 </DropdownButton>
                 {canModify && (
@@ -152,10 +172,12 @@ export function VehicleTable({ vehicles, onEdit }: VehicleTableProps) {
                       <PencilIcon className="w-4 h-4" />
                       <span>Editar</span>
                     </DropdownItem>
-                    <DropdownItem onClick={() => handleDeleteClick(vehicle)}>
-                      <TrashIcon className="w-4 h-4 text-red-600" />
-                      <span>Eliminar</span>
-                    </DropdownItem>
+                    {canViewWholeCondominium || vehicle.active !== false ? (
+                      <DropdownItem onClick={() => handleDeleteClick(vehicle)}>
+                        <TrashIcon className="w-4 h-4 text-red-600" />
+                        <span>Eliminar</span>
+                      </DropdownItem>
+                    ) : null}
                   </DropdownMenu>
                 )}
               </Dropdown>
@@ -163,9 +185,8 @@ export function VehicleTable({ vehicles, onEdit }: VehicleTableProps) {
           )
         },
       }),
-    ],
-    [onEdit, user]
-  )
+    ]
+  }, [onEdit, user, isSuperAdmin, canViewWholeCondominium])
 
   const table = useReactTable({
     data: vehicles,

@@ -36,7 +36,7 @@ export function EditRoleView() {
       queryClient.invalidateQueries({ queryKey: ['roles'] })
       queryClient.invalidateQueries({ queryKey: ['roles', id] })
       toast.success('Rol actualizado exitosamente')
-      navigate('/roles')
+      navigate('/settings/roles')
     },
     onError: (error: Error) => {
       toast.error(error.message || 'Error al actualizar el rol')
@@ -63,7 +63,26 @@ export function EditRoleView() {
       <div className="max-w-4xl mx-auto">
         <div className="bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-800 p-6 text-center">
           <p className="text-zinc-600 dark:text-zinc-400">Rol no encontrado</p>
-          <Button className="mt-4" onClick={() => navigate('/roles')}>
+          <Button className="mt-4" onClick={() => navigate('/settings/roles')}>
+            Volver a roles
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
+  // Un rol de sistema es inmutable por la API (403): ni el super-admin lo edita.
+  if (role.isSystem) {
+    return (
+      <div className="max-w-4xl mx-auto">
+        <div className="bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-800 p-6 text-center">
+          <p className="font-medium text-zinc-900 dark:text-zinc-100">
+            "{role.name}" es un rol de sistema
+          </p>
+          <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+            Sus permisos se definen en el código y no se modifican desde aquí.
+          </p>
+          <Button className="mt-4" onClick={() => navigate('/settings/roles')}>
             Volver a roles
           </Button>
         </div>
@@ -76,7 +95,7 @@ export function EditRoleView() {
       {/* Header */}
       <header className="mb-8">
         <div className="flex items-center gap-4 mb-4">
-          <Button plain onClick={() => navigate('/roles')}>
+          <Button plain onClick={() => navigate('/settings/roles')}>
             <ArrowLeftIcon className="w-5 h-5" />
             Volver
           </Button>

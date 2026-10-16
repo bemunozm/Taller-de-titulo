@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
+  BellAlertIcon,
   CalendarIcon,
   ClockIcon,
   QrCodeIcon,
@@ -12,18 +13,106 @@ import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import type { Visit } from '@/types/index';
 import { formatDateTime } from '@/helpers/index';
+import {
+  canShowVisitQr,
+  getVisitPlate,
+  getVisitStatusColor,
+  getVisitStatusLabel,
+} from '@/helpers/visitStatus';
 
 interface MyVisitsCardProps {
   activeVisits: Visit[];
   upcomingVisits: Visit[];
+  /** Solicitudes del conserje digital aún sin aprobar; se muestran en "Próximas". */
+  awaitingApprovalVisits: Visit[];
   recentCompletedVisits: Visit[];
   loading: boolean;
 }
 
 type TabType = 'active' | 'upcoming' | 'recent';
 
-export function MyVisitsCard({ activeVisits, upcomingVisits, recentCompletedVisits, loading }: MyVisitsCardProps) {
+interface VisitPlateProps {
+  visit: Visit;
+}
+
+/** Patente de una visita vehicular, incluida la solicitada de una visita sin vehículo aún. */
+function VisitPlate({ visit }: VisitPlateProps) {
+  const plate = getVisitPlate(visit);
+  if (visit.type !== 'vehicular' || !plate) {
+    return null;
+  }
+  return <span className="font-mono">{plate}</span>;
+}
+
+interface UpcomingVisitItemProps {
+  visit: Visit;
+}
+
+function UpcomingVisitItem({ visit }: UpcomingVisitItemProps) {
+  const isAwaitingApproval = visit.status === 'awaiting_approval';
+
+  return (
+    <Link
+      to={`/visits`}
+      className={`block p-4 rounded-lg border border-zinc-200 dark:border-zinc-800 transition-colors ${
+        isAwaitingApproval
+          ? 'hover:border-orange-300 dark:hover:border-orange-700'
+          : 'hover:border-amber-300 dark:hover:border-amber-700'
+      }`}
+    >
+      <div className="flex items-start gap-3">
+        {isAwaitingApproval ? (
+          <div className="p-2 bg-orange-100 dark:bg-orange-500/10 rounded-lg">
+            <BellAlertIcon className="h-5 w-5 text-orange-600 dark:text-orange-400" />
+          </div>
+        ) : (
+          <div className="p-2 bg-amber-100 dark:bg-amber-500/10 rounded-lg">
+            <ClockIcon className="h-5 w-5 text-amber-600 dark:text-amber-400" />
+          </div>
+        )}
+        <div className="flex-1">
+          <div className="flex items-center gap-2">
+            <p className="font-medium text-zinc-900 dark:text-zinc-100">
+              {visit.visitorName}
+            </p>
+            {isAwaitingApproval ? (
+              <Badge color={getVisitStatusColor(visit.status)}>
+                {getVisitStatusLabel(visit.status)}
+              </Badge>
+            ) : (
+              <Badge color="amber">Programada</Badge>
+            )}
+          </div>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+            <VisitPlate visit={visit} />
+            {visit.type === 'pedestrian' && (
+              <span className="flex items-center gap-1">
+                <UserIcon className="h-4 w-4" />
+                Visita peatonal
+              </span>
+            )}
+          </p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+            {isAwaitingApproval
+              ? `Solicitada: ${formatDateTime(visit.createdAt)}`
+              : `Comienza: ${formatDateTime(visit.validFrom)}`}
+          </p>
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+export function MyVisitsCard({
+  activeVisits,
+  upcomingVisits,
+  awaitingApprovalVisits,
+  recentCompletedVisits,
+  loading,
+}: MyVisitsCardProps) {
   const [activeTab, setActiveTab] = useState<TabType>('active');
+  // Las solicitudes en espera van primero: requieren respuesta del residente.
+  const upcomingTabVisits = [...awaitingApprovalVisits, ...upcomingVisits];
 
   if (loading) {
     return (
@@ -77,7 +166,7 @@ export function MyVisitsCard({ activeVisits, upcomingVisits, recentCompletedVisi
                 : 'border-transparent text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100'
             }`}
           >
-            Próximas ({upcomingVisits.length})
+            Próximas ({upcomingTabVisits.length})
           </button>
           <button 
             onClick={() => setActiveTab('recent')}
@@ -94,7 +183,7 @@ export function MyVisitsCard({ activeVisits, upcomingVisits, recentCompletedVisi
 
       {/* Content */}
       <div className="p-6">
-        {activeVisits.length === 0 && upcomingVisits.length === 0 && recentCompletedVisits.length === 0 ? (
+        {activeVisits.length === 0 && upcomingTabVisits.length === 0 && recentCompletedVisits.length === 0 ? (
           <div className="text-center py-8">
             <CalendarIcon className="h-12 w-12 text-zinc-300 dark:text-zinc-700 mx-auto mb-3" />
             <p className="text-sm text-zinc-600 dark:text-zinc-400">
@@ -142,10 +231,8 @@ export function MyVisitsCard({ activeVisits, upcomingVisits, recentCompletedVisi
                               <Badge color="lime">Activa</Badge>
                             </div>
                             <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
-                              {visit.type === 'vehicular' && visit.vehicle && (
-                                <span className="font-mono">{visit.vehicle.plate}</span>
-                              )}
-                              {visit.type === 'pedestrian' && visit.qrCode && (
+                              <VisitPlate visit={visit} />
+                              {visit.type === 'pedestrian' && canShowVisitQr(visit) && (
                                 <span className="flex items-center gap-1">
                                   <QrCodeIcon className="h-4 w-4" />
                                   Código QR generado
@@ -172,7 +259,7 @@ export function MyVisitsCard({ activeVisits, upcomingVisits, recentCompletedVisi
             {/* Próximas Visitas */}
             {activeTab === 'upcoming' && (
               <>
-                {upcomingVisits.length === 0 ? (
+                {upcomingTabVisits.length === 0 ? (
                   <div className="text-center py-8">
                     <ClockIcon className="h-10 w-10 text-zinc-300 dark:text-zinc-700 mx-auto mb-2" />
                     <p className="text-sm text-zinc-600 dark:text-zinc-400">
@@ -180,40 +267,8 @@ export function MyVisitsCard({ activeVisits, upcomingVisits, recentCompletedVisi
                     </p>
                   </div>
                 ) : (
-                  upcomingVisits.slice(0, 5).map(visit => (
-                    <Link
-                      key={visit.id}
-                      to={`/visits`}
-                      className="block p-4 rounded-lg border border-zinc-200 dark:border-zinc-800 hover:border-amber-300 dark:hover:border-amber-700 transition-colors"
-                    >
-                      <div className="flex items-start gap-3">
-                        <div className="p-2 bg-amber-100 dark:bg-amber-500/10 rounded-lg">
-                          <ClockIcon className="h-5 w-5 text-amber-600 dark:text-amber-400" />
-                        </div>
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2">
-                            <p className="font-medium text-zinc-900 dark:text-zinc-100">
-                              {visit.visitorName}
-                            </p>
-                            <Badge color="amber">Programada</Badge>
-                          </div>
-                          <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
-                            {visit.type === 'vehicular' && visit.vehicle && (
-                              <span className="font-mono">{visit.vehicle.plate}</span>
-                            )}
-                            {visit.type === 'pedestrian' && (
-                              <span className="flex items-center gap-1">
-                                <UserIcon className="h-4 w-4" />
-                                Visita peatonal
-                              </span>
-                            )}
-                          </p>
-                          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
-                            Comienza: {formatDateTime(visit.validFrom)}
-                          </p>
-                        </div>
-                      </div>
-                    </Link>
+                  upcomingTabVisits.slice(0, 5).map(visit => (
+                    <UpcomingVisitItem key={visit.id} visit={visit} />
                   ))
                 )}
               </>
@@ -248,9 +303,7 @@ export function MyVisitsCard({ activeVisits, upcomingVisits, recentCompletedVisi
                             <Badge color="sky">Completada</Badge>
                           </div>
                           <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
-                            {visit.type === 'vehicular' && visit.vehicle && (
-                              <span className="font-mono">{visit.vehicle.plate}</span>
-                            )}
+                            <VisitPlate visit={visit} />
                             {visit.type === 'pedestrian' && (
                               <span className="flex items-center gap-1">
                                 <UserIcon className="h-4 w-4" />
@@ -271,7 +324,7 @@ export function MyVisitsCard({ activeVisits, upcomingVisits, recentCompletedVisi
 
             {/* Ver más si hay más visitas */}
             {((activeTab === 'active' && activeVisits.length > 5) ||
-              (activeTab === 'upcoming' && upcomingVisits.length > 5) ||
+              (activeTab === 'upcoming' && upcomingTabVisits.length > 5) ||
               (activeTab === 'recent' && recentCompletedVisits.length > 5)) && (
               <Link to="/visits">
                 <Button plain className="w-full mt-2">

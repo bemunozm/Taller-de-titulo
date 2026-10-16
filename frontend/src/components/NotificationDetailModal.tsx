@@ -23,21 +23,23 @@ import {
   UsersIcon,
   ArrowTopRightOnSquareIcon,
 } from '@heroicons/react/24/outline'
+import { toast } from 'react-toastify'
 import { useNotifications } from '@/hooks/useNotifications'
-import { useAuth } from '@/hooks/useAuth'
-import ConciergeAPI from '@/api/ConciergeAPI'
+import {
+  VISITOR_RESPONSE_MESSAGES,
+  parseVisitorArrivalData,
+  submitVisitorResponse,
+} from '@/services/visitorResponse'
 import type { AppNotification } from '@/types/index'
 
-interface VisitorArrivalData {
-  sessionId: string
-  expiresAt: string
-  visitor: {
-    name: string
-    rut?: string
-    phone?: string
-    plate?: string
-    reason?: string
-  }
+/** Resultado de responder una solicitud de visita, ligado a la notificación que lo produjo. */
+interface VisitorActionState {
+  notificationId: string
+  error: string | null
+  /** Aprobada sin apertura automática: aviso explícito, no un "éxito" plano. */
+  notOpenedNotice: string | null
+  /** La solicitud ya no admite respuesta (409/403 o aviso mostrado). */
+  isResolved: boolean
 }
 
 interface NotificationDetailModalProps {
@@ -169,9 +171,8 @@ export function NotificationDetailModal({
 }: NotificationDetailModalProps) {
   const navigate = useNavigate()
   const [isProcessing, setIsProcessing] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [actionState, setActionState] = useState<VisitorActionState | null>(null)
   const { markAsRead } = useNotifications()
-  const { data: user } = useAuth()
 
   // No marcar automáticamente como leída - esto lo maneja el componente padre
   // Solo se marca como leída cuando el padre lo decide
@@ -179,6 +180,12 @@ export function NotificationDetailModal({
   if (!notification) return null
 
   const { payload } = notification
+  // El estado de una respuesta anterior no se arrastra a otra notificación.
+  const currentAction = actionState?.notificationId === notification.id ? actionState : null
+  const error = currentAction?.error ?? null
+  const notOpenedNotice = currentAction?.notOpenedNotice ?? null
+  const isResolved = currentAction?.isResolved ?? false
+  const visitorArrival = payload.type === 'VISITOR_ARRIVAL' ? parseVisitorArrivalData(payload.data) : null
   const style = getNotificationStyle(payload.type)
   const Icon = style.icon
 
@@ -213,55 +220,50 @@ export function NotificationDetailModal({
     timeText = `Hace ${years} año${years !== 1 ? 's' : ''}`
   }
 
-  // Handler para aprobar visitante
-  const handleApproveVisitor = async () => {
-    if (!payload.data?.sessionId) return
-
-    const sessionId = payload.data.sessionId as string
-
-    setIsProcessing(true)
-    setError(null)
-
-    try {
-      // Enviar el ID del usuario actual como el residente que aprobó
-      await ConciergeAPI.respondToVisitor(sessionId, true, user?.id)
-      console.log('[NotificationDetail] ✅ Visita aprobada por residente:', user?.id)
-
-      // Marcar como leída
-      await markAsRead(notification.id)
-
-      onClose()
-    } catch (err: any) {
-      console.error('[NotificationDetail] ❌ Error al aprobar:', err)
-      setError(err.response?.data?.message || err.message || 'Error al aprobar la visita')
-    } finally {
-      setIsProcessing(false)
-    }
+  const setActionFor = (changes: Omit<VisitorActionState, 'notificationId'>) => {
+    setActionState({ notificationId: notification.id, ...changes })
   }
 
-  // Handler para rechazar visitante
-  const handleRejectVisitor = async () => {
-    if (!payload.data?.sessionId) return
-
-    const sessionId = payload.data.sessionId as string
+  // Handler para aprobar o rechazar al visitante
+  const handleRespondToVisitor = async (approved: boolean) => {
+    if (!visitorArrival) {
+      setActionFor({ error: VISITOR_RESPONSE_MESSAGES.missingVisit, notOpenedNotice: null, isResolved: false })
+      return
+    }
 
     setIsProcessing(true)
-    setError(null)
+    setActionFor({ error: null, notOpenedNotice: null, isResolved: false })
 
-    try {
-      // Enviar el ID del usuario actual como el residente que rechazó
-      await ConciergeAPI.respondToVisitor(sessionId, false, user?.id)
-      console.log('[NotificationDetail] ✅ Visita rechazada por residente:', user?.id)
+    const result = await submitVisitorResponse({
+      sessionId: visitorArrival.sessionId,
+      visitId: visitorArrival.visitId,
+      approved,
+    })
 
-      // Marcar como leída
-      await markAsRead(notification.id)
+    setIsProcessing(false)
 
-      onClose()
-    } catch (err: any) {
-      console.error('[NotificationDetail] ❌ Error al rechazar:', err)
-      setError(err.response?.data?.message || err.message || 'Error al rechazar la visita')
-    } finally {
-      setIsProcessing(false)
+    switch (result.status) {
+      case 'approved':
+        markAsRead(notification.id)
+        toast.success(result.message)
+        onClose()
+        break
+      case 'denied':
+        markAsRead(notification.id)
+        toast.info(result.message)
+        onClose()
+        break
+      case 'approved-not-opened':
+        markAsRead(notification.id)
+        setActionFor({ error: null, notOpenedNotice: result.message, isResolved: true })
+        break
+      case 'error':
+        // 409/404: otra respuesta la resolvió, expiró o ya no existe; no requiere acción.
+        if (result.reason === 'conflict' || result.reason === 'not-found') {
+          markAsRead(notification.id)
+        }
+        setActionFor({ error: result.message, notOpenedNotice: null, isResolved: result.terminal })
+        break
     }
   }
 
@@ -286,14 +288,10 @@ export function NotificationDetailModal({
   }
 
   // Verificar si la sesión ha expirado para VISITOR_ARRIVAL
-  const visitorData = payload.type === 'VISITOR_ARRIVAL' ? (payload.data as VisitorArrivalData | undefined) : undefined
-  const isExpired =
-    (payload.type === 'VISITOR_ARRIVAL' &&
-    !!visitorData?.expiresAt &&
-    new Date(visitorData.expiresAt) < new Date()) as boolean
+  const isExpired = !!visitorArrival?.expiresAt && visitorArrival.expiresAt < new Date()
 
   // Verificar si requiere acción y está activa
-  const requiresAction = (!!payload.requiresAction && !isExpired) as boolean
+  const requiresAction = !!payload.requiresAction && !isExpired && !isResolved
 
   // Renderizar advertencia de sesión expirada
   const renderExpiredWarning = () => {
@@ -340,74 +338,85 @@ export function NotificationDetailModal({
 
       <DialogBody>
         <div className="space-y-4">
+          {/* Aprobada, pero el acceso no se abrió automáticamente */}
+          {notOpenedNotice && (
+            <div
+              role="alert"
+              className="flex items-start gap-3 p-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700"
+            >
+              <ExclamationTriangleIcon className="w-5 h-5 text-amber-600 dark:text-amber-400 mt-0.5 flex-shrink-0" />
+              <div className="flex-1">
+                <div className="text-sm font-semibold text-amber-900 dark:text-amber-100">
+                  Acceso no abierto automáticamente
+                </div>
+                <div className="text-sm text-amber-800 dark:text-amber-200 mt-1">
+                  {notOpenedNotice}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Mensaje de error */}
           {error && (
-            <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800">
+            <div role="alert" className="p-3 rounded-lg bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800">
               <p className="text-sm text-rose-900 dark:text-rose-200">{error}</p>
             </div>
           )}
 
           {/* Advertencia de sesión expirada */}
-          {(expiredWarningElement as any)}
+          {expiredWarningElement}
 
-          {/* Información adicional según el tipo de notificación */}
-          {payload.type === 'VISITOR_ARRIVAL' && payload.data && (
-            <>
-              {/* Datos del visitante */}
-              {payload.data.visitor && (
-                <div className="space-y-3">
-                  {/* Nombre */}
-                  {(payload.data.visitor as any).name && (
-                    <div className="flex items-start gap-3 p-3 rounded-lg bg-zinc-50 dark:bg-zinc-800/50">
-                      <UserIcon className="w-5 h-5 text-zinc-600 dark:text-zinc-400 mt-0.5 flex-shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
-                          Visitante
-                        </div>
-                        <div className="text-sm font-semibold text-zinc-900 dark:text-white mt-1">
-                          {(payload.data.visitor as any).name}
-                        </div>
-                      </div>
-                    </div>
-                  )}
+          {/* Datos del visitante */}
+          {visitorArrival && (
+            <div className="space-y-3">
+              {/* Nombre */}
+              <div className="flex items-start gap-3 p-3 rounded-lg bg-zinc-50 dark:bg-zinc-800/50">
+                <UserIcon className="w-5 h-5 text-zinc-600 dark:text-zinc-400 mt-0.5 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
+                    Visitante
+                  </div>
+                  <div className="text-sm font-semibold text-zinc-900 dark:text-white mt-1">
+                    {visitorArrival.visitor.name}
+                  </div>
+                </div>
+              </div>
 
-                  {/* Patente */}
-                  {(payload.data.visitor as any).plate && (
-                    <div className="flex items-start gap-3 p-3 rounded-lg bg-zinc-50 dark:bg-zinc-800/50">
-                      <TruckIcon className="w-5 h-5 text-zinc-600 dark:text-zinc-400 mt-0.5 flex-shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
-                          Vehículo
-                        </div>
-                        <Badge color="zinc" className="font-mono font-bold mt-1">
-                          {(payload.data.visitor as any).plate}
-                        </Badge>
-                      </div>
+              {/* Patente */}
+              {visitorArrival.visitor.plate && (
+                <div className="flex items-start gap-3 p-3 rounded-lg bg-zinc-50 dark:bg-zinc-800/50">
+                  <TruckIcon className="w-5 h-5 text-zinc-600 dark:text-zinc-400 mt-0.5 flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
+                      Vehículo
                     </div>
-                  )}
-
-                  {/* Motivo */}
-                  {(payload.data.visitor as any).reason && (
-                    <div className="flex items-start gap-3 p-3 rounded-lg bg-zinc-50 dark:bg-zinc-800/50">
-                      <HomeIcon className="w-5 h-5 text-zinc-600 dark:text-zinc-400 mt-0.5 flex-shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
-                          Motivo
-                        </div>
-                        <div className="text-sm text-zinc-900 dark:text-white mt-1">
-                          {(payload.data.visitor as any).reason}
-                        </div>
-                      </div>
-                    </div>
-                  )}
+                    <Badge color="zinc" className="font-mono font-bold mt-1">
+                      {visitorArrival.visitor.plate}
+                    </Badge>
+                  </div>
                 </div>
               )}
-            </>
+
+              {/* Motivo */}
+              {visitorArrival.visitor.reason && (
+                <div className="flex items-start gap-3 p-3 rounded-lg bg-zinc-50 dark:bg-zinc-800/50">
+                  <HomeIcon className="w-5 h-5 text-zinc-600 dark:text-zinc-400 mt-0.5 flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
+                      Motivo
+                    </div>
+                    <div className="text-sm text-zinc-900 dark:text-white mt-1">
+                      {visitorArrival.visitor.reason}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
 
           {/* Información de vehículo detectado */}
           {(payload.type === 'VEHICLE_DETECTED' || payload.type === 'UNKNOWN_VEHICLE') &&
-            payload.data?.plate && (
+            typeof payload.data?.plate === 'string' && (
               <div className="flex items-start gap-3 p-3 rounded-lg bg-zinc-50 dark:bg-zinc-800/50">
                 <TruckIcon className="w-5 h-5 text-zinc-600 dark:text-zinc-400 mt-0.5 flex-shrink-0" />
                 <div className="flex-1 min-w-0">
@@ -415,7 +424,7 @@ export function NotificationDetailModal({
                     Patente Detectada
                   </div>
                   <Badge color="zinc" className="font-mono font-bold mt-1">
-                    {payload.data.plate as string}
+                    {payload.data.plate}
                   </Badge>
                 </div>
               </div>
@@ -430,10 +439,10 @@ export function NotificationDetailModal({
             <Button plain onClick={handleClose} disabled={isProcessing}>
               Cerrar
             </Button>
-            <Button color="rose" onClick={handleRejectVisitor} disabled={isProcessing}>
+            <Button color="rose" onClick={() => void handleRespondToVisitor(false)} disabled={isProcessing}>
               {isProcessing ? 'Rechazando...' : 'Rechazar'}
             </Button>
-            <Button color="lime" onClick={handleApproveVisitor} disabled={isProcessing}>
+            <Button color="lime" onClick={() => void handleRespondToVisitor(true)} disabled={isProcessing}>
               {isProcessing ? 'Aprobando...' : 'Aprobar Acceso'}
             </Button>
           </>
@@ -450,8 +459,8 @@ export function NotificationDetailModal({
           </>
         ) : (
           <>
-            {/* Solo botón de cerrar para notificaciones informativas */}
-            <Button onClick={handleClose}>Cerrar</Button>
+            {/* Solo botón de cerrar para notificaciones informativas o ya resueltas */}
+            <Button onClick={handleClose}>{notOpenedNotice ? 'Entendido' : 'Cerrar'}</Button>
           </>
         )}
       </DialogActions>

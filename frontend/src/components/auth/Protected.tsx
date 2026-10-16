@@ -13,6 +13,8 @@ interface ProtectedProps {
   role?: string
   /** Lista de roles - el usuario debe tener AL MENOS UNO */
   anyRole?: string[]
+  /** Solo el super-admin de plataforma (ver `@/helpers/roles`) */
+  superAdminOnly?: boolean
   /** Contenido a mostrar si no tiene permisos (opcional) */
   fallback?: ReactNode
 }
@@ -54,9 +56,10 @@ export function Protected({
   allPermissions,
   role,
   anyRole,
+  superAdminOnly = false,
   fallback = null,
 }: ProtectedProps) {
-  const { hasPermission, hasAnyPermission, hasAllPermissions, hasRole, hasAnyRole } = usePermissions()
+  const { hasPermission, hasAnyPermission, hasAllPermissions, hasRole, hasAnyRole, isSuperAdmin } = usePermissions()
 
   let hasAccess = true
 
@@ -82,6 +85,10 @@ export function Protected({
 
   // Verificar cualquier rol de la lista
   if (anyRole && !hasAnyRole(...anyRole)) {
+    hasAccess = false
+  }
+
+  if (superAdminOnly && !isSuperAdmin) {
     hasAccess = false
   }
 

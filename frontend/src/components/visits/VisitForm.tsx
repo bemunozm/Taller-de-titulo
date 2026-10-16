@@ -1,16 +1,16 @@
 import { useForm, Controller } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'react-toastify'
-import React from 'react'
 import PhoneInput from 'react-phone-number-input'
 import 'react-phone-number-input/style.css'
 import { createVisit, updateVisit } from '@/api/VisitAPI'
-import { getUsers } from '@/api/AuthAPI'
-import { createVisitSchema, type Visit, type User } from '@/types/index'
+import { createVisitSchema, type CreateVisitFormData, type Visit } from '@/types/index'
 import { formatRUT, isValidChileanId } from '@/helpers/index'
+import { formatUserOptionLabel, useUserOptions, withAssignedUser } from '@/hooks/useUserOptions'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { PhoneTextInput } from '@/components/ui/PhoneTextInput'
 import { Select } from '@/components/ui/Select'
 import { Field, FieldGroup, Label } from '@/components/ui/Fieldset'
 import { Radio, RadioField, RadioGroup } from '@/components/ui/Radio'
@@ -68,53 +68,48 @@ export function VisitForm({ visit, onSuccess }: VisitFormProps) {
 
   const visitType = watch('type')
 
-  // Query para usuarios (anfitriones)
-  // Backend filtra automáticamente: Admin ve todos, Residente solo se ve a sí mismo
-  const { data: users = [] } = useQuery<User[]>({
-    queryKey: ['users'],
-    queryFn: getUsers,
-  })
+  // Anfitriones posibles: `GET /users` con users.read (proyección mínima
+  // `{ id, name, family }` para quien no tiene users.update); sin ese permiso
+  // (Residente), solo el propio usuario.
+  const { options: userOptions } = useUserOptions()
+  const hostOptions = withAssignedUser(userOptions, visit?.host)
 
+  // `onSettled` refresca también tras un error: un 409 significa que la visita
+  // cambió de estado y la lista (y la visita que se edita) está desactualizada.
+  const refreshVisits = () => queryClient.invalidateQueries({ queryKey: ['visits'] })
+
+  // La visita creada trae su `qrCode` (una credencial): no se registra en consola.
   const createMutation = useMutation({
     mutationFn: createVisit,
     onSuccess: (data) => {
-      console.log('Visita creada exitosamente:', data)
-      queryClient.invalidateQueries({ queryKey: ['visits'] })
       toast.success('Visita creada exitosamente')
       onSuccess(data)
     },
     onError: (error: Error) => {
-      console.error('Error al crear visita:', error)
       toast.error(error.message || 'Error al crear la visita')
     },
+    onSettled: refreshVisits,
   })
 
   const updateMutation = useMutation({
     mutationFn: updateVisit,
     onSuccess: () => {
-      console.log('Visita actualizada exitosamente')
-      queryClient.invalidateQueries({ queryKey: ['visits'] })
       toast.success('Visita actualizada exitosamente')
       onSuccess()
     },
     onError: (error: Error) => {
-      console.error('Error al actualizar visita:', error)
       toast.error(error.message || 'Error al actualizar la visita')
     },
+    onSettled: refreshVisits,
   })
 
-  const onSubmit = (data: any) => {
-    console.log('onSubmit llamado con data:', data)
-    console.log('Errores actuales:', errors)
-    
+  const onSubmit = (data: CreateVisitFormData) => {
     // Limpiar datos antes de enviar
-    const cleanData = {
+    const cleanData: CreateVisitFormData = {
       ...data,
-      // Convertir fechas de datetime-local a ISO 8601
-      validFrom: data.validFrom ? new Date(data.validFrom).toISOString() : undefined,
-      validUntil: data.validUntil ? new Date(data.validUntil).toISOString() : undefined,
-      entryTime: data.entryTime ? new Date(data.entryTime).toISOString() : undefined,
-      exitTime: data.exitTime ? new Date(data.exitTime).toISOString() : undefined,
+      // Convertir fechas de datetime-local a ISO 8601 (el schema las exige)
+      validFrom: new Date(data.validFrom).toISOString(),
+      validUntil: new Date(data.validUntil).toISOString(),
       // Asegurar que campos opcionales vacíos sean undefined
       visitorRut: data.visitorRut?.trim() === '' ? undefined : data.visitorRut,
       visitorPhone: data.visitorPhone?.trim() === '' ? undefined : data.visitorPhone,
@@ -126,32 +121,23 @@ export function VisitForm({ visit, onSuccess }: VisitFormProps) {
       vehicleColor: data.type === 'pedestrian' ? undefined : data.vehicleColor,
     }
 
-    console.log('Datos limpios a enviar:', cleanData)
-    console.log('isEditing:', isEditing, 'isPending:', isPending)
-
     if (isEditing && visit) {
-      console.log('Actualizando visita con ID:', visit.id)
       updateMutation.mutate({ id: visit.id, formData: cleanData })
     } else {
-      console.log('Creando nueva visita')
       createMutation.mutate(cleanData)
     }
   }
 
-  const onError = (formErrors: any) => {
-    console.error('Errores de validación del formulario:', formErrors)
+  const onError = () => {
     toast.error('Por favor, corrija los errores del formulario')
   }
 
   const isPending = createMutation.isPending || updateMutation.isPending
 
   return (
-    <form 
-      onSubmit={(e) => {
-        console.log('Form onSubmit event triggered')
-        handleSubmit(onSubmit, onError)(e)
-      }} 
-      className="space-y-6" 
+    <form
+      onSubmit={handleSubmit(onSubmit, onError)}
+      className="space-y-6"
       noValidate
     >
       {/* Tipo de Visita */}
@@ -220,7 +206,7 @@ export function VisitForm({ visit, onSuccess }: VisitFormProps) {
                 onChange: (e) => {
                   const value = e.target.value
                   // Solo formatear si parece ser un RUT chileno
-                  if (value.match(/^[\d\.\-kK]+$/)) {
+                  if (value.match(/^[\d.\-kK]+$/)) {
                     const formatted = formatRUT(value)
                     setValue('visitorRut', formatted)
                   } else {
@@ -254,32 +240,21 @@ export function VisitForm({ visit, onSuccess }: VisitFormProps) {
                   return value.length >= 10 || 'Ingrese un número de teléfono válido'
                 }
               }}
-              render={({ field: { onChange, value, ...fieldProps } }) => {
-                // Crear un componente memoizado para evitar re-renders
-                const PhoneInputComponent = React.useMemo(() => 
-                  React.forwardRef<HTMLInputElement, any>((props, ref) => (
-                    <Input 
-                      {...props} 
-                      ref={ref}
-                      invalid={!!errors.visitorPhone}
-                    />
-                  )), [errors.visitorPhone])
-
-                return (
-                  <PhoneInput
-                    {...fieldProps}
-                    value={value}
-                    onChange={onChange}
-                    defaultCountry="CL"
-                    placeholder="Ingrese el número de teléfono"
-                    international={true}
-                    withCountryCallingCode={true}
-                    countryCallingCodeEditable={false}
-                    inputComponent={PhoneInputComponent}
-                    className="mt-1"
-                  />
-                )
-              }}
+              render={({ field: { onChange, value, ...fieldProps } }) => (
+                <PhoneInput
+                  {...fieldProps}
+                  value={value}
+                  onChange={onChange}
+                  defaultCountry="CL"
+                  placeholder="Ingrese el número de teléfono"
+                  international={true}
+                  withCountryCallingCode={true}
+                  countryCallingCodeEditable={false}
+                  inputComponent={PhoneTextInput}
+                  invalid={!!errors.visitorPhone}
+                  className="mt-1"
+                />
+              )}
             />
             {errors.visitorPhone && (
               <p className="text-sm text-red-600 mt-1">{errors.visitorPhone.message}</p>
@@ -507,9 +482,9 @@ export function VisitForm({ visit, onSuccess }: VisitFormProps) {
             render={({ field }) => (
               <Select {...field} invalid={!!errors.hostId}>
                 <option value="">Seleccione un residente</option>
-                {users.map((user) => (
-                  <option key={user.id} value={user.id}>
-                    {user.name} - {user.email}
+                {hostOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {formatUserOptionLabel(option)}
                   </option>
                 ))}
               </Select>
@@ -529,11 +504,10 @@ export function VisitForm({ visit, onSuccess }: VisitFormProps) {
         <Button type="button" plain onClick={() => onSuccess()}>
           Cancelar
         </Button>
-        <Button 
-          type="submit" 
-          color="indigo" 
+        <Button
+          type="submit"
+          color="indigo"
           disabled={isPending}
-          onClick={() => console.log('Botón submit clickeado')}
         >
           {isPending ? 'Guardando...' : isEditing ? 'Actualizar Visita' : 'Crear Visita'}
         </Button>

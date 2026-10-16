@@ -5,6 +5,7 @@ import {
   LockClosedIcon,
   SparklesIcon
 } from '@heroicons/react/24/outline'
+import { RETENTION_DAYS } from '@/helpers/privacyPolicy'
 
 export default function TechSection() {
   return (
@@ -37,19 +38,21 @@ export default function TechSection() {
             
             <div className="space-y-8">
               {[
+                // Solo afirmaciones verificables y alineadas con la política de privacidad
+                // (antes: "datos que nunca salen de tu red", "ultra-seguro", "AES-256 de grado militar").
                 {
                   title: 'Edge AI Processing',
-                  desc: 'Inferencia local en el hub para garantizar que tus datos nunca salgan de tu red privada a menos que sea necesario.',
+                  desc: 'La lectura de patentes corre en un equipo local del condominio. La voz de la asistente y el análisis de anomalías usan un proveedor de IA en EE.UU., como detalla la política de privacidad.',
                   icon: CircleStackIcon
                 },
                 {
                   title: 'Cloud-Hybrid Sync',
-                  desc: 'Sincronización inteligente para alertas globales y acceso remoto ultra-seguro desde cualquier lugar.',
+                  desc: 'Sincronización para alertas y acceso remoto con sesión y permisos por rol y por condominio.',
                   icon: GlobeAltIcon
                 },
                 {
-                  title: 'Encriptación de Grado Militar',
-                  desc: 'Protocolos de comunicación AES-256 para cada paquete de video y datos de identidad.',
+                  title: 'Cifrado en tránsito',
+                  desc: 'Conexiones HTTPS/TLS y credenciales de las cámaras cifradas en el sistema.',
                   icon: LockClosedIcon
                 }
               ].map((item, i) => (
@@ -95,9 +98,10 @@ export default function TechSection() {
                    </div>
                    
                    <div className="mt-12 text-center">
-                      <p className="text-[10px] font-mono text-zinc-600 mb-2 uppercase tracking-widest">SYSTEM_STATUS_HEALTHY</p>
-                      <div className="text-6xl font-black text-white tabular-nums">99.9<span className="text-emerald-500">%</span></div>
-                      <p className="text-[11px] font-black text-zinc-400 mt-4 uppercase tracking-[0.3em]">AI CONSISTENCY RATE</p>
+                      {/* Antes "99.9% AI CONSISTENCY RATE" (sin medición que lo respalde): un dato publicado en la política. */}
+                      <p className="text-[10px] font-mono text-zinc-600 mb-2 uppercase tracking-widest">RETENTION_POLICY</p>
+                      <div className="text-6xl font-black text-white tabular-nums">{RETENTION_DAYS.images}<span className="ml-2 text-3xl text-emerald-500">días</span></div>
+                      <p className="text-[11px] font-black text-zinc-400 mt-4 uppercase tracking-[0.3em]">Máximo para guardar imágenes</p>
                    </div>
                    
                    <div className="mt-12 flex justify-center gap-4">

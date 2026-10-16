@@ -1,5 +1,6 @@
 import { Heading, Subheading } from '@/components/ui/Heading'
 import { Link } from 'react-router-dom'
+import { usePermissions } from '@/hooks/usePermissions'
 import { 
   VideoCameraIcon, 
   UserGroupIcon, 
@@ -18,11 +19,15 @@ interface SettingCard {
   icon: React.ComponentType<{ className?: string }>
   href: string
   color: string
-  permission?: string
-  anyRole?: string[]
+  /** Permisos requeridos (todos): la tarjeta solo aparece si la ruta dejaría entrar. */
+  permissions: string[]
+  /** Solo el super-admin de plataforma. */
+  superAdminOnly?: boolean
 }
 
 export default function SettingsView() {
+  const { hasAllPermissions, isSuperAdmin } = usePermissions()
+
   const settings: SettingCard[] = [
     {
       id: 'cameras',
@@ -31,7 +36,7 @@ export default function SettingsView() {
       icon: VideoCameraIcon,
       href: '/settings/cameras',
       color: 'from-blue-500/20 to-indigo-500/20 border-blue-500/30',
-      permission: 'cameras.read'
+      permissions: ['cameras.read'],
     },
     {
       id: 'users',
@@ -40,7 +45,7 @@ export default function SettingsView() {
       icon: UserGroupIcon,
       href: '/settings/users',
       color: 'from-emerald-500/20 to-green-500/20 border-emerald-500/30',
-      permission: 'users.read'
+      permissions: ['users.read', 'users.update'],
     },
     {
       id: 'families',
@@ -49,7 +54,7 @@ export default function SettingsView() {
       icon: UsersIcon,
       href: '/settings/families',
       color: 'from-lime-500/20 to-emerald-500/20 border-lime-500/30',
-      permission: 'families.read'
+      permissions: ['families.read'],
     },
     {
       id: 'units',
@@ -58,7 +63,7 @@ export default function SettingsView() {
       icon: HomeModernIcon,
       href: '/settings/units',
       color: 'from-sky-500/20 to-blue-500/20 border-sky-500/30',
-      permission: 'units.read'
+      permissions: ['units.read'],
     },
     {
       id: 'roles',
@@ -67,7 +72,7 @@ export default function SettingsView() {
       icon: ShieldCheckIcon,
       href: '/settings/roles',
       color: 'from-purple-500/20 to-pink-500/20 border-purple-500/30',
-      permission: 'roles.read'
+      permissions: ['roles.read'],
     },
     {
       id: 'logs',
@@ -76,7 +81,7 @@ export default function SettingsView() {
       icon: DocumentTextIcon,
       href: '/settings/audit',
       color: 'from-orange-500/20 to-red-500/20 border-orange-500/30',
-      permission: 'audit.read'
+      permissions: ['audit.read'],
     },
     {
       id: 'system-logs',
@@ -85,7 +90,8 @@ export default function SettingsView() {
       icon: CircleStackIcon,
       href: '/settings/logs',
       color: 'from-indigo-500/20 to-purple-500/20 border-indigo-500/30',
-      permission: 'logs.read'
+      permissions: ['logs.read'],
+      superAdminOnly: true,
     },
     {
       id: 'traceability',
@@ -94,9 +100,13 @@ export default function SettingsView() {
       icon: MapIcon,
       href: '/traceability',
       color: 'from-teal-500/20 to-cyan-500/20 border-teal-500/30',
-      permission: 'detections.read'
+      permissions: ['detections.read'],
     }
   ]
+
+  const visibleSettings = settings.filter(
+    (setting) => hasAllPermissions(...setting.permissions) && (!setting.superAdminOnly || isSuperAdmin),
+  )
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -108,7 +118,7 @@ export default function SettingsView() {
       </header>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-        {settings.map((setting) => {
+        {visibleSettings.map((setting) => {
           const Icon = setting.icon
           return (
             <Link

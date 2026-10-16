@@ -17,7 +17,7 @@ export async function getEntityHistory(entityType: string, entityId: string): Pr
 }
 
 export async function getAuditStats(startDate?: string, endDate?: string): Promise<AuditStats> {
-  const params: any = {};
+  const params: { startDate?: string; endDate?: string } = {};
   if (startDate) params.startDate = startDate;
   if (endDate) params.endDate = endDate;
   

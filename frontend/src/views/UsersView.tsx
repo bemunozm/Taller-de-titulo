@@ -5,6 +5,7 @@ import { getUsers } from '@/api/UserAPI'
 import type { UserWithFamily } from '@/types/index'
 import { UserForm } from '@/components/users/UserForm'
 import { UserTable } from '@/components/users/UserTable'
+import { Protected } from '@/components/auth/Protected'
 import { Dialog, DialogTitle, DialogDescription, DialogBody } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { Heading, Subheading } from '@/components/ui/Heading'
@@ -79,10 +80,12 @@ export function UsersView() {
               </Subheading>
             </div>
           </div>
-          <Button color="indigo" onClick={handleCreate}>
-            <PlusIcon className="w-5 h-5" />
-            Nuevo Usuario
-          </Button>
+          <Protected permission="users.create">
+            <Button color="indigo" onClick={handleCreate}>
+              <PlusIcon className="w-5 h-5" />
+              Nuevo Usuario
+            </Button>
+          </Protected>
         </header>
 
       {/* Stats Grid */}

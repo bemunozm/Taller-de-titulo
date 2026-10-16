@@ -1,7 +1,8 @@
 import api, { authApi } from "@/lib/axios";
 import { isAxiosError } from "axios";
+import { RATE_LIMIT_MESSAGE, getUserFacingErrorMessage, isRateLimitError, toApiError } from "@/helpers/httpErrors";
 import { userSchema } from "@/types/index";
-import type { CheckPasswordForm, ConfirmToken, ForgotPasswordForm, NewPasswordForm, RequestConfirmationCodeForm, UserLoginForm, UserRegistrationForm } from "@/types/index";
+import type { CheckPasswordForm, ConfirmToken, ForgotPasswordForm, NewPasswordForm, RequestConfirmationCodeForm, UserLoginForm } from "@/types/index";
 
 // Shape de error nativo de better-auth (`/api/auth/*`) — distinto del shape
 // `{ message, error, statusCode }` que usan los endpoints propios de Nest.
@@ -11,23 +12,18 @@ interface BetterAuthErrorBody {
 }
 
 function getBetterAuthErrorMessage(error: unknown, fallback: string): string {
+    if (isRateLimitError(error)) {
+        return RATE_LIMIT_MESSAGE
+    }
     if (isAxiosError<BetterAuthErrorBody>(error) && error.response?.data?.message) {
         return error.response.data.message
     }
     return fallback
 }
 
-export async function createAccount(formData: UserRegistrationForm) {
-    try {
-        const url = '/auth/create-account'
-        const { data } = await api.post<string>(url, formData)
-        return data
-    } catch (error) {
-        if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.message)
-        }
-    }
-}
+// Endpoints públicos de auth (con throttling): un 429 se muestra como
+// "Demasiados intentos…" y un error sin respuesta (red caída) también lanza,
+// en vez de resolver `undefined` y parecer un éxito.
 
 export async function confirmAccount(formData: ConfirmToken) {
     try {
@@ -35,9 +31,7 @@ export async function confirmAccount(formData: ConfirmToken) {
         const { data } = await api.post<string>(url, formData)
         return data
     } catch (error) {
-        if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.message)
-        }
+        throw new Error(getUserFacingErrorMessage(error, 'El enlace de confirmación es inválido o expiró'))
     }
 }
 
@@ -47,9 +41,7 @@ export async function requestConfirmationCode(formData: RequestConfirmationCodeF
         const { data } = await api.post<string>(url, formData)
         return data
     } catch (error) {
-        if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.message)
-        }
+        throw new Error(getUserFacingErrorMessage(error, 'No se pudo enviar el código de confirmación'))
     }
 }
 
@@ -85,9 +77,7 @@ export async function forgotPassword(formData: ForgotPasswordForm) {
         const { data } = await api.post<string>(url, formData)
         return data
     } catch (error) {
-        if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.message)
-        }
+        throw new Error(getUserFacingErrorMessage(error, 'No se pudo enviar el correo de recuperación'))
     }
 }
 
@@ -97,22 +87,17 @@ export async function validateToken(formData: ConfirmToken) {
         const { data } = await api.post<string>(url, formData)
         return data
     } catch (error) {
-        if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.message)
-        }
+        throw new Error(getUserFacingErrorMessage(error, 'El enlace de recuperación es inválido o expiró'))
     }
 }
 
 export async function updatePasswordWithToken({formData, token}: {formData: NewPasswordForm, token: ConfirmToken['token']}) {
     try {
-        
         const url = `/auth/reset-password`
         const { data } = await api.post<string>(url, { token: token, password: formData.password })
         return data
     } catch (error) {
-        if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.message)
-        }
+        throw new Error(getUserFacingErrorMessage(error, 'No se pudo actualizar la contraseña'))
     }
 }
 
@@ -144,16 +129,16 @@ export async function checkPassword(formData: CheckPasswordForm) {
     }
 }
 
+// 409 si el teléfono ya lo usa otro usuario: `{ ..., field: 'phone' }` (ver ApiError.field).
 export async function updateProfile(formData: { name: string; phone?: string; age?: number }) {
     try {
         const url = '/auth/profile'
         const { data } = await api.post<string>(url, formData)
         return data
     } catch (error) {
-        if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.message)
-        }
-        throw new Error('Error al actualizar el perfil')
+        throw toApiError(error, 'Error al actualizar el perfil', {
+            409: 'El teléfono ya está en uso',
+        })
     }
 }
 
@@ -200,18 +185,5 @@ export async function deleteProfilePicture() {
             throw new Error(error.response.data.message)
         }
         throw new Error('Error al eliminar la imagen de perfil')
-    }
-}
-
-// Obtener todos los usuarios
-export async function getUsers() {
-    try {
-        const { data } = await api.get('/users')
-        return data
-    } catch (error) {
-        if(isAxiosError(error) && error.response) {
-            throw new Error(error.response.data.message)
-        }
-        throw new Error('Error al obtener los usuarios')
     }
 }

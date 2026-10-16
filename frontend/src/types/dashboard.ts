@@ -6,7 +6,10 @@ export const securityStatsSchema = z.object({
   detectionsWeek: z.number(),
   detectionsMonth: z.number(),
   activeVisits: z.number(),
+  /** Visitas aprobadas que esperan ingreso: pending + ready. */
   pendingVisits: z.number(),
+  /** Solicitudes del conserje digital sin aprobar. 0 si el backend aún no lo envía. */
+  awaitingApprovalVisits: z.number().default(0),
   completedVisitsToday: z.number(),
   unauthorizedVehicles: z.number(),
   alertsPending: z.number(),

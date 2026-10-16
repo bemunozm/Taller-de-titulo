@@ -13,6 +13,7 @@ import { Field, Label } from '@/components/ui/Fieldset';
 import { Avatar } from '@/components/ui/Avatar';
 import { CameraIcon, TrashIcon } from '@heroicons/react/24/outline';
 import type { User } from '@/types/index';
+import { getDuplicateUserFieldsFromError } from '@/helpers/userDisplay';
 
 const updateProfileSchema = z.object({
   name: z.string().min(2, 'El nombre debe tener al menos 2 caracteres').max(128),
@@ -41,6 +42,7 @@ export function PersonalInfoSection({ user }: PersonalInfoSectionProps) {
     handleSubmit,
     formState: { errors },
     reset,
+    setError,
   } = useForm<UpdateProfileFormData>({
     resolver: zodResolver(updateProfileSchema),
     defaultValues: {
@@ -58,6 +60,10 @@ export function PersonalInfoSection({ user }: PersonalInfoSectionProps) {
       setIsEditing(false);
     },
     onError: (error: Error) => {
+      // 409: el teléfono ya lo usa otro usuario (el único campo único editable aquí).
+      if (getDuplicateUserFieldsFromError(error).includes('phone')) {
+        setError('phone', { type: 'duplicate', message: error.message });
+      }
       toast.error(error.message || 'Error al actualizar el perfil');
     },
   });
@@ -128,11 +134,10 @@ export function PersonalInfoSection({ user }: PersonalInfoSectionProps) {
       setTimeout(() => {
         if (videoRef.current) {
           videoRef.current.srcObject = mediaStream;
-          videoRef.current.play().catch(err => console.error('Error al reproducir video:', err));
+          videoRef.current.play().catch(() => toast.error('No se pudo iniciar la cámara'));
         }
       }, 100);
-    } catch (error) {
-      console.error('Error al acceder a la cámara:', error);
+    } catch {
       toast.error('No se pudo acceder a la cámara');
     }
   };
@@ -313,7 +318,7 @@ export function PersonalInfoSection({ user }: PersonalInfoSectionProps) {
         {/* RUT (No editable) */}
         <Field>
           <Label>RUT</Label>
-          <Input value={user.rut} disabled />
+          <Input value={user.rut ?? ''} disabled />
           <p className="text-xs text-zinc-500 mt-1">
             El RUT no puede ser modificado
           </p>

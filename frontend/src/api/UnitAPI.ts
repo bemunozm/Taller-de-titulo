@@ -1,6 +1,6 @@
 import api from '@/lib/axios'
 import { isAxiosError } from 'axios'
-import type { Unit, CreateUnitFormData, UpdateUnitFormData, UnitStats, CreateBulkUnitsFormData, BulkUnitsResult } from '@/types/index'
+import type { Unit, CreateUnitPayload, UpdateUnitFormData, UnitStats, CreateBulkUnitsPayload, BulkUnitsResult } from '@/types/index'
 
 // Obtener todas las unidades
 export async function getUnits(includeInactive = false) {
@@ -110,8 +110,8 @@ export async function getUnitStats() {
     }
 }
 
-// Crear una nueva unidad
-export async function createUnit(formData: CreateUnitFormData) {
+// Crear una nueva unidad (super-admin: con `organizationId`)
+export async function createUnit(formData: CreateUnitPayload) {
     try {
         const { data } = await api.post<Unit>('/units', formData)
         return data
@@ -123,8 +123,8 @@ export async function createUnit(formData: CreateUnitFormData) {
     }
 }
 
-// Crear múltiples unidades en rango
-export async function createBulkUnits(formData: CreateBulkUnitsFormData) {
+// Crear múltiples unidades en rango (super-admin: con `organizationId`)
+export async function createBulkUnits(formData: CreateBulkUnitsPayload) {
     try {
         const { data } = await api.post<BulkUnitsResult>('/units/bulk', formData)
         return data

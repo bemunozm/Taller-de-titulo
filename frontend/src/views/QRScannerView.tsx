@@ -16,28 +16,70 @@ import {
   UserIcon,
   TruckIcon,
   ArrowPathIcon,
+  ExclamationTriangleIcon,
+  InformationCircleIcon,
 } from '@heroicons/react/24/outline'
 import { formatDateTime } from '@/helpers/index'
+import { visibleUserEmail } from '@/helpers/userDisplay'
+import {
+  getVisitPlate,
+  getVisitScanState,
+  getVisitStatusColor,
+  getVisitStatusLabel,
+  type VisitScanSeverity,
+  type VisitScanValidation,
+} from '@/helpers/visitStatus'
 
-// Colores para los badges de estado
-const statusColors = {
-  pending: 'amber',
-  ready: 'amber',
-  active: 'lime',
-  completed: 'sky',
-  cancelled: 'zinc',
-  expired: 'rose',
-  denied: 'rose',
-} as const
+const scanAlertStyles: Record<
+  VisitScanSeverity,
+  { container: string; title: string; description: string; icon: string }
+> = {
+  error: {
+    container: 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800',
+    title: 'text-red-900 dark:text-red-100',
+    description: 'text-red-700 dark:text-red-300',
+    icon: 'text-red-600 dark:text-red-400',
+  },
+  warning: {
+    container: 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800',
+    title: 'text-amber-900 dark:text-amber-100',
+    description: 'text-amber-700 dark:text-amber-300',
+    icon: 'text-amber-600 dark:text-amber-400',
+  },
+  info: {
+    container: 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800',
+    title: 'text-blue-900 dark:text-blue-100',
+    description: 'text-blue-700 dark:text-blue-300',
+    icon: 'text-blue-600 dark:text-blue-400',
+  },
+}
 
-const statusLabels = {
-  pending: 'Pendiente',
-  ready: 'Lista',
-  active: 'Activa',
-  completed: 'Completada',
-  cancelled: 'Cancelada',
-  expired: 'Expirada',
-  denied: 'Denegada',
+const scanAlertIcons = {
+  error: XCircleIcon,
+  warning: ExclamationTriangleIcon,
+  info: InformationCircleIcon,
+} satisfies Record<VisitScanSeverity, typeof XCircleIcon>
+
+interface ScanStatusAlertProps {
+  validation: VisitScanValidation
+}
+
+function ScanStatusAlert({ validation }: ScanStatusAlertProps) {
+  const styles = scanAlertStyles[validation.type]
+  const Icon = scanAlertIcons[validation.type]
+
+  return (
+    <div
+      role={validation.type === 'info' ? 'status' : 'alert'}
+      className={`flex items-start gap-3 border-b p-4 ${styles.container}`}
+    >
+      <Icon aria-hidden="true" className={`w-6 h-6 flex-shrink-0 ${styles.icon}`} />
+      <div>
+        <p className={`font-semibold mb-1 ${styles.title}`}>{validation.message}</p>
+        <p className={`text-sm ${styles.description}`}>{validation.description}</p>
+      </div>
+    </div>
+  )
 }
 
 export function QRScannerView() {
@@ -53,59 +95,45 @@ export function QRScannerView() {
     retry: false,
   })
 
-  // Mutación para check-in
+  // Refresca también tras un error: un 409 significa que la visita cambió de
+  // estado y la tarjeta escaneada está desactualizada.
+  const refreshScannedVisit = () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['visit-qr', scannedQR] }),
+      queryClient.invalidateQueries({ queryKey: ['visits'] }),
+    ])
+
+  // Los errores muestran el mensaje del backend tal cual: ya explica la causa
+  // (p.ej. el 409 "No se puede registrar la entrada: la visita está …").
   const checkInMutation = useMutation({
     mutationFn: checkInVisit,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['visit-qr', scannedQR] })
-      queryClient.invalidateQueries({ queryKey: ['visits'] })
       toast.success('✅ Entrada registrada exitosamente')
     },
     onError: (error: Error) => {
-      const message = error.message || 'Error al registrar entrada'
-      
-      // Mensajes específicos según el error
-      if (message.includes('cancelada')) {
-        toast.error('❌ Esta visita ha sido cancelada')
-      } else if (message.includes('expirada') || message.includes('expir')) {
-        toast.error('⏰ Esta visita ha expirado')
-      } else if (message.includes('máximo de usos') || message.includes('usos permitidos')) {
-        toast.error('🚫 Se alcanzó el máximo de usos permitidos')
-      } else if (message.includes('período válido') || message.includes('válida desde')) {
-        toast.error('📅 La visita no está dentro del período válido')
-      } else {
-        toast.error(`❌ ${message}`)
-      }
+      toast.error(error.message || 'Error al registrar entrada')
     },
+    onSettled: refreshScannedVisit,
   })
 
-  // Mutación para check-out
   const checkOutMutation = useMutation({
     mutationFn: checkOutVisit,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['visit-qr', scannedQR] })
-      queryClient.invalidateQueries({ queryKey: ['visits'] })
       toast.success('✅ Salida registrada exitosamente')
     },
     onError: (error: Error) => {
-      const message = error.message || 'Error al registrar salida'
-      
-      if (message.includes('no está activa')) {
-        toast.error('⚠️ La visita no está activa')
-      } else {
-        toast.error(`❌ ${message}`)
-      }
+      toast.error(error.message || 'Error al registrar salida')
     },
+    onSettled: refreshScannedVisit,
   })
 
+  // El contenido del QR es una credencial de acceso: no se registra en consola.
   const handleScan = (data: string) => {
-    console.log('QR escaneado:', data)
     setScannedQR(data)
     setIsScanning(false)
   }
 
   const handleError = (error: string) => {
-    console.error('Error al escanear:', error)
     toast.error(`📷 ${error}`)
   }
 
@@ -131,68 +159,11 @@ export function QRScannerView() {
     setIsScanning(true)
   }
 
-  // Validaciones de estado
-  const validateVisitStatus = (visit: Visit | undefined) => {
-    if (!visit) return null
-
-    const now = new Date()
-    const validFrom = new Date(visit.validFrom)
-    const validUntil = new Date(visit.validUntil)
-
-    // Verificar si expiró
-    if (now > validUntil) {
-      return {
-        type: 'error' as const,
-        message: '⏰ Esta visita ha expirado',
-        description: `Válida hasta: ${formatDateTime(visit.validUntil)}`,
-      }
-    }
-
-    // Verificar si aún no es válida
-    if (now < validFrom) {
-      return {
-        type: 'warning' as const,
-        message: '📅 Esta visita aún no es válida',
-        description: `Válida desde: ${formatDateTime(visit.validFrom)}`,
-      }
-    }
-
-    // Verificar si está cancelada
-    if (visit.status === 'cancelled') {
-      return {
-        type: 'error' as const,
-        message: '❌ Esta visita ha sido cancelada',
-        description: 'No se puede registrar entrada o salida',
-      }
-    }
-
-    // Verificar si está completada
-    if (visit.status === 'completed') {
-      return {
-        type: 'info' as const,
-        message: '✅ Esta visita ya está completada',
-        description: 'No se pueden realizar más acciones',
-      }
-    }
-
-    // Verificar usos máximos
-    if (visit.maxUses !== null && visit.maxUses !== undefined) {
-      if (visit.usedCount >= visit.maxUses) {
-        return {
-          type: 'error' as const,
-          message: '🚫 Se alcanzó el máximo de usos',
-          description: `Usos: ${visit.usedCount} / ${visit.maxUses}`,
-        }
-      }
-    }
-
-    return null
-  }
-
-  const statusValidation = validateVisitStatus(visit)
-
-  const canCheckIn = visit?.status === 'pending' && !statusValidation
-  const canCheckOut = visit?.status === 'active'
+  const scanState = visit ? getVisitScanState(visit) : null
+  const statusValidation = scanState?.validation ?? null
+  const canCheckIn = scanState?.canCheckIn ?? false
+  const canCheckOut = scanState?.canCheckOut ?? false
+  const plate = visit ? getVisitPlate(visit) : null
   const isPending = checkInMutation.isPending || checkOutMutation.isPending
 
   return (
@@ -297,41 +268,14 @@ export function QRScannerView() {
                       </p>
                     </div>
                   </div>
-                  <Badge color={statusColors[visit.status]}>
-                    {statusLabels[visit.status]}
+                  <Badge color={getVisitStatusColor(visit.status)}>
+                    {getVisitStatusLabel(visit.status)}
                   </Badge>
                 </div>
               </div>
 
               {/* Alertas de validación */}
-              {statusValidation && (
-                <div className={`border-b ${
-                  statusValidation.type === 'error' 
-                    ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800' 
-                    : statusValidation.type === 'warning'
-                    ? 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800'
-                    : 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800'
-                } p-4`}>
-                  <p className={`font-semibold mb-1 ${
-                    statusValidation.type === 'error'
-                      ? 'text-red-900 dark:text-red-100'
-                      : statusValidation.type === 'warning'
-                      ? 'text-amber-900 dark:text-amber-100'
-                      : 'text-blue-900 dark:text-blue-100'
-                  }`}>
-                    {statusValidation.message}
-                  </p>
-                  <p className={`text-sm ${
-                    statusValidation.type === 'error'
-                      ? 'text-red-700 dark:text-red-300'
-                      : statusValidation.type === 'warning'
-                      ? 'text-amber-700 dark:text-amber-300'
-                      : 'text-blue-700 dark:text-blue-300'
-                  }`}>
-                    {statusValidation.description}
-                  </p>
-                </div>
-              )}
+              {statusValidation && <ScanStatusAlert validation={statusValidation} />}
 
               {/* Información de la visita */}
               <div className="p-6 space-y-6">
@@ -369,7 +313,7 @@ export function QRScannerView() {
                 </div>
 
                 {/* Vehículo (si aplica) */}
-                {visit.type === 'vehicular' && visit.vehicle && (
+                {visit.type === 'vehicular' && plate && (
                   <div>
                     <h3 className="text-sm font-medium text-zinc-500 dark:text-zinc-400 mb-3">
                       Información del Vehículo
@@ -378,9 +322,9 @@ export function QRScannerView() {
                       <TruckIcon className="w-5 h-5 text-purple-600 dark:text-purple-400" />
                       <div>
                         <p className="font-mono font-bold text-lg text-purple-900 dark:text-purple-100">
-                          {visit.vehicle.plate}
+                          {plate}
                         </p>
-                        {visit.vehicle.brand && (
+                        {visit.vehicle?.brand && (
                           <p className="text-sm text-purple-700 dark:text-purple-300">
                             {visit.vehicle.brand} {visit.vehicle.model}
                           </p>
@@ -433,9 +377,13 @@ export function QRScannerView() {
                         <p className="font-semibold text-zinc-900 dark:text-zinc-100">
                           {visit.host.name}
                         </p>
-                        <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                          {visit.host.email}
-                        </p>
+                        {/* Sin users.update el anfitrión llega como { id, name } (P5). */}
+                        {/* Tampoco el email marcador de una cuenta anonimizada. */}
+                        {visibleUserEmail(visit.host.email) ? (
+                          <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                            {visibleUserEmail(visit.host.email)}
+                          </p>
+                        ) : null}
                       </div>
                     </div>
                   </div>

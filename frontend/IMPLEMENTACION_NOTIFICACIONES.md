@@ -18,8 +18,10 @@ Se ha implementado un sistema completo de notificaciones push en tiempo real uti
 
 | Archivo | Descripción | Estado |
 |---------|-------------|--------|
-| `services/WebSocketService.ts` | Servicio singleton de conexión WebSocket | ✅ Completo |
-| `hooks/useNotifications.ts` | Hook de React para gestionar notificaciones | ✅ Completo |
+| `services/WebSocketService.ts` | Socket único de la sesión (cookie), salas del servidor | ✅ Completo (P6) |
+| `components/RealtimeConnection.tsx` | Dueño único del socket, ligado al login (P6) | ✅ Completo |
+| `components/GlobalSecurityNotifications.tsx` | Avisos `security:anomaly_highlight` con foto por `GET /anomalies/:id` (P6) | ✅ Completo |
+| `hooks/useNotifications.ts` | Hook de React para gestionar notificaciones (no conecta) | ✅ Completo |
 | `components/NotificationBell.tsx` | Componente UI de campana de notificaciones | ✅ Completo |
 | `views/NotificationTestView.tsx` | Vista de prueba y monitoreo | ✅ Completo |
 | `types/index.ts` | Tipos y schemas de Zod | ✅ Actualizado |
@@ -36,11 +38,16 @@ Se ha implementado un sistema completo de notificaciones push en tiempo real uti
 
 ## 🎯 Características Implementadas
 
-### Conexión WebSocket
-- ✅ Conexión automática al autenticarse
-- ✅ Desconexión automática al cerrar sesión
-- ✅ Reconexión automática (máx. 5 intentos)
-- ✅ Autenticación con JWT
+### Conexión WebSocket (modelo vigente: Fase 4 · P6)
+- ✅ Un solo socket por pestaña, gobernado por `RealtimeConnection`
+- ✅ Conexión automática al autenticarse; desconexión al cerrar sesión
+- ✅ Autenticación con la cookie de sesión de better-auth en el handshake
+  (`withCredentials`); sin sesión → `connect_error: unauthorized`
+- ✅ Salas asignadas por el servidor (`user:<id>`, `session:<id>`,
+  `org:<id>:security`); sin `register` ni `join_room`
+- ✅ Fin de sesión del servidor (`session:ended { reason }` + corte): el
+  cliente revalida la sesión y no reintenta si ya no vale
+- ✅ Cortes de red: socket.io reintenta solo (2 s → 30 s)
 - ✅ Soporte multi-dispositivo
 
 ### Notificaciones en la UI
@@ -124,7 +131,7 @@ VITE_WS_URL=http://localhost:3000
 │           │                                                   │
 │           ▼                                                   │
 │  ┌────────────────────┐                                      │
-│  │ NotificationGateway │  sendToUser(userId, payload)        │
+│  │ NotificationGateway │  sendToUser() → sala user:<id>      │
 │  └────────┬───────────┘                                      │
 │           │                                                   │
 │           │ Socket.IO                                         │
@@ -135,23 +142,27 @@ VITE_WS_URL=http://localhost:3000
 ┌───────────▼───────────────────────────────────────────────────┐
 │                         FRONTEND                              │
 │  ┌────────────────────┐                                       │
-│  │ WebSocketService   │  subscribe(callback)                  │
+│  │ WebSocketService   │  onNotification(handler)              │
 │  └────────┬───────────┘                                       │
 │           │                                                    │
 │           ▼                                                    │
 │  ┌────────────────────┐                                       │
-│  │ useNotifications   │  handleNotification(payload)          │
+│  │ RealtimeConnection │  único suscriptor (uno por evento)    │
 │  └────────┬───────────┘                                       │
 │           │                                                    │
-│           ├────────────────┬───────────────────┐              │
-│           │                │                   │              │
-│           ▼                ▼                   ▼              │
-│  ┌───────────────┐ ┌──────────────┐  ┌───────────────┐      │
-│  │ Update State  │ │ Show Browser │  │ Play Sound    │      │
-│  │ notifications │ │ Notification │  │ (future)      │      │
-│  └───────┬───────┘ └──────────────┘  └───────────────┘      │
+│           ├─────────────────────────┐                         │
+│           │                         │                         │
+│           ▼                         ▼                         │
+│  ┌──────────────────────┐  ┌──────────────┐                  │
+│  │ invalidateQueries    │  │ Show Browser │                  │
+│  │ ['notifications',id] │  │ Notification │                  │
+│  └───────┬──────────────┘  └──────────────┘                  │
 │          │                                                     │
 │          ▼                                                     │
+│  ┌────────────────────┐                                       │
+│  │ useNotifications   │  GET /notifications (TanStack Query)  │
+│  └────────┬───────────┘                                       │
+│           ▼                                                    │
 │  ┌────────────────────┐                                       │
 │  │ NotificationBell   │  UI Update (badge, dropdown)          │
 │  └────────────────────┘                                       │
@@ -219,10 +230,12 @@ Content-Type: application/json
 
 ## 🔐 Seguridad
 
-- ✅ Autenticación JWT en handshake de Socket.IO
-- ✅ Validación de usuario en el gateway
-- ✅ Solo notificaciones del usuario autenticado
-- ✅ Token almacenado en localStorage (HTTPS en producción)
+- ✅ Handshake autenticado con la cookie httpOnly de better-auth (sin token en
+  el cliente)
+- ✅ Salas asignadas por el servidor: el cliente no puede unirse a otra ni
+  registrarse como otro usuario
+- ✅ Solo notificaciones del usuario autenticado (`user:<id>`)
+- ✅ El socket se corta al terminar la sesión (`session:ended`)
 
 ## 🐛 Problemas Conocidos y Soluciones
 

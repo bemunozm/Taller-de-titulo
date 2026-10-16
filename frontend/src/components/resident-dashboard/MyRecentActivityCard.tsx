@@ -8,6 +8,7 @@ import { useState, useEffect } from 'react';
 import type { Visit } from '@/types/index';
 import type { PlateDetection } from '@/api/DetectionsAPI';
 import { formatRelativeTime } from '@/helpers/index';
+import { getVisitPlate } from '@/helpers/visitStatus';
 
 interface MyRecentActivityCardProps {
   recentVisits: Visit[];
@@ -80,6 +81,7 @@ export function MyRecentActivityCard({ recentVisits, recentDetections }: MyRecen
     switch (activity.type) {
       case 'visit-checkin': {
         const visit = activity.data as Visit;
+        const plate = getVisitPlate(visit);
         return (
           <div
             key={activity.id}
@@ -94,7 +96,7 @@ export function MyRecentActivityCard({ recentVisits, recentDetections }: MyRecen
               </p>
               <p className="text-xs text-zinc-600 dark:text-zinc-400">
                 Visita {visit.type === 'vehicular' ? 'vehicular' : 'peatonal'}
-                {visit.vehicle?.plate && ` • ${visit.vehicle.plate}`}
+                {plate && ` • ${plate}`}
               </p>
               <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
                 {formatRelativeTime(activity.timestamp)}

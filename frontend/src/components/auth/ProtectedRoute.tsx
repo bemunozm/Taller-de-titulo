@@ -15,6 +15,8 @@ interface ProtectedRouteProps {
   role?: string
   /** Lista de roles - el usuario debe tener AL MENOS UNO */
   anyRole?: string[]
+  /** Solo el super-admin de plataforma (ver `@/helpers/roles`) */
+  superAdminOnly?: boolean
   /** Ruta a redirigir si no tiene permisos (default: '/') */
   redirectTo?: string
 }
@@ -49,10 +51,11 @@ export function ProtectedRoute({
   allPermissions,
   role,
   anyRole,
+  superAdminOnly = false,
   redirectTo = '/403' // Redirigir a página de acceso prohibido por defecto
 }: ProtectedRouteProps) {
   const { isLoading } = useAuth()
-  const { hasPermission, hasAnyPermission, hasAllPermissions, hasRole, hasAnyRole } = usePermissions()
+  const { hasPermission, hasAnyPermission, hasAllPermissions, hasRole, hasAnyRole, isSuperAdmin } = usePermissions()
 
   // Mientras carga, no redirigir
   if (isLoading) {
@@ -90,6 +93,10 @@ export function ProtectedRoute({
 
   // Verificar cualquier rol de la lista
   if (anyRole && !hasAnyRole(...anyRole)) {
+    hasAccess = false
+  }
+
+  if (superAdminOnly && !isSuperAdmin) {
     hasAccess = false
   }
 

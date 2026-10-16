@@ -549,10 +549,13 @@ queryClient.invalidateQueries({ queryKey: ['user'] })
   </ProtectedRoute>
 } />
 
-// Conserje - Múltiples permisos (OR)
-<Route path="/conserje" element={
-  <ProtectedRoute anyPermission={['cameras.read', 'streams.read']}>
-    <ConserjeView />
+// Cámaras - Múltiples permisos (OR)
+// (la antigua `/conserje` con `ConserjeView` se eliminó en la Fase 4 · P6:
+// abría su propio socket; los avisos de seguridad llegan por
+// `GlobalSecurityNotifications` sobre el socket único de la sesión)
+<Route path="/cameras" element={
+  <ProtectedRoute anyPermission={['cameras.read', 'cameras.view-stream', 'streams.read']}>
+    <CamerasView />
   </ProtectedRoute>
 } />
 ```

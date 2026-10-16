@@ -32,6 +32,17 @@ import {
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { formatDateTime } from '@/helpers/index'
+import {
+  VISIT_STATUSES,
+  canCancelVisit,
+  canEditVisit,
+  canShowVisitQr,
+  getVisitPlate,
+  getVisitScanState,
+  getVisitStatusColor,
+  getVisitStatusLabel,
+  getVisitStatusPluralLabel,
+} from '@/helpers/visitStatus'
 import { QRCodeModal } from './QRCodeModal'
 import { Dropdown, DropdownButton, DropdownItem, DropdownMenu } from '@/components/ui/Dropdown'
 import { Dialog, DialogBody, DialogDescription, DialogTitle } from '@/components/ui/Dialog'
@@ -83,27 +94,6 @@ function ConfirmActionModal({
   )
 }
 
-// Colores para los badges de estado
-const statusColors = {
-  pending: 'amber',
-  active: 'lime',
-  ready: 'cyan',
-  completed: 'sky',
-  cancelled: 'zinc',
-  expired: 'rose',
-  denied: 'red',
-} as const
-
-const statusLabels = {
-  pending: 'Pendiente',
-  active: 'Activa',
-  ready: 'Lista para Reingresar',
-  completed: 'Completada',
-  cancelled: 'Cancelada',
-  expired: 'Expirada',
-  denied: 'Rechazada',
-}
-
 const typeColors = {
   vehicular: 'purple',
   pedestrian: 'blue',
@@ -136,48 +126,52 @@ export function VisitTable({ visits, onEdit, onViewDetail }: VisitTableProps) {
     setQrModalOpen(true)
   }
 
+  // `onSettled` refresca también tras un error: un 409 significa que la visita
+  // cambió de estado y la fila que se ve está desactualizada.
+  const refreshVisits = () => queryClient.invalidateQueries({ queryKey: ['visits'] })
+
   const deleteMutation = useMutation({
     mutationFn: deleteVisit,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['visits'] })
       toast.success('Visita eliminada exitosamente')
     },
     onError: (error: Error) => {
       toast.error(error.message || 'Error al eliminar la visita')
     },
+    onSettled: refreshVisits,
   })
 
   const checkInMutation = useMutation({
     mutationFn: checkInVisit,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['visits'] })
       toast.success('Check-in registrado exitosamente')
     },
     onError: (error: Error) => {
       toast.error(error.message || 'Error al registrar check-in')
     },
+    onSettled: refreshVisits,
   })
 
   const checkOutMutation = useMutation({
     mutationFn: checkOutVisit,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['visits'] })
       toast.success('Check-out registrado exitosamente')
     },
     onError: (error: Error) => {
       toast.error(error.message || 'Error al registrar check-out')
     },
+    onSettled: refreshVisits,
   })
 
   const cancelMutation = useMutation({
     mutationFn: cancelVisit,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['visits'] })
       toast.success('Visita cancelada exitosamente')
     },
     onError: (error: Error) => {
       toast.error(error.message || 'Error al cancelar la visita')
     },
+    onSettled: refreshVisits,
   })
 
   const handleDelete = (visit: Visit) => {
@@ -256,8 +250,8 @@ export function VisitTable({ visits, onEdit, onViewDetail }: VisitTableProps) {
       columnHelper.accessor('status', {
         header: 'Estado',
         cell: (info) => (
-          <Badge color={statusColors[info.getValue()]}>
-            {statusLabels[info.getValue()]}
+          <Badge color={getVisitStatusColor(info.getValue())}>
+            {getVisitStatusLabel(info.getValue())}
           </Badge>
         ),
       }),
@@ -277,25 +271,28 @@ export function VisitTable({ visits, onEdit, onViewDetail }: VisitTableProps) {
         },
         enableSorting: false,
       }),
-      columnHelper.accessor('vehicle', {
+      // Accessor de texto (no el objeto `vehicle`) para que la búsqueda global
+      // encuentre la patente, también la solicitada de una visita sin aprobar.
+      columnHelper.accessor((visit) => getVisitPlate(visit) ?? '', {
+        id: 'plate',
         header: 'Vehículo',
         cell: (info) => {
           const visit = info.row.original
-          const vehicle = info.getValue()
-          
-          if (visit.type === 'vehicular' && vehicle) {
+          const plate = info.getValue()
+
+          if (visit.type === 'vehicular' && plate) {
             return (
               <div>
-                <div className="font-mono font-semibold">{vehicle.plate}</div>
-                {vehicle.brand && (
+                <div className="font-mono font-semibold">{plate}</div>
+                {visit.vehicle?.brand && (
                   <div className="text-sm text-zinc-500">
-                    {vehicle.brand} {vehicle.model}
+                    {visit.vehicle.brand} {visit.vehicle.model}
                   </div>
                 )}
               </div>
             )
           }
-          
+
           return '-'
         },
         enableSorting: false,
@@ -330,14 +327,17 @@ export function VisitTable({ visits, onEdit, onViewDetail }: VisitTableProps) {
         header: () => <span className="text-right block">Acciones</span>,
         cell: (info) => {
           const visit = info.row.original
-          const canCheckIn = visit.status === 'pending' || visit.status === 'ready'
-          const canCheckOut = visit.status === 'active'
-          const canCancel = visit.status === 'pending' || visit.status === 'active' || visit.status === 'ready'
+          // Misma regla que el escáner: la entrada exige estado, ventana de
+          // validez y usos disponibles; si no, el backend responde 400.
+          const { canCheckIn, canCheckOut } = getVisitScanState(visit)
+          const canCancel = canCancelVisit(visit.status)
+          const canEdit = canEditVisit(visit.status)
+          const canShowQr = canShowVisitQr(visit)
 
           return (
             <div className="flex justify-end">
               <Dropdown>
-                <DropdownButton plain>
+                <DropdownButton plain aria-label={`Acciones de la visita de ${visit.visitorName}`}>
                   <EllipsisVerticalIcon className="w-5 h-5" />
                 </DropdownButton>
                 <DropdownMenu anchor="bottom end">
@@ -348,7 +348,7 @@ export function VisitTable({ visits, onEdit, onViewDetail }: VisitTableProps) {
                     </DropdownItem>
                   )}
                   
-                  {visit.qrCode && (
+                  {canShowQr && (
                     <DropdownItem onClick={() => handleShowQR(visit)}>
                       <QrCodeIcon className="w-4 h-4" />
                       <span>Ver código QR</span>
@@ -380,12 +380,14 @@ export function VisitTable({ visits, onEdit, onViewDetail }: VisitTableProps) {
                     </DropdownItem>
                   )}
 
-                  <Protected permission="visits.update" anyRole={['Administrador', 'Super Administrador']}>
-                    <DropdownItem onClick={() => onEdit(visit)}>
-                      <PencilIcon className="w-4 h-4" />
-                      <span>Editar</span>
-                    </DropdownItem>
-                  </Protected>
+                  {canEdit && (
+                    <Protected permission="visits.update" anyRole={['Administrador', 'Super Administrador']}>
+                      <DropdownItem onClick={() => onEdit(visit)}>
+                        <PencilIcon className="w-4 h-4" />
+                        <span>Editar</span>
+                      </DropdownItem>
+                    </Protected>
+                  )}
                   
                   <Protected permission="visits.delete" anyRole={['Administrador', 'Super Administrador']}>
                     <DropdownItem onClick={() => handleDelete(visit)}>
@@ -462,21 +464,21 @@ export function VisitTable({ visits, onEdit, onViewDetail }: VisitTableProps) {
         />
         
         <Select
+          aria-label="Filtrar por estado"
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
           className="w-full sm:w-48"
         >
           <option value="all">Todos los estados</option>
-          <option value="pending">Pendientes</option>
-          <option value="active">Activas</option>
-          <option value="ready">Listas para Reingresar</option>
-          <option value="completed">Completadas</option>
-          <option value="cancelled">Canceladas</option>
-          <option value="expired">Expiradas</option>
-          <option value="denied">Rechazadas</option>
+          {VISIT_STATUSES.map((status) => (
+            <option key={status} value={status}>
+              {getVisitStatusPluralLabel(status)}
+            </option>
+          ))}
         </Select>
 
         <Select
+          aria-label="Filtrar por tipo"
           value={typeFilter}
           onChange={(e) => setTypeFilter(e.target.value)}
           className="w-full sm:w-48"

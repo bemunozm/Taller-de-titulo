@@ -1,14 +1,15 @@
-import { useMemo, useState, useEffect, useCallback } from 'react'
+import { useMemo, useState, useEffect, useCallback, type ComponentProps } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { listAccessAttempts, type AccessAttempt } from '@/api/DetectionsAPI'
-import { 
-  createColumnHelper, 
-  getCoreRowModel, 
-  useReactTable, 
-  getSortedRowModel, 
-  getFilteredRowModel, 
-  getPaginationRowModel, 
-  flexRender 
+import {
+  createColumnHelper,
+  getCoreRowModel,
+  useReactTable,
+  getSortedRowModel,
+  getFilteredRowModel,
+  getPaginationRowModel,
+  flexRender,
+  type SortingState,
 } from '@tanstack/react-table'
 import { Button } from '@/components/ui/Button'
 import { toast } from 'react-toastify'
@@ -16,19 +17,32 @@ import { Input, InputGroup } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { Badge } from '@/components/ui/Badge'
 import { useNavigate } from 'react-router-dom'
-import { 
-  EyeIcon, 
-  EllipsisVerticalIcon, 
-  ChevronUpIcon, 
+import {
+  EyeIcon,
+  EllipsisVerticalIcon,
+  ChevronUpIcon,
   ChevronDownIcon,
   MagnifyingGlassIcon,
   FunnelIcon,
   XMarkIcon,
-  CheckCircleIcon,
-  XCircleIcon
 } from '@heroicons/react/16/solid'
 import { Dropdown, DropdownButton, DropdownItem, DropdownMenu } from '@/components/ui/Dropdown'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table'
+import { ACCESS_DECISIONS, getAccessDecisionMeta } from '@/helpers/accessDecision'
+import { AccessDecisionBadge } from './AccessDecisionBadge'
+
+type BadgeColor = NonNullable<ComponentProps<typeof Badge>['color']>
+
+const METHOD_COLORS: Record<string, BadgeColor> = {
+  lpr: 'lime',
+  facial: 'sky',
+  manual: 'amber',
+  qr: 'purple',
+}
+
+// A nivel de módulo: dentro del componente se recreaba en cada render e
+// invalidaba el `useMemo` de las columnas.
+const columnHelper = createColumnHelper<AccessAttempt>()
 
 export default function TraceabilityTable() {
   const { data = [] } = useQuery({ queryKey: ['detections', 'attempts'], queryFn: () => listAccessAttempts() })
@@ -38,16 +52,14 @@ export default function TraceabilityTable() {
   const [decisionFilter, setDecisionFilter] = useState<string>('')
   const [dateFrom, setDateFrom] = useState<string>('')
   const [dateTo, setDateTo] = useState<string>('')
-  const [sorting, setSorting] = useState<any[]>([{ id: 'createdAt', desc: true }])
+  const [sorting, setSorting] = useState<SortingState>([{ id: 'createdAt', desc: true }])
   const [showFilters, setShowFilters] = useState(true)
 
-  const columnHelper = createColumnHelper<AccessAttempt>()
-
   const columns = useMemo(() => [
-    columnHelper.accessor((row: AccessAttempt) => row.id, {
+    columnHelper.accessor((row) => row.id, {
       id: 'id',
       header: 'ID',
-      cell: (info: any) => (
+      cell: (info) => (
         <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">
           {String(info.getValue()).slice(0, 8)}
         </span>
@@ -55,7 +67,7 @@ export default function TraceabilityTable() {
     }),
     columnHelper.accessor('createdAt', {
       header: 'Fecha y Hora',
-      cell: (info: any) => {
+      cell: (info) => {
         const date = new Date(String(info.getValue()))
         return (
           <div className="flex flex-col">
@@ -71,50 +83,25 @@ export default function TraceabilityTable() {
     }),
     columnHelper.accessor('decision', {
       header: 'Decisión',
-      cell: (info: any) => {
-        const decision = info.getValue()
-        if (decision === 'Aprovado') {
-          return (
-            <Badge color="green" className="inline-flex items-center gap-1.5">
-              <CheckCircleIcon className="w-4 h-4" />
-              Aprobado
-            </Badge>
-          )
-        } else if (decision === 'Denegado') {
-          return (
-            <Badge color="red" className="inline-flex items-center gap-1.5">
-              <XCircleIcon className="w-4 h-4" />
-              Denegado
-            </Badge>
-          )
-        }
-        return <Badge color="zinc">{decision}</Badge>
-      }
+      cell: (info) => <AccessDecisionBadge decision={info.getValue()} />
     }),
     columnHelper.accessor('method', {
       header: 'Método',
-      cell: (info: any) => {
+      cell: (info) => {
         const method = info.getValue()
         if (!method) return <span className="text-zinc-400 dark:text-zinc-600">-</span>
-        
-        const methodColors: Record<string, string> = {
-          'lpr': 'lime',
-          'facial': 'sky',
-          'manual': 'amber',
-          'qr': 'purple'
-        }
-        
+
         return (
-          <Badge color={(methodColors[method.toLowerCase()] as any) || 'zinc'}>
+          <Badge color={METHOD_COLORS[method.toLowerCase()] ?? 'zinc'}>
             {method}
           </Badge>
         )
       }
     }),
-    columnHelper.accessor((row: AccessAttempt) => row.detection?.plate, {
+    columnHelper.accessor((row) => row.detection?.plate, {
       id: 'plate',
       header: 'Patente',
-      cell: (info: any) => {
+      cell: (info) => {
         const plate = info.getValue()
         return plate ? (
           <span className="font-mono font-semibold text-sm bg-zinc-100 dark:bg-zinc-800 px-2 py-1 rounded border border-zinc-300 dark:border-zinc-600">
@@ -125,10 +112,10 @@ export default function TraceabilityTable() {
         )
       }
     }),
-    columnHelper.accessor((row: AccessAttempt) => row.detection?.cameraId, {
+    columnHelper.accessor((row) => row.detection?.cameraId, {
       id: 'camera',
       header: 'Cámara',
-      cell: (info: any) => {
+      cell: (info) => {
         const cameraId = info.getValue()
         return cameraId ? (
           <span className="text-sm text-zinc-700 dark:text-zinc-300">
@@ -139,10 +126,10 @@ export default function TraceabilityTable() {
         )
       }
     }),
-    columnHelper.accessor((row: AccessAttempt) => row.detection, {
+    columnHelper.accessor((row) => row.detection, {
       id: 'confidence',
       header: 'Confianza',
-      cell: (info: any) => {
+      cell: (info) => {
         const detection = info.getValue()
         if (!detection) return <span className="text-zinc-400 dark:text-zinc-600">-</span>
         
@@ -177,8 +164,8 @@ export default function TraceabilityTable() {
     columnHelper.display({
       id: 'actions',
       header: '',
-      cell: (info: any) => {
-        const row = info.row.original as AccessAttempt
+      cell: (info) => {
+        const row = info.row.original
         return (
           <div className="flex justify-end">
             <Dropdown>
@@ -196,7 +183,7 @@ export default function TraceabilityTable() {
         )
       }
     })
-  ], [columnHelper, navigate])
+  ], [navigate])
 
   const filteredData = useMemo(() => {
     let filtered = data
@@ -354,12 +341,16 @@ export default function TraceabilityTable() {
 
               {/* Filtro por decisión */}
               <Select
+                aria-label="Filtrar por decisión"
                 value={decisionFilter}
                 onChange={(e) => setDecisionFilter(e.target.value)}
               >
                 <option value="">Todas las decisiones</option>
-                <option value="Aprovado">✓ Aprobado</option>
-                <option value="Denegado">✗ Denegado</option>
+                {ACCESS_DECISIONS.map((decision) => (
+                  <option key={decision} value={decision}>
+                    {getAccessDecisionMeta(decision).label}
+                  </option>
+                ))}
               </Select>
 
               {/* Fecha desde */}

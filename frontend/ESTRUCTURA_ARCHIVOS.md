@@ -1,5 +1,17 @@
 # 📁 Estructura de Archivos Creados - Sistema de Notificaciones
 
+> **Modelo vigente (Fase 4 · P6, 2026-10-09).** Hay **un solo socket** por pestaña
+> (`webSocketService`, namespace `/`) y lo gobierna `components/RealtimeConnection.tsx`
+> según el login: conecta con un usuario autenticado y se cierra en logout. El
+> handshake se autentica con la **cookie de sesión** de better-auth
+> (`withCredentials`); el **servidor asigna las salas** (`user:<id>`,
+> `session:<id>` y, con `detections.read` + `condominium.view-all`,
+> `org:<id>:security`). El cliente no emite nada: ya no existen `register`,
+> `join_room` ni `leave_room`. Al terminar la sesión (logout, expiración o
+> revocación) el servidor envía `session:ended { reason }` y corta el socket.
+> `ConserjeView`, `ResidenteView` y `AnomalyAlertModal` se eliminaron.
+> Detalle en `NOTIFICACIONES_PUSH.md`.
+
 ## Frontend (React/TypeScript)
 
 ```
@@ -15,19 +27,22 @@ frontend/
 │   │                                       #    - AppNotification
 │   │
 │   ├── services/                           # 🆕 Nueva carpeta
-│   │   └── WebSocketService.ts             # 🆕 Servicio singleton de WebSocket
-│   │                                       #    - connect(token)
-│   │                                       #    - disconnect()
-│   │                                       #    - registerUser(userId)
-│   │                                       #    - subscribe(callback)
-│   │                                       #    - Reconexión automática
+│   │   └── WebSocketService.ts             # 🆕 Socket único de la sesión (singleton)
+│   │                                       #    - connect({ userId, verifySession }): idempotente
+│   │                                       #    - disconnect(): logout / sin sesión / kiosko
+│   │                                       #    - onNotification(handler)
+│   │                                       #    - onAnomalyHighlight(handler)
+│   │                                       #    - getStatus() / onStatusChange(listener)
+│   │                                       #    - Sin register/join_room: salas del servidor
+│   │                                       #    - Rechazo o cierre del servidor: revalida
+│   │                                       #      la sesión HTTP antes de reintentar
 │   │
 │   ├── hooks/
-│   │   ├── useAuth.ts                      # ✅ Existente
-│   │   └── useNotifications.ts             # 🆕 Hook de notificaciones
+│   │   ├── useAuth.ts                      # ✅ Existente (logout cierra el socket)
+│   │   └── useNotifications.ts             # 🆕 Hook de notificaciones (no conecta)
 │   │                                       #    - notifications: AppNotification[]
 │   │                                       #    - unreadCount: number
-│   │                                       #    - isConnected: boolean
+│   │                                       #    - isConnected: boolean (estado del servicio)
 │   │                                       #    - markAsRead()
 │   │                                       #    - markAllAsRead()
 │   │                                       #    - clearAll()
@@ -43,16 +58,24 @@ frontend/
 │   │   │   ├── Dropdown.tsx
 │   │   │   └── ... (otros componentes)
 │   │   │
-│   │   └── NotificationBell.tsx            # 🆕 Componente de campana
-│   │                                       #    - Ícono de campana con badge
-│   │                                       #    - Indicador de conexión
-│   │                                       #    - Dropdown con notificaciones
-│   │                                       #    - Acciones (marcar leída, limpiar)
+│   │   ├── NotificationBell.tsx            # 🆕 Componente de campana
+│   │   │                                   #    - Ícono de campana con badge
+│   │   │                                   #    - Indicador de conexión
+│   │   │                                   #    - Dropdown con notificaciones
+│   │   │                                   #    - Acciones (marcar leída, limpiar)
+│   │   │
+│   │   ├── RealtimeConnection.tsx          # ✨ P6: dueño único del socket (router)
+│   │   │                                   #    - Conecta con usuario autenticado
+│   │   │                                   #    - Desconecta sin sesión y en el kiosko
+│   │   │                                   #    - Único suscriptor de `notification`
+│   │   │
+│   │   └── GlobalSecurityNotifications.tsx # ✨ P6: avisos `security:anomaly_highlight`
+│   │                                       #    - Solo detections.read + condominium.view-all
+│   │                                       #      (nunca el super-admin)
+│   │                                       #    - Foto por GET /anomalies/:id
 │   │
 │   ├── views/
 │   │   ├── DashboardView.tsx               # ✅ Existente
-│   │   ├── ConserjeView.tsx                # ✅ Existente
-│   │   ├── ResidenteView.tsx               # ✅ Existente
 │   │   ├── SettingsView.tsx                # ✅ Existente
 │   │   ├── TraceabilityView.tsx            # ✅ Existente
 │   │   └── NotificationTestView.tsx        # 🆕 Vista de prueba
@@ -157,12 +180,13 @@ backend/
 
   {/* Rutas */}
   <Route path="/" element={<DashboardView />} index />
-  <Route path="/conserje" element={<ConserjeView />} />
   <Route path="/settings" element={<SettingsView />} />
-  <Route path="/residente" element={<ResidenteView />} />
   <Route path="/traceability" element={<TraceabilityView />} />
   <Route path="/traceability/:id" element={<TraceabilityDetailView />} />
 + <Route path="/notifications-test" element={<NotificationTestView />} />
+
+  {/* Fuera de <Routes>: socket único de la sesión (P6) */}
++ <RealtimeConnection />
 ```
 
 ## Paquetes Instalados
@@ -190,8 +214,6 @@ backend/
 | Ruta | Descripción | Autenticación |
 |------|-------------|---------------|
 | `/` | Dashboard principal | ✅ Requerida |
-| `/conserje` | Vista de conserje | ✅ Requerida |
-| `/residente` | Vista de residente | ✅ Requerida |
 | `/settings` | Configuración | ✅ Requerida |
 | `/traceability` | Trazabilidad | ✅ Requerida |
 | `/notifications-test` | Panel de pruebas de notificaciones | ✅ Requerida |
@@ -213,18 +235,20 @@ backend/
 
 ```
 App (router.tsx)
-  └── StackedLayout
-       └── Navbar
-            └── NavbarSection
-                 ├── Search Icon
-                 ├── Inbox Icon
-                 ├── NotificationBell ← 🆕
-                 │    ├── useNotifications() hook
-                 │    │    └── WebSocketService
-                 │    └── Dropdown
-                 │         ├── NotificationItem[]
-                 │         └── Actions (mark read, clear)
-                 └── Avatar Dropdown
+  ├── RealtimeConnection ← ✨ P6 (dueño único de WebSocketService)
+  ├── StackedLayout
+  │    ├── Navbar
+  │    │    └── NavbarSection
+  │    │         ├── Search Icon
+  │    │         ├── Inbox Icon
+  │    │         ├── NotificationBell ← 🆕
+  │    │         │    ├── useNotifications() hook (lista + estado del socket)
+  │    │         │    └── Dropdown
+  │    │         │         ├── NotificationItem[]
+  │    │         │         └── Actions (mark read, clear)
+  │    │         └── Avatar Dropdown
+  │    └── GlobalSecurityNotifications ← ✨ P6 (solo con permisos de seguridad)
+  └── GlobalApprovalDialogs
 ```
 
 ## Arquitectura Técnica
@@ -251,10 +275,12 @@ App (router.tsx)
 ┌──────────────▼──────────────────────────────┐
 │           Capa de Comunicación              │
 │  ┌─────────────────────────────────────┐   │
+│  │     RealtimeConnection.tsx          │   │
 │  │     WebSocketService.ts             │   │
-│  │     - Conexión Socket.IO            │   │
-│  │     - Reconexión automática         │   │
-│  │     - Suscripciones                 │   │
+│  │     - Socket único (cookie sesión)  │   │
+│  │     - Salas asignadas por servidor  │   │
+│  │     - Sin register / join_room      │   │
+│  │     - Fin de sesión: no reintenta   │   │
 │  └─────────────────────────────────────┘   │
 └──────────────┬──────────────────────────────┘
                │

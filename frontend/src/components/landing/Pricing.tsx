@@ -2,12 +2,15 @@ import { motion } from 'motion/react'
 import { CheckIcon } from '@heroicons/react/24/solid'
 import { useState } from 'react'
 
+// Solo funciones que el sistema tiene hoy. Retirado por no tener respaldo:
+// "Alertas vía Telegram" (no existe), "Soporte 24/7", "API Access",
+// "Probar Gratis 14 días" e "Integración con Central Receptoras".
 const pricing = [
   {
     name: 'Lite',
     price: { monthly: '49', yearly: '39' },
     desc: 'Esencial para residencias privadas.',
-    features: ['1 Cámara Inteligente', 'Digital Concierge Básico', 'Alertas vía Telegram', 'Soporte 24/7'],
+    features: ['1 Cámara Inteligente', 'Digital Concierge Básico', 'Notificaciones en la app y por correo', 'Visitas con código QR'],
     cta: 'Empezar ahora',
     pro: false
   },
@@ -15,15 +18,15 @@ const pricing = [
     name: 'Pro',
     price: { monthly: '129', yearly: '99' },
     desc: 'Control total para edificios y condominios.',
-    features: ['Hasta 8 Cámaras AI', 'Guardián IA Avanzado', 'Smart LPR (Matrículas)', 'Panel Administrativo', 'API Access'],
-    cta: 'Probar Gratis 14 días',
+    features: ['Hasta 8 Cámaras AI', 'Guardián IA Avanzado', 'Smart LPR (Patentes)', 'Panel Administrativo', 'Registro de auditoría'],
+    cta: 'Solicitar demo',
     pro: true
   },
   {
     name: 'Enterprise',
     price: { monthly: 'Custom', yearly: 'Custom' },
     desc: 'Soluciones críticas para industria.',
-    features: ['Cámaras Ilimitadas', 'Inferencia Edge dedicada', 'Integración con Central Receptoras', 'Manager de Cuenta Dedicado'],
+    features: ['Cámaras Ilimitadas', 'Inferencia Edge dedicada', 'Varios condominios con datos aislados', 'Manager de Cuenta Dedicado'],
     cta: 'Contactar Ventas',
     pro: false
   }

@@ -19,7 +19,8 @@
       "@/lib/*": ["lib/*"],
       "@/helpers/*": ["helpers/*"],
       "@/api/*": ["api/*"],
-      "@/services/*": ["services/*"]
+      "@/services/*": ["services/*"],
+      "@/test/*": ["test/*"]
     },
 
     /* Bundler mode */

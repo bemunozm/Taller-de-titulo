@@ -3,6 +3,7 @@ import { Dialog, Transition } from '@headlessui/react'
 import { XMarkIcon, ArrowDownTrayIcon, ShareIcon } from '@heroicons/react/24/outline'
 import { QRCodeSVG } from 'qrcode.react'
 import type { Visit } from '@/types/index'
+import { canShowVisitQr, getVisitPlate } from '@/helpers/visitStatus'
 
 interface QRCodeModalProps {
   isOpen: boolean
@@ -11,7 +12,8 @@ interface QRCodeModalProps {
 }
 
 export function QRCodeModal({ isOpen, onClose, visit }: QRCodeModalProps) {
-  if (!visit || !visit.qrCode) return null
+  // Nunca renderiza un QR que no es credencial vigente (sin aprobar o terminal).
+  if (!visit || !canShowVisitQr(visit)) return null
 
   const handleDownload = () => {
     const svg = document.getElementById('qr-code-svg')
@@ -82,8 +84,8 @@ export function QRCodeModal({ isOpen, onClose, visit }: QRCodeModalProps) {
                 files: [file],
               })
             } catch (error) {
+              // AbortError = el usuario cerró el diálogo de compartir.
               if ((error as Error).name !== 'AbortError') {
-                console.error('Error compartiendo:', error)
                 fallbackCopyToClipboard()
               }
             }
@@ -96,8 +98,7 @@ export function QRCodeModal({ isOpen, onClose, visit }: QRCodeModalProps) {
       const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' })
       const url = URL.createObjectURL(svgBlob)
       img.src = url
-    } catch (error) {
-      console.error('Error al compartir:', error)
+    } catch {
       fallbackCopyToClipboard()
     }
   }
@@ -142,8 +143,7 @@ export function QRCodeModal({ isOpen, onClose, visit }: QRCodeModalProps) {
               URL.revokeObjectURL(url)
               alert('Imagen descargada (no se pudo copiar al portapapeles)')
             }
-          } catch (error) {
-            console.error('Error al copiar al portapapeles:', error)
+          } catch {
             // Fallback final: descargar
             const url = URL.createObjectURL(blob)
             const a = document.createElement('a')
@@ -159,8 +159,7 @@ export function QRCodeModal({ isOpen, onClose, visit }: QRCodeModalProps) {
       const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' })
       const url = URL.createObjectURL(svgBlob)
       img.src = url
-    } catch (error) {
-      console.error('Error al procesar la imagen:', error)
+    } catch {
       alert('No se pudo procesar la imagen QR')
     }
   }
@@ -170,8 +169,10 @@ export function QRCodeModal({ isOpen, onClose, visit }: QRCodeModalProps) {
   }
 
   const getVisitDetails = () => {
-    if (visit.type === 'vehicular' && visit.vehicle) {
-      return `${visit.vehicle.plate} - ${visit.vehicle.brand || ''} ${visit.vehicle.model || ''}`.trim()
+    const plate = getVisitPlate(visit)
+    if (visit.type === 'vehicular' && plate) {
+      const vehicleDescription = [visit.vehicle?.brand, visit.vehicle?.model].filter(Boolean).join(' ')
+      return vehicleDescription ? `${plate} - ${vehicleDescription}` : plate
     }
     return 'Visita Peatonal'
   }

@@ -51,26 +51,14 @@ const DashboardAPI = {
    * Obtener resumen completo del dashboard
    */
   getSummary: async (params?: DashboardQueryParams): Promise<DashboardSummary> => {
-    try {
-      const response = await api.get('/dashboard/summary', { params });
-      console.log('Dashboard Summary Raw Response:', response.data);
-      
-      // Intentar parsear con el schema
-      const result = dashboardSummarySchema.safeParse(response.data);
-      
-      if (!result.success) {
-        console.error('Dashboard Summary Parse Error:', result.error);
-        console.error('Validation errors:', result.error.errors);
-        throw new Error('Error al parsear los datos del dashboard: ' + result.error.message);
-      }
-      
-      console.log('Dashboard Summary Parsed Successfully:', result.data);
-      return result.data;
-    } catch (error: any) {
-      console.error('Error fetching dashboard summary:', error);
-      console.error('Error details:', error.response?.data);
-      throw error;
+    // Nada de la respuesta va a la consola: trae nombres de visitantes y residentes.
+    const response = await api.get<unknown>('/dashboard/summary', { params });
+    const result = dashboardSummarySchema.safeParse(response.data);
+    if (!result.success) {
+      // Sin el detalle de zod: sus mensajes pueden citar valores recibidos.
+      throw new Error('Los datos del dashboard llegaron con un formato inesperado.');
     }
+    return result.data;
   },
 
   /**

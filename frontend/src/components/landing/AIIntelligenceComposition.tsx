@@ -180,7 +180,8 @@ export default function AIIntelligenceComposition() {
                               <LockClosedIcon className="h-8 w-8 text-white" />
                            </div>
                            <h4 className="text-2xl font-black text-white uppercase tracking-tighter">Protocolo_Cierre_Activo</h4>
-                           <p className="text-[10px] font-mono text-red-500 uppercase tracking-widest font-black">Central de Seguridad Notificada</p>
+                           {/* Antes "Central de Seguridad Notificada": no hay integración con una central; se avisa a la conserjería. */}
+                           <p className="text-[10px] font-mono text-red-500 uppercase tracking-widest font-black">Conserjería Notificada</p>
                         </div>
                      </motion.div>
                    )}

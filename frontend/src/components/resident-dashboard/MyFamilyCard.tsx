@@ -3,12 +3,14 @@ import {
   HomeIcon,
   UserIcon,
 } from '@heroicons/react/24/outline';
+import { visibleUserEmail } from '@/helpers/userDisplay';
 
+// Sin users.update (el Residente) cada miembro llega como { id, name } (P5).
 interface FamilyMember {
   id: string;
   name: string;
-  email: string;
-  rut?: string;
+  email?: string | null;
+  rut?: string | null;
 }
 
 interface MyFamilyCardProps {
@@ -128,9 +130,12 @@ export function MyFamilyCard({ family, members }: MyFamilyCardProps) {
                     <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">
                       {member.name}
                     </p>
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
-                      {member.email}
-                    </p>
+                    {/* El email marcador de una cuenta anonimizada no se muestra. */}
+                    {visibleUserEmail(member.email) ? (
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
+                        {visibleUserEmail(member.email)}
+                      </p>
+                    ) : null}
                   </div>
                 </div>
               ))}

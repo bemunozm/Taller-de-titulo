@@ -1,9 +1,12 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useSyncExternalStore } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { webSocketService } from '@/services/WebSocketService'
-import { NotificationsAPI } from '@/api/NotificationsAPI'
-import type { AppNotification, NotificationPayload } from '@/types/index'
+import { NotificationsAPI, type GetNotificationsResponse } from '@/api/NotificationsAPI'
+import type { AppNotification } from '@/types/index'
 import { useAuth } from './useAuth'
+
+const subscribeToRealtimeStatus = (onChange: () => void) => webSocketService.onStatusChange(onChange)
+const getRealtimeStatus = () => webSocketService.getStatus()
 
 interface UseNotificationsResult {
   notifications: AppNotification[]
@@ -19,17 +22,18 @@ interface UseNotificationsResult {
 }
 
 /**
- * Hook para gestionar notificaciones en tiempo real mediante WebSocket
+ * Notificaciones del usuario (lista, leídas, permiso del navegador). El
+ * socket y la suscripción a `notification` viven en `RealtimeConnection`
+ * (uno por app, ligado al login): este hook no conecta nada.
  */
 export function useNotifications(): UseNotificationsResult {
   const { data: user } = useAuth()
   const queryClient = useQueryClient()
-  const [isConnected, setIsConnected] = useState(false)
+  const isConnected = useSyncExternalStore(subscribeToRealtimeStatus, getRealtimeStatus) === 'connected'
   const BrowserNotification = typeof window !== 'undefined' ? window.Notification : undefined
   const [hasPermission, setHasPermission] = useState(
     BrowserNotification?.permission === 'granted'
   )
-  const hasConnected = useRef(false)
 
   /**
    * Query para obtener notificaciones usando TanStack Query
@@ -80,11 +84,11 @@ export function useNotifications(): UseNotificationsResult {
       const previousNotifications = queryClient.getQueryData(['notifications', user?.id])
 
       // Actualizar optimistamente
-      queryClient.setQueryData(['notifications', user?.id], (old: any) => {
+      queryClient.setQueryData<GetNotificationsResponse>(['notifications', user?.id], (old) => {
         if (!old) return old
         return {
           ...old,
-          notifications: old.notifications.map((n: any) =>
+          notifications: old.notifications.map((n) =>
             notificationIds.includes(n.id) ? { ...n, read: true, readAt: new Date().toISOString() } : n
           ),
           unreadCount: old.unreadCount - notificationIds.length,
@@ -93,15 +97,11 @@ export function useNotifications(): UseNotificationsResult {
 
       return { previousNotifications }
     },
-    onError: (err, _variables, context) => {
+    onError: (_error, _variables, context) => {
       // Revertir en caso de error
       if (context?.previousNotifications) {
         queryClient.setQueryData(['notifications', user?.id], context.previousNotifications)
       }
-      console.error('[useNotifications] Error marking as read:', err)
-    },
-    onSuccess: () => {
-      console.log('[useNotifications] ✅ Notificación marcada como leída en el servidor')
     },
     onSettled: () => {
       // Invalidar para refrescar
@@ -118,25 +118,21 @@ export function useNotifications(): UseNotificationsResult {
       await queryClient.cancelQueries({ queryKey: ['notifications', user?.id] })
       const previousNotifications = queryClient.getQueryData(['notifications', user?.id])
 
-      queryClient.setQueryData(['notifications', user?.id], (old: any) => {
+      queryClient.setQueryData<GetNotificationsResponse>(['notifications', user?.id], (old) => {
         if (!old) return old
         return {
           ...old,
-          notifications: old.notifications.map((n: any) => ({ ...n, read: true, readAt: new Date().toISOString() })),
+          notifications: old.notifications.map((n) => ({ ...n, read: true, readAt: new Date().toISOString() })),
           unreadCount: 0,
         }
       })
 
       return { previousNotifications }
     },
-    onError: (err, _variables, context) => {
+    onError: (_error, _variables, context) => {
       if (context?.previousNotifications) {
         queryClient.setQueryData(['notifications', user?.id], context.previousNotifications)
       }
-      console.error('[useNotifications] Error marking all as read:', err)
-    },
-    onSuccess: () => {
-      console.log('[useNotifications] ✅ Todas las notificaciones marcadas como leídas en el servidor')
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['notifications', user?.id] })
@@ -160,14 +156,10 @@ export function useNotifications(): UseNotificationsResult {
 
       return { previousNotifications }
     },
-    onError: (err, _variables, context) => {
+    onError: (_error, _variables, context) => {
       if (context?.previousNotifications) {
         queryClient.setQueryData(['notifications', user?.id], context.previousNotifications)
       }
-      console.error('[useNotifications] Error deleting all notifications:', err)
-    },
-    onSuccess: () => {
-      console.log('[useNotifications] ✅ Todas las notificaciones eliminadas del servidor')
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['notifications', user?.id] })
@@ -180,8 +172,8 @@ export function useNotifications(): UseNotificationsResult {
   const requestPermission = useCallback(async (): Promise<NotificationPermission> => {
     const BrowserNotification = typeof window !== 'undefined' ? window.Notification : undefined
     
+    // Navegador sin soporte de notificaciones
     if (!BrowserNotification) {
-      console.warn('Las notificaciones no están soportadas en este navegador')
       return 'denied'
     }
 
@@ -198,121 +190,15 @@ export function useNotifications(): UseNotificationsResult {
       const permission = await BrowserNotification.requestPermission()
       setHasPermission(permission === 'granted')
       return permission
-    } catch (error) {
-      console.error('Error al solicitar permiso de notificaciones:', error)
+    } catch {
       return 'denied'
     }
   }, [])
 
   /**
-   * Muestra una notificación del navegador
-   */
-  const showBrowserNotification = useCallback((payload: NotificationPayload) => {
-    const BrowserNotification = typeof window !== 'undefined' ? window.Notification : undefined
-    
-    if (!hasPermission || !BrowserNotification) {
-      return
-    }
-
-    try {
-      const notification = new BrowserNotification(payload.title, {
-        body: payload.message,
-        icon: '/favicon.ico',
-        badge: '/favicon.ico',
-        tag: payload.type,
-        requireInteraction: false,
-        silent: false,
-      })
-
-      // Auto-cerrar después de 5 segundos
-      setTimeout(() => notification.close(), 5000)
-
-      // Manejar click en la notificación
-      notification.onclick = () => {
-        window.focus()
-        notification.close()
-      }
-    } catch (error) {
-      console.error('Error al mostrar notificación del navegador:', error)
-    }
-  }, [hasPermission])
-
-  /**
-   * Maneja las notificaciones entrantes del WebSocket
-   */
-  const handleNotification = useCallback((payload: NotificationPayload) => {
-    console.log('[useNotifications] 📬 Nueva notificación recibida por WebSocket:', payload)
-    
-    // Mostrar notificación del navegador
-    showBrowserNotification(payload)
-    
-    // Invalidar query para refrescar desde el servidor
-    queryClient.invalidateQueries({ queryKey: ['notifications', user?.id] })
-  }, [showBrowserNotification, queryClient, user?.id])
-
-  /**
-   * Conecta al WebSocket cuando el usuario está autenticado
-   */
-  useEffect(() => {
-    if (!user?.id) {
-      // Si no hay usuario, desconectar
-      if (hasConnected.current) {
-        console.log('[useNotifications] No hay usuario, desconectando WebSocket')
-        webSocketService.disconnect()
-        setIsConnected(false)
-        hasConnected.current = false
-      }
-      return
-    }
-
-    // Conectar solo una vez. La auth real es la cookie httpOnly de better-auth
-    // (Fase 0 #20) — el gate es `user?.id` de arriba, ya no un token en localStorage.
-    if (!hasConnected.current) {
-      console.log('[useNotifications] 🔌 Iniciando conexión WebSocket...')
-      console.log('[useNotifications] Usuario ID:', user.id)
-
-      webSocketService.connect()
-      
-      // Esperar un momento para que la conexión se establezca
-      // antes de registrar al usuario (ahora registerUser maneja esto automáticamente)
-      setTimeout(() => {
-        console.log('[useNotifications] 📝 Registrando usuario en WebSocket...')
-        webSocketService.registerUser(user.id)
-      }, 500)
-      
-      hasConnected.current = true
-    }
-
-    // Verificar conexión periódicamente
-    const checkConnection = setInterval(() => {
-      const connected = webSocketService.isConnected()
-      setIsConnected(connected)
-      
-      if (!connected && hasConnected.current) {
-        console.warn('[useNotifications] ⚠️ WebSocket desconectado')
-      }
-    }, 1000)
-
-    return () => {
-      clearInterval(checkConnection)
-    }
-  }, [user?.id])
-
-  /**
-   * Suscribe al servicio de notificaciones
-   */
-  useEffect(() => {
-    const unsubscribe = webSocketService.subscribe(handleNotification)
-    return () => {
-      unsubscribe()
-    }
-  }, [handleNotification])
-
-  /**
    * Marca una notificación como leída
    */
   const markAsRead = useCallback((id: string) => {
-    console.log('[useNotifications] 📖 Marcando notificación como leída:', id)
     markAsReadMutation.mutate([id])
   }, [markAsReadMutation])
 
@@ -320,7 +206,6 @@ export function useNotifications(): UseNotificationsResult {
    * Marca todas las notificaciones como leídas
    */
   const markAllAsRead = useCallback(() => {
-    console.log('[useNotifications] 📖 Marcando todas las notificaciones como leídas')
     markAllAsReadMutation.mutate()
   }, [markAllAsReadMutation])
 
@@ -328,7 +213,6 @@ export function useNotifications(): UseNotificationsResult {
    * Limpia todas las notificaciones
    */
   const clearAll = useCallback(() => {
-    console.log('[useNotifications] 🗑️ Eliminando todas las notificaciones')
     clearAllMutation.mutate()
   }, [clearAllMutation])
 

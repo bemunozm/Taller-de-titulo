@@ -32,12 +32,10 @@ npm run dev
 
 Una vez autenticado:
 
-1. **Verificar en la consola del navegador** (F12 → Console):
-   ```
-   [WebSocket] Conectando al servidor...
-   [WebSocket] Conectado exitosamente
-   [WebSocket] Registrando usuario: <user-id>
-   ```
+1. **Verificar en DevTools** (F12 → Network → WS): hay **un solo** socket a
+   `VITE_WS_URL` (namespace `/`), abierto con la cookie de sesión. El cliente
+   no envía `register` ni `join_room`: las salas las asigna el servidor. El
+   frontend no escribe logs de WebSocket en consola (`no-console`).
 
 2. **Verificar el indicador visual**:
    - En el Navbar, buscar el ícono de campana 🔔
@@ -154,11 +152,11 @@ npm run test:notifications
 ### 8. Probar reconexión automática
 
 1. Detener el backend (`Ctrl+C`)
-2. Observar en consola: `[WebSocket] Desconectado`
-3. El indicador cambia a rojo
-4. Reiniciar el backend
-5. Después de 3 segundos: `[WebSocket] Conectado exitosamente`
-6. El indicador cambia a verde
+2. El indicador cambia a rojo (estado `reconnecting`)
+3. Reiniciar el backend
+4. socket.io reintenta solo (de 2 s hasta 30 s entre intentos); al volver,
+   el handshake revalida la cookie
+5. El indicador cambia a verde
 
 ## Casos de prueba específicos
 
@@ -220,14 +218,34 @@ npm run test:notifications
 
 **Pasos:**
 1. Cerrar sesión
-2. Verificar consola: `[WebSocket] Desconectando...`
-3. Iniciar sesión nuevamente
-4. Verificar consola: `[WebSocket] Conectado exitosamente`
+2. Verificar en Network → WS que el socket se cerró
+3. Iniciar sesión nuevamente (sin recargar la página)
+4. Verificar que se abre un socket nuevo
 
 **Esperado:**
-- ✅ Desconexión limpia al hacer logout
-- ✅ Reconexión automática al hacer login
-- ✅ Notificaciones anteriores se pierden (no hay persistencia)
+- ✅ Desconexión limpia al hacer logout (`useAuth().logout()` cierra el socket)
+- ✅ Reconexión automática al hacer login (`RealtimeConnection`)
+- ✅ Las notificaciones siguen llegando tras el nuevo login
+- ✅ Las notificaciones anteriores se conservan (se persisten en el servidor)
+
+### Caso 7: Sesión terminada desde el servidor
+
+**Pasos:**
+1. Con la sesión abierta, revocarla o cerrarla desde otra pestaña
+2. El servidor envía `session:ended { reason }` y corta el socket
+
+**Esperado:**
+- ✅ El cliente revalida la sesión (`GET /auth/user`) y, como ya no vale,
+  no reintenta (sin bucle de reconexión)
+- ✅ La app redirige al login; tras iniciar sesión se abre un socket nuevo
+
+### Caso 8: Avisos de seguridad (Guardián Visual)
+
+**Esperado:**
+- ✅ Solo Conserje/Administrador (`detections.read` + `condominium.view-all`)
+  reciben `security:anomaly_highlight`; nunca el super-admin ni un residente
+- ✅ El aviso abre un diálogo y la foto llega por `GET /anomalies/:id`
+- ✅ Si la foto falla, el aviso se muestra igual
 
 ## Troubleshooting
 
@@ -249,39 +267,32 @@ npm run test:notifications
 
 ### Problema: "Las notificaciones desaparecen al refrescar"
 
-**Esperado:** Las notificaciones NO se persisten, se almacenan solo en memoria.
-
-**Solución:** Implementar persistencia en el backend (futuro enhancement).
+**Esperado:** no deberían: se persisten en el servidor (`GET /notifications`).
+Si pasa, revisar que la sesión siga vigente.
 
 ### Problema: "Indicador siempre en rojo"
 
 **Soluciones:**
-1. Esperar 1 segundo (el estado tarda en actualizarse)
-2. Verificar logs en consola
-3. Revisar que el token JWT sea válido
-4. Verificar que el usuario esté registrado en el backend
+1. Revisar `webSocketService.getStatus()`: `session-ended` = el servidor
+   cerró la sesión (iniciar sesión de nuevo); `reconnecting` = corte de red o
+   reintento en curso
+2. Verificar en Network → WS si el handshake responde `unauthorized` (cookie
+   ausente o vencida)
+3. Revisar CORS del backend: origen del frontend con `credentials`
 
-## Logs importantes
+## Estados y señales
 
-### Frontend (Consola del navegador)
+### Frontend
 
-```
-[WebSocket] Conectando al servidor...           ← Inicio de conexión
-[WebSocket] Conectado exitosamente              ← Conexión establecida
-[WebSocket] Registrando usuario: abc-123        ← Usuario registrado
-[WebSocket] Notificación recibida: {...}        ← Notificación recibida
-[WebSocket] Desconectado: io server disconnect  ← Desconexión
-[WebSocket] Intentando reconectar...            ← Reintento
-```
+El frontend no escribe logs de WebSocket en consola (`no-console`). El estado
+del socket se lee con `webSocketService.getStatus()` (`idle`, `connecting`,
+`connected`, `reconnecting`, `session-ended`) y el tráfico, en Network → WS.
 
-### Backend (Terminal)
+### Backend
 
-```
-[NotificationsGateway] Cliente conectado: xyz-456        ← Nuevo cliente
-[NotificationsGateway] Usuario registrado: abc-123       ← Usuario registrado
-[NotificationsService] Enviando notificación a: abc-123  ← Notificación enviada
-[NotificationsGateway] Cliente desconectado: xyz-456     ← Cliente desconectado
-```
+El gateway autentica el handshake con la cookie, asigna las salas
+(`user:<id>`, `session:<id>`, `org:<id>:security`) y, al terminar una sesión,
+emite `session:ended { reason }` antes de cortar el socket.
 
 ## Métricas de éxito
 

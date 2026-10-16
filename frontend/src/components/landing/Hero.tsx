@@ -1,5 +1,7 @@
 import { motion } from 'motion/react'
+import { Link } from 'react-router-dom'
 import { ChevronRightIcon } from '@heroicons/react/24/outline'
+import { PRIVACY_POLICY_ROUTE } from '@/helpers/privacyPolicy'
 
 export default function Hero() {
   return (
@@ -41,7 +43,7 @@ export default function Hero() {
               transition={{ delay: 0.2 }}
               className="max-w-xl text-lg md:text-xl text-zinc-500 mb-12 font-medium leading-relaxed"
             >
-              VigilIA combina visión computacional de grado militar con una experiencia de hospitalidad digital sin precedentes. La primera suite de seguridad que realmente piensa.
+              VigilIA combina visión computacional con una experiencia de hospitalidad digital sin precedentes. La primera suite de seguridad que realmente piensa.
             </motion.p>
 
             <motion.div 
@@ -68,7 +70,13 @@ export default function Hero() {
             >
                <span className="text-xs font-black text-white uppercase tracking-widest opacity-50 italic">Proudly Local.</span>
                <div className="h-px w-12 bg-zinc-800" />
-               <span className="text-xs font-black text-white uppercase tracking-widest opacity-50">99.9% Up-time</span>
+               {/* Antes "99.9% Up-time": no hay SLA medido que lo respalde. */}
+               <Link
+                 to={PRIVACY_POLICY_ROUTE}
+                 className="rounded-sm text-xs font-black text-white uppercase tracking-widest opacity-50 hover:opacity-100 transition-opacity focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white"
+               >
+                 Ley 21.719 · Privacidad
+               </Link>
             </motion.div>
           </div>
 
