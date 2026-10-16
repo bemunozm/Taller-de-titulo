@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 from typing import Optional
 from types import SimpleNamespace
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 try:
     # pydantic v2+: BaseSettings moved to pydantic-settings package
     from pydantic import BaseSettings  # type: ignore
@@ -14,10 +14,35 @@ except Exception:
         from pydantic import BaseSettings  # type: ignore
 
 
+# Secreto compartido backend <-> manager (Fase 4 · P2, hallazgo M4). Mismas
+# reglas que backend/src/config/env.validation.ts: secreto real de al menos 32
+# caracteres y sin valores de ejemplo. Los mensajes nunca incluyen el valor.
+MIN_MANAGER_SECRET_LENGTH = 32
+_PLACEHOLDER_PATTERNS = (
+    re.compile(r'change[-_ ]?me'),
+    re.compile(r'^your[-_]'),
+    re.compile(r'^<.*>$'),
+    re.compile(r'example'),
+    re.compile(r'placeholder'),
+    re.compile(r'^(?:changeme|todo|xxx+)$'),
+)
+
+
+def is_placeholder_secret(value: str) -> bool:
+    """True si `value` parece un valor de relleno (p. ej. el del .env.example)."""
+    normalized = value.strip().lower()
+    return any(pattern.search(normalized) for pattern in _PLACEHOLDER_PATTERNS)
+
+
 class Settings(BaseSettings):
     # Manager / backend
+    # URL base de la API del backend, CON el prefijo global (p. ej.
+    # http://localhost:3000/api/v1). El manager consulta `/workers/cameras`.
     WORKER_BACKEND_URL: Optional[str] = Field(None, min_length=1)
-    WORKER_BACKEND_TOKEN: Optional[str] = None
+    # Secreto que el backend envía al manager (Authorization: Bearer). Sin
+    # valor, el manager rechaza toda petición (fail-closed) salvo el escape
+    # hatch de abajo. Con valor, debe ser un secreto real (ver
+    # `_validate_manager_secret`): un valor débil impide arrancar.
     WORKER_MANAGER_SECRET: Optional[str] = None
     # Escape hatch solo-dev: permite arrancar el manager SIN secreto. En
     # producción debe quedar en False (fail-closed).
@@ -38,6 +63,11 @@ class Settings(BaseSettings):
     LPR_SUPERVISOR_BACKOFF_MAX_SECONDS: float = Field(60.0, gt=0)
     # Límite duro de procesos worker concurrentes que el manager acepta arrancar.
     LPR_MAX_PROCS: int = Field(8, ge=1)
+    # Hilos del ThreadPoolExecutor DENTRO de cada proceso worker (no confundir
+    # con LPR_MAX_PROCS, que cuenta procesos). Declarada acá porque Settings
+    # rechaza variables extra del .env; antes los workers la leían de os.environ
+    # y ponerla en el .env impedía arrancar.
+    LPR_MAX_WORKERS: int = Field(1, ge=1)
 
     # LPR worker
     LPR_RTSP_URL: Optional[str] = None
@@ -72,16 +102,19 @@ class Settings(BaseSettings):
     LPR_PLATE_REGEX: Optional[str] = None
     LPR_MIN_CHAR_CONF: float = Field(0.30, ge=0, le=1)
     LPR_INCLUDE_SNAPSHOT: bool = True
-    LPR_WORKER_TOKEN: Optional[str] = None
-    # Tarea #21 (backend/docs/modulos/auth-multitenant.md §11+, hardening de
-    # ingesta LPR): API key de servicio (plugin `apiKey` de better-auth) que
-    # el worker envía en el header `x-api-key` contra los endpoints de
-    # ingesta (POST /detections/plates, /detections/plates/attempts,
-    # POST/GET /anomalies) — ahora protegidos por `ServiceApiKeyGuard`. Se
-    # obtiene con el admin del backend vía
-    # `POST /api/v1/auth/service-api-keys` (requiere el permiso
-    # "auth.manage-service-tokens") y se pega ACÁ, en `lpr/.env` — la key en
-    # texto plano solo se muestra una vez en esa respuesta.
+    # ÚNICA credencial del LPR contra el backend (Fase 4 · P2: se retiraron
+    # WORKER_BACKEND_TOKEN y LPR_WORKER_TOKEN, que mandaban un Bearer JWT que
+    # el backend ya no acepta). API key de servicio (plugin `apiKey` de
+    # better-auth) enviada en el header `x-api-key` por:
+    #   - el worker, en la ingesta (POST /detections/plates,
+    #     /detections/plates/attempts, POST/GET /anomalies);
+    #   - el manager, al reconciliar (GET /workers/cameras y
+    #     /workers/cameras/:id/source).
+    # Debe emitirla un admin CON condominio vía
+    # `POST /api/v1/auth/service-api-keys` (permiso
+    # "auth.manage-service-tokens"): la key queda acotada a ese condominio y
+    # sin él /workers/* responde 403. La key en texto plano se muestra una
+    # sola vez en esa respuesta.
     LPR_SERVICE_API_KEY: Optional[str] = None
 
     # Reconexión RTSP (Fase 3.C — operabilidad). Antes el stream se abría una
@@ -130,6 +163,30 @@ class Settings(BaseSettings):
     class Config:
         env_file = str(Path(__file__).parent / '.env')
         env_file_encoding = 'utf-8'
+        # Los errores de validación no repiten el valor recibido: un secreto
+        # inválido no debe terminar en logs.
+        hide_input_in_errors = True
+
+    @field_validator('WORKER_MANAGER_SECRET', mode='before')
+    @classmethod
+    def _validate_manager_secret(cls, value: object) -> Optional[str]:
+        if value is None:
+            return None
+        secret = str(value).strip()
+        if not secret:
+            # Vacío = no configurado (el manager queda fail-closed).
+            return None
+        if is_placeholder_secret(secret):
+            raise ValueError(
+                'WORKER_MANAGER_SECRET tiene un valor de ejemplo/placeholder; '
+                'genera uno con `openssl rand -base64 32`'
+            )
+        if len(secret) < MIN_MANAGER_SECRET_LENGTH:
+            raise ValueError(
+                f'WORKER_MANAGER_SECRET debe tener al menos {MIN_MANAGER_SECRET_LENGTH} '
+                'caracteres (genera uno con `openssl rand -base64 32`)'
+            )
+        return secret
 
     # validators in BaseSettings are easier in pydantic v2 via model_validators;
     # keep simple helper that resolves relative paths when Settings is created.

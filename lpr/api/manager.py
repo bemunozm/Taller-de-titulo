@@ -49,9 +49,11 @@ _RETENTION_THREAD: Optional[threading.Thread] = None
 LOG_DIR = Path(__file__).parent.parent / 'logs'
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+# Ya validado por `Settings` (hallazgo M4): o es None (no configurado) o es un
+# secreto real de al menos 32 caracteres; un valor débil o de ejemplo impide
+# arrancar con un ValidationError.
 SECRET = settings.WORKER_MANAGER_SECRET
-BACKEND_URL = settings.WORKER_BACKEND_URL or settings.WORKER_BACKEND_URL
-BACKEND_TOKEN = settings.WORKER_BACKEND_TOKEN
+BACKEND_URL = settings.WORKER_BACKEND_URL
 # Escape hatch SOLO para desarrollo local. En producción el manager escucha en
 # la red del condominio y controla la apertura del portón: sin secreto, cualquiera
 # en la LAN podría registrar/dar de baja cámaras.
@@ -499,22 +501,45 @@ def _stop_background_threads():
     _terminate_all_children()
 
 
+def _backend_auth_headers() -> Dict[str, str]:
+    """Headers de autenticación del manager contra el backend.
+
+    Fase 4 · P2: la única credencial es la API key de servicio en `x-api-key`
+    (la misma `LPR_SERVICE_API_KEY` que usa el worker en `api/client.py`). El
+    Bearer JWT legacy se retiró: el backend ya no lo acepta.
+    """
+    api_key = settings.LPR_SERVICE_API_KEY
+    return {'x-api-key': api_key} if api_key else {}
+
+
 @APP.on_event('startup')
 def reconcile_with_backend():
-    """Al iniciar, consulta el backend (si está configurado) y registra cámaras con enableLpr=true.
-    Requiere que el backend exponga `GET /cameras` y `GET /cameras/{id}/source`.
-    Si el backend requiere autenticación, poner token en WORKER_BACKEND_TOKEN (Bearer).
+    """Al iniciar, consulta el backend (si está configurado) y registra las
+    cámaras con enableLpr / enableGuardian.
+
+    Usa `GET /workers/cameras` y `GET /workers/cameras/{id}/source`, acotados
+    al condominio de la API key (`x-api-key: LPR_SERVICE_API_KEY`). Una key sin
+    condominio recibe 403; sin key, 401.
     """
     if not BACKEND_URL:
         return
+    headers = _backend_auth_headers()
+    if not headers:
+        logger.error(
+            'LPR_SERVICE_API_KEY no está configurada: no se pueden reconciliar las cámaras con el '
+            'backend (GET /workers/cameras exige x-api-key).'
+        )
+        return
     try:
         url_base = BACKEND_URL.rstrip('/')
-        headers = {}
-        if BACKEND_TOKEN:
-            headers['Authorization'] = f'Bearer {BACKEND_TOKEN}'
 
-        resp = requests.get(f'{url_base}/cameras', timeout=5, headers=headers)
+        resp = requests.get(f'{url_base}/workers/cameras', timeout=5, headers=headers)
         if resp.status_code != 200:
+            logger.error(
+                'Reconciliación de cámaras falló: GET /workers/cameras -> %s '
+                '(401 = key inválida/expirada, 403 = key sin condominio).',
+                resp.status_code,
+            )
             return
         cams = resp.json()
         if not isinstance(cams, list):
@@ -533,8 +558,9 @@ def reconcile_with_backend():
                     continue
 
                 # Intentar obtener source desencriptada
-                sresp = requests.get(f"{url_base}/cameras/{cam_id}/source", timeout=5, headers=headers)
+                sresp = requests.get(f"{url_base}/workers/cameras/{cam_id}/source", timeout=5, headers=headers)
                 if sresp.status_code != 200:
+                    logger.warning('Sin source para la cámara %s: GET /workers/cameras/:id/source -> %s', cam_id, sresp.status_code)
                     continue
                 src = sresp.json().get('sourceUrl')
                 if not src:
@@ -566,6 +592,9 @@ def reconcile_with_backend():
                 logger.error(f"Error procesando cámara {cam.get('id')} en startup: {e}")
                 continue
     except Exception:
+        # Antes se tragaba en silencio: un backend caído dejaba al manager sin
+        # cámaras y sin rastro en el log.
+        logger.exception('Error reconciliando cámaras con el backend')
         return
 
 

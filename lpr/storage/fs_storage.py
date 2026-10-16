@@ -10,6 +10,11 @@ import time
 from urllib.parse import urlencode
 from lpr.settings import settings
 
+# Carpeta de Cloudinary de los frames de deteccion. El backend solo borra (retencion,
+# Ley 21.719) los frames de esta carpeta: debe coincidir con MEDIA_FOLDERS['lpr-frame']
+# en backend/src/privacy/media-purger.service.ts.
+CLOUDINARY_FRAMES_FOLDER = 'lpr-frames'
+
 
 def save_image_pil(dirpath: str, filename: str, pil_img: Image.Image, quality: int = 85) -> str:
     os.makedirs(dirpath, exist_ok=True)
