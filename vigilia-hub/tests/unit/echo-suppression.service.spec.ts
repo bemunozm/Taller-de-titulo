@@ -4,12 +4,19 @@ describe('EchoSuppressionService', () => {
   let service: EchoSuppressionService;
 
   beforeEach(() => {
+    // Reloj falso: Date.now() y setTimeout avanzan solo con advanceTimersByTime
+    jest.useFakeTimers();
+
     // Configurar variables de entorno para testing
     process.env.RMS_THRESHOLD_DB = '-45';
     process.env.SUPPRESSION_TAIL_MS = '300';
     process.env.HALF_DUPLEX_ENABLED = 'true';
 
     service = new EchoSuppressionService();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
   });
 
   describe('shouldSendAudio', () => {
@@ -38,12 +45,12 @@ describe('EchoSuppressionService', () => {
       expect(shouldSend).toBe(false);
     });
 
-    it('debe permitir audio después de que expire la cola', async () => {
+    it('debe permitir audio después de que expire la cola', () => {
       service.notifySpeakerActive();
       service.notifySpeakerInactive();
 
-      // Esperar más de 300ms
-      await new Promise(resolve => setTimeout(resolve, 350));
+      // Avanzar más de 300ms
+      jest.advanceTimersByTime(350);
 
       // Crear buffer con señal fuerte
       const audioBuffer = Buffer.alloc(480);
@@ -71,22 +78,31 @@ describe('EchoSuppressionService', () => {
     it('debe permitir audio con volumen alto', () => {
       // Esperar que no haya speaker activo
       service.notifySpeakerInactive();
-      
-      // Esperar más de 300ms
-      return new Promise<void>((resolve) => {
-        setTimeout(() => {
-          // Crear buffer con señal fuerte
-          const audioBuffer = Buffer.alloc(480);
-          for (let i = 0; i < audioBuffer.length; i += 2) {
-            audioBuffer.writeInt16LE(10000, i); // Señal fuerte
-          }
 
-          const shouldSend = service.shouldSendAudio(audioBuffer);
+      // Avanzar más de 300ms
+      jest.advanceTimersByTime(350);
 
-          expect(shouldSend).toBe(true);
-          resolve();
-        }, 350);
-      });
+      // Crear buffer con señal fuerte
+      const audioBuffer = Buffer.alloc(480);
+      for (let i = 0; i < audioBuffer.length; i += 2) {
+        audioBuffer.writeInt16LE(10000, i); // Señal fuerte
+      }
+
+      expect(service.shouldSendAudio(audioBuffer)).toBe(true);
+    });
+
+    it('debe suprimir justo antes de que expire la cola y permitir al cumplirla', () => {
+      service.notifySpeakerInactive();
+      const audioBuffer = Buffer.alloc(480);
+      for (let i = 0; i < audioBuffer.length; i += 2) {
+        audioBuffer.writeInt16LE(10000, i);
+      }
+
+      jest.advanceTimersByTime(299);
+      expect(service.shouldSendAudio(audioBuffer)).toBe(false);
+
+      jest.advanceTimersByTime(1);
+      expect(service.shouldSendAudio(audioBuffer)).toBe(true);
     });
 
     it('debe permitir todo el audio cuando half-duplex está deshabilitado', () => {
@@ -130,21 +146,20 @@ describe('EchoSuppressionService', () => {
   });
 
   describe('getTimeSinceSpeaker', () => {
-    it('debe retornar el tiempo desde la última actividad del speaker', async () => {
+    it('debe retornar el tiempo desde la última actividad del speaker', () => {
       service.notifySpeakerActive();
       service.notifySpeakerInactive();
 
-      await new Promise(resolve => setTimeout(resolve, 100));
+      jest.advanceTimersByTime(100);
 
-      const timeSince = service.getTimeSinceSpeaker();
-
-      expect(timeSince).toBeGreaterThanOrEqual(100);
-      expect(timeSince).toBeLessThan(200);
+      expect(service.getTimeSinceSpeaker()).toBe(100);
     });
   });
 
   describe('Performance', () => {
     it('debe procesar audio en menos de 1ms', () => {
+      // Mide tiempo real de CPU: no puede usar el reloj falso
+      jest.useRealTimers();
       const audioBuffer = Buffer.alloc(480);
       
       const iterations = 1000;
