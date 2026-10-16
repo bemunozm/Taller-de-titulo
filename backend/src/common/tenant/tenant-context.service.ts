@@ -1,8 +1,13 @@
-import { Inject, Injectable, Scope } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Scope } from '@nestjs/common';
 import { REQUEST } from '@nestjs/core';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { resolveTenantContext, requireOrganizationId } from './tenant-context.util';
+import {
+  organizationExists,
+  requireOrganizationId,
+  resolveCreationOrganizationId,
+  resolveTenantContext,
+} from './tenant-context.util';
 import { TenantContext } from './tenant-context.types';
 
 /**
@@ -20,21 +25,30 @@ import { TenantContext } from './tenant-context.types';
  * por algún motivo el interceptor no corrió (tests unitarios, invocación
  * fuera del ciclo HTTP normal), resuelve on-demand como fallback.
  */
+/** Lo que este servicio lee y escribe de la request (user de AuthGuard, contexto cacheado). */
+interface TenantRequest {
+  user?: { id: string; roles?: Array<{ name: string }> } | null;
+  tenantContext?: TenantContext;
+}
+
 @Injectable({ scope: Scope.REQUEST })
 export class TenantContextService {
   private cached: TenantContext | null = null;
 
   constructor(
-    @Inject(REQUEST) private readonly request: any,
+    @Inject(REQUEST) private readonly request: TenantRequest | undefined,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
   async getContext(): Promise<TenantContext> {
     if (this.request?.tenantContext) {
-      return this.request.tenantContext as TenantContext;
+      return this.request.tenantContext;
     }
     if (!this.cached) {
-      this.cached = await resolveTenantContext(this.request?.user, this.dataSource);
+      this.cached = await resolveTenantContext(
+        this.request?.user,
+        this.dataSource,
+      );
       if (this.request) {
         this.request.tenantContext = this.cached;
       }
@@ -53,5 +67,27 @@ export class TenantContextService {
   /** Exige organización concreta (lanza ForbiddenException si no aplica). Ver tenant-context.util.ts. */
   async requireOrganizationId(): Promise<string> {
     return requireOrganizationId(await this.getContext());
+  }
+
+  /**
+   * Condominio de un recurso NUEVO (Fase 4 · P5.C, creación estricta; ver
+   * `resolveCreationOrganizationId`): el del actor, o el `organizationId`
+   * explícito del super-admin, que además debe existir (si no, 400).
+   */
+  async resolveCreationOrganizationId(
+    requestedOrganizationId?: string | null,
+  ): Promise<string> {
+    const ctx = await this.getContext();
+    const organizationId = resolveCreationOrganizationId(
+      ctx,
+      requestedOrganizationId,
+    );
+    if (
+      ctx.isSuperAdmin &&
+      !(await organizationExists(organizationId, this.dataSource))
+    ) {
+      throw new BadRequestException('El condominio indicado no existe');
+    }
+    return organizationId;
   }
 }

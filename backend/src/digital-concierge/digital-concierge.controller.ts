@@ -1,5 +1,13 @@
-import { Controller, Post, Body, Param, Logger, UseGuards, Req } from '@nestjs/common';
-import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
+import {
+  Controller,
+  ForbiddenException,
+  Post,
+  Body,
+  Param,
+  Logger,
+  UseGuards,
+  Req,
+} from '@nestjs/common';
 import type { Request } from 'express';
 import {
   AuthorizedContextFactory,
@@ -10,13 +18,29 @@ import { buildRealtimeToolDefinitions } from '../agent/tool-definitions.util';
 import { ToolDispatcherService } from '../agent/tool-dispatcher.service';
 import { ToolRegistryService } from '../agent/tool-registry.service';
 import type { AuthorizedContext } from '../agent/types/authorized-context.type';
+import { ABRIR_ACCESO_TOOL_NAME } from '../agent/tools/abrir-acceso.tool';
+import { RateLimit } from '../common/rate-limit/rate-limit.decorator';
+import { HouseNumberParamDto } from '../common/validation/house-number';
 import { DigitalConciergeService } from './services/digital-concierge.service';
-import { StartSessionDto, StartSessionResponseDto } from './dto/start-session.dto';
+import type { HouseContext } from './house-context';
+import {
+  StartSessionDto,
+  StartSessionResponseDto,
+} from './dto/start-session.dto';
 import { ExecuteToolDto, ToolResultDto } from './dto/execute-tool.dto';
 import { EndSessionDto, EndSessionResponseDto } from './dto/end-session.dto';
-import { AgentConfigResponseDto } from './dto/agent-config.dto';
+import type { AgentConfigResponseDto } from './dto/agent-config.dto';
+import { SessionStatusResponseDto } from './dto/session-status.dto';
 import { ConciergeAuthGuard } from './guards/concierge-auth.guard';
+import { ExecuteToolPermissionGuard } from './guards/execute-tool-permission.guard';
+import { scrubPiiInText } from '../common/privacy/pii-mask';
 import { AuthenticatedHub } from '../hub/guards/hub-auth.guard';
+import {
+  canReadHouseContext,
+  type ConciergeActor,
+  toDeviceConciergeActor,
+  toHumanConciergeActor,
+} from './concierge-actor';
 
 /** `Request` de Express + los campos que los guards de transporte le agregan (mismo patrón que agent.controller.ts). */
 type ConciergeRequest = Request & AuthorizedContextRequest;
@@ -57,6 +81,7 @@ export class DigitalConciergeController {
    * Retorna el sessionId y token efímero para WebRTC
    */
   @Post('session/start')
+  @RateLimit('concierge-session-start')
   async startSession(
     @Body() dto: StartSessionDto,
     @Req() req: ConciergeRequest,
@@ -66,30 +91,63 @@ export class DigitalConciergeController {
       this.logger.log(`Socket ID recibido: ${dto.socketId}`);
     }
 
-    // El hub (si el transporte fue HubAuthGuard) queda en request.hub; el
-    // organizationId SIEMPRE viene de request.tenantContext, poblado por
-    // ConciergeAuthGuard (hub) o por TenantInterceptor (sesión humana) —
-    // mismo shape en ambos casos, sin lógica especial acá.
+    // Corrección P5 (cyber B5): solo un DISPOSITIVO (hub físico o kiosko, que
+    // se autentican con su credencial de hub) inicia sesiones del conserje.
+    // Un humano con sesión -> 403: la UI humana no usa esta ruta (el kiosko
+    // web manda su credencial de dispositivo, ver ConciergeAPI.startSession).
     const hub: AuthenticatedHub | undefined = req.hub;
-    const organizationId: string | null = req.tenantContext?.organizationId ?? null;
+    if (!hub) {
+      throw new ForbiddenException(
+        'Solo un dispositivo del condominio (hub o kiosko) puede iniciar una sesión del conserje digital',
+      );
+    }
+    // El organizationId SIEMPRE viene de request.tenantContext, que el guard
+    // del hub pobló con el condominio del dispositivo.
+    const organizationId: string | null =
+      req.tenantContext?.organizationId ?? null;
 
     return await this.conciergeService.startSession(dto.socketId, {
-      hubId: hub?.hubId ?? null,
-      source: hub ? 'hub' : 'web',
+      hubId: hub.hubId,
+      source: 'hub',
       organizationId,
     });
   }
 
   /**
-   * GET /concierge/context/:houseNumber
-   * Obtiene el contexto de historial de visitas para una casa
+   * POST /concierge/context/:houseNumber
+   * Contexto de la casa para el conserje de voz: `{ expectedVisitorsCount }`.
+   *
+   * Fase 4 · P4.B (cyber M4): solo el hub físico (vigilia-hub) y los humanos
+   * con `digital-concierge.manage`; el kiosko web, un residente u otro
+   * humano sin `manage` reciben 403. `houseNumber` validado (cyber B8, ver
+   * common/validation/house-number.ts).
+   *
+   * Fase 4 · P6.M: la respuesta dejó de ser un string libre
+   * (`{ context: string }`) y pasó a datos estructurados. Corrección P7
+   * (cyber B8, decisión de Nova): sin nombres. `expectedVisitorsCount` es la
+   * cantidad de visitas pre-aprobadas vigentes (ver house-context.ts). El
+   * único consumidor es vigilia-hub, que lo inyecta como un mensaje `user`
+   * delimitado y marcado como datos (nunca como instrucción de sistema).
+   * Contrato nuevo: el hub y el backend se despliegan juntos.
+   *
+   * Fase 4 · P6.R: la casa se resuelve por código exacto o, si no hay, por
+   * número de unidad único en el condominio (`FamiliesService.resolveHouse`,
+   * nunca búsqueda difusa). Una casa ambigua o inexistente devuelve
+   * `expectedVisitorsCount: 0`.
    */
   @Post('context/:houseNumber')
+  @RateLimit('concierge-session')
   async getHouseContext(
-    @Param('houseNumber') houseNumber: string,
-  ): Promise<{ context: string }> {
-    const contextStr = await this.conciergeService.getHouseContext(houseNumber);
-    return { context: contextStr };
+    @Param() { houseNumber }: HouseNumberParamDto,
+    @Req() req: ConciergeRequest,
+  ): Promise<HouseContext> {
+    const ctx = this.authorizedContextFactory.fromRequest(req);
+    if (!canReadHouseContext(ctx)) {
+      throw new ForbiddenException(
+        'No estás autorizado para consultar el historial de visitas de la casa',
+      );
+    }
+    return this.conciergeService.getHouseContext(houseNumber);
   }
 
   /**
@@ -98,18 +156,32 @@ export class DigitalConciergeController {
    * fuente de verdad del system prompt "Sofía" + las definiciones de tools
    * que un cliente-transporte Realtime necesita para configurar su sesión —
    * ver docstring de `AgentConfigResponseDto` sobre por qué va parametrizado
-   * por `houseNumber` en vez de devolverse desde `session/start`. Este
-   * bloque SOLO deja el backend listo para servirlo — los clientes
-   * (frontend/vigilia-hub) siguen con sus copias hardcodeadas hasta el
-   * bloque siguiente (§10.2 paso 6, fuera de alcance acá).
+   * por `houseNumber` en vez de devolverse desde `session/start`. Los
+   * clientes (kiosko web y vigilia-hub) ya no tienen copias propias: piden
+   * esta configuración al iniciar cada llamada.
+   *
+   * Fase 4 · P4.B (D8): las tools (y el prompt) se filtran por el canal y
+   * los scopes de la request (`ToolRegistryService.getAvailableFor`): el
+   * kiosko web no ve `abrir_acceso` ni las `consultar_*`. El dispatcher
+   * sigue negando la ejecución aunque un cliente las pida igual.
+   * `houseNumber` validado (cyber B8): el prompt lo interpola.
    */
   @Post('agent-config/:houseNumber')
-  async getAgentConfig(
-    @Param('houseNumber') houseNumber: string,
-  ): Promise<AgentConfigResponseDto> {
+  @RateLimit('concierge-session')
+  getAgentConfig(
+    @Param() { houseNumber }: HouseNumberParamDto,
+    @Req() req: ConciergeRequest,
+  ): AgentConfigResponseDto {
+    const ctx = this.authorizedContextFactory.fromRequest(req);
+    const tools = this.toolRegistry.getAvailableFor(ctx);
+
     return {
-      instructions: buildSofiaInstructions(houseNumber),
-      tools: buildRealtimeToolDefinitions(this.toolRegistry.getAll()),
+      instructions: buildSofiaInstructions(houseNumber, {
+        accessOpening: tools.some(
+          (tool) => tool.name === ABRIR_ACCESO_TOOL_NAME,
+        ),
+      }),
+      tools: buildRealtimeToolDefinitions(tools),
     };
   }
 
@@ -126,21 +198,37 @@ export class DigitalConciergeController {
    * en vez de propagar un 4xx/5xx crudo — mismo comportamiento observable
    * que tenía el `switch` legacy.
    *
-   * Limpieza post-auditoría (MENOR 2): este es el canal de producción real
-   * (Realtime voice vía frontend/vigilia-hub) y no tenía ningún límite de
-   * tasa, a diferencia de `/concierge/agent/chat` — throttler dedicado
-   * 'concierge-execute-tool' (registrado en auth.module.ts junto a
-   * 'concierge-agent-chat'/'login'; `ThrottlerModule` es `@Global()`).
+   * Rate limit (Fase 4 · P4.B, D9): política `concierge-execute-tool`
+   * (60/min por hub o usuario). Una llamada de citófono dispara varias tools.
+   *
+   * Corrección P7 (cyber A1): una sesión humana necesita
+   * `digital-concierge.access` (403 antes de validar el body;
+   * `ExecuteToolPermissionGuard`, que corre antes del throttler, como el
+   * resto de los guards de método) y `parameters` no puede pasar de 8 KB ni
+   * de 4 niveles (400 del `ValidationPipe`, ver `ExecuteToolDto`). Los
+   * dispositivos siguen entrando con su credencial.
    */
   @Post('session/:sessionId/execute-tool')
-  @UseGuards(ThrottlerGuard)
-  @Throttle({ 'concierge-execute-tool': { limit: 60, ttl: 60_000 } })
+  @RateLimit('concierge-execute-tool')
+  @UseGuards(ExecuteToolPermissionGuard)
   async executeTool(
     @Param('sessionId') sessionId: string,
     @Body() dto: ExecuteToolDto,
     @Req() req: ConciergeRequest,
   ): Promise<ToolResultDto> {
-    this.logger.debug(`Executing tool: ${dto.toolName} for session: ${sessionId}`);
+    this.logger.debug(
+      `Executing tool: ${dto.toolName} for session: ${sessionId}`,
+    );
+
+    // Fase 4 · P4: un dispositivo solo opera SU sesión (403 si es de otro hub
+    // o kiosko, aunque sea del mismo condominio). Fuera del try: es un error
+    // de autorización, no un resultado de la tool.
+    if (req.hub) {
+      await this.conciergeService.findSessionForDevice(
+        sessionId,
+        toDeviceConciergeActor(req.hub),
+      );
+    }
 
     const ctx: AuthorizedContext = {
       ...this.authorizedContextFactory.fromRequest(req),
@@ -153,7 +241,11 @@ export class DigitalConciergeController {
       return { success: true, data };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Tool execution failed: ${message}`, error instanceof Error ? error.stack : undefined);
+      // Corrección P7: el log solo lleva el mensaje recortado y enmascarado
+      // (un error de Zod repite las claves del input recibido).
+      this.logger.error(
+        `Tool execution failed (${dto.toolName}): ${scrubPiiInText(message)}`,
+      );
       return { success: false, error: message };
     }
   }
@@ -170,8 +262,12 @@ export class DigitalConciergeController {
    * usan las tools vía `AuthorizedContextFactory`), ANTES de invocar el
    * servicio — si no matchea lanza `ForbiddenException` y no llega a mutar
    * nada.
+   *
+   * Fase 4 · P4: un dispositivo solo finaliza SU sesión
+   * (`findSessionForDevice`); el camino humano no cambia.
    */
   @Post('session/:sessionId/end')
+  @RateLimit('concierge-session')
   async endSession(
     @Param('sessionId') sessionId: string,
     @Body() dto: EndSessionDto,
@@ -179,59 +275,46 @@ export class DigitalConciergeController {
   ): Promise<EndSessionResponseDto> {
     this.logger.log(`Ending session: ${sessionId}`);
 
-    const ctx = this.authorizedContextFactory.fromRequest(req);
-    await this.conciergeService.findSessionForTenant(sessionId, ctx);
+    if (req.hub) {
+      await this.conciergeService.findSessionForDevice(
+        sessionId,
+        toDeviceConciergeActor(req.hub),
+      );
+    } else {
+      const ctx = this.authorizedContextFactory.fromRequest(req);
+      await this.conciergeService.findSessionForTenant(sessionId, ctx);
+    }
 
-    return await this.conciergeService.endSession(
-      sessionId,
-      dto.finalStatus,
-    );
+    return await this.conciergeService.endSession(sessionId, dto.finalStatus);
   }
 
   /**
-   * GET /concierge/session/:id/status
-   * Verificar si una sesión está activa y puede recibir respuestas
+   * POST /concierge/session/:id/status
+   * Estado de la sesión: si sigue activa y, con su solicitud, la respuesta
+   * del residente y si el ingreso quedó registrado (respaldo por polling del
+   * kiosko — Fase 4 · P4).
    *
-   * Fix consistencia de aislamiento tenant (ver docstring de `endSession`):
-   * misma validación de tenant antes de exponer el estado de una sesión que
-   * podría pertenecer a otro condominio.
+   * Autoriza solo al dispositivo dueño de la sesión (`req.hub.hubId ===
+   * session.hubId` y el hub sigue en el condominio de la sesión), a los
+   * residentes notificados y a quien tiene
+   * `digital-concierge.manage` en el condominio (ver
+   * `DigitalConciergeService.getSessionStatus`); si no → 403. Antes bastaba
+   * con ser del mismo condominio: cualquier hub o kiosko del condominio leía
+   * la respuesta de una sesión ajena.
+   *
+   * `POST /concierge/session/:id/respond` ya no vive acá: es solo humano
+   * (`ConciergeResponseController`, con `AuthGuard`).
    */
   @Post('session/:sessionId/status')
+  @RateLimit('concierge-status')
   async getSessionStatus(
     @Param('sessionId') sessionId: string,
     @Req() req: ConciergeRequest,
-  ): Promise<{ active: boolean; reason?: string }> {
-    const ctx = this.authorizedContextFactory.fromRequest(req);
-    await this.conciergeService.findSessionForTenant(sessionId, ctx);
+  ): Promise<SessionStatusResponseDto> {
+    const actor: ConciergeActor = req.hub
+      ? toDeviceConciergeActor(req.hub)
+      : toHumanConciergeActor(this.authorizedContextFactory.fromRequest(req));
 
-    return await this.conciergeService.isSessionActive(sessionId);
-  }
-
-  /**
-   * POST /concierge/session/:id/respond
-   * Responde a una solicitud de visita (aprobación o rechazo del residente)
-   *
-   * Fix consistencia de aislamiento tenant (ver docstring de `endSession`):
-   * la validación de tenant se hace ANTES de cualquier efecto — este endpoint
-   * dispara la apertura física del portón cuando `approved === true`
-   * (`DigitalConciergeService.respondToVisitor` -> `notifyHub('hub:door_open', ...)`),
-   * así que se rechaza el cross-tenant antes de tocar la sesión o el hub.
-   */
-  @Post('session/:sessionId/respond')
-  async respondToVisitor(
-    @Param('sessionId') sessionId: string,
-    @Body() body: { approved: boolean; residentId?: string },
-    @Req() req: ConciergeRequest,
-  ): Promise<{ success: boolean; message: string }> {
-    this.logger.log(`Responding to visitor for session: ${sessionId}, approved: ${body.approved}, residentId: ${body.residentId}`);
-
-    const ctx = this.authorizedContextFactory.fromRequest(req);
-    await this.conciergeService.findSessionForTenant(sessionId, ctx);
-
-    return await this.conciergeService.respondToVisitor(
-      sessionId,
-      body.approved,
-      body.residentId,
-    );
+    return await this.conciergeService.getSessionStatus(sessionId, actor);
   }
 }

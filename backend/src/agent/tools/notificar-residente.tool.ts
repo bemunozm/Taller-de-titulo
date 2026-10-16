@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { DigitalConciergeService } from '../../digital-concierge/services/digital-concierge.service';
 import type { AuthorizedContext } from '../types/authorized-context.type';
 import type { VigiliaTool } from '../types/vigilia-tool.type';
+import { exposesResidentNames } from './resident-names.policy';
 
 const inputSchema = z.object({
   residentes_ids: z
@@ -14,13 +15,18 @@ const inputSchema = z.object({
 });
 type NotificarResidenteInput = z.infer<typeof inputSchema>;
 
+/**
+ * Fase 4 · P4.B (minimización): sin `visita_id`. Es un id interno que la
+ * conversación no usa (el kiosko sigue la respuesta por `/status` con su
+ * `sessionId`) y la salida llega al dispositivo.
+ */
 const outputSchema = z.object({
   notificado: z.boolean(),
   mensaje: z.string(),
+  /** Nombres: solo para el canal humano (Fase 4 · P7.L, `resident-names.policy.ts`). */
   residentes_notificados: z.array(z.string()).optional(),
   cantidad_notificados: z.number().int().nonnegative().optional(),
   visita_creada: z.boolean().optional(),
-  visita_id: z.string().optional(),
 });
 type NotificarResidenteOutput = z.infer<typeof outputSchema>;
 
@@ -55,6 +61,11 @@ export class NotificarResidenteTool
   readonly access = 'write' as const;
   readonly requiresApproval = false;
   readonly requiredScopes = ['digital-concierge.access'];
+  /**
+   * Fase 4 · P4.B (D8): conversación con el visitante, disponible en todos
+   * los canales con identidad (citófono físico, kiosko web y humano).
+   */
+  readonly allowedChannels = ['physical-hub', 'web-kiosk', 'human'] as const;
 
   constructor(private readonly conciergeService: DigitalConciergeService) {}
 
@@ -72,6 +83,21 @@ export class NotificarResidenteTool
       ctx.sessionId,
       ctx,
     );
-    return this.conciergeService.notifyResident(session, input, ctx);
+    const result = await this.conciergeService.notifyResident(
+      session,
+      input,
+      ctx,
+    );
+    return {
+      notificado: result.notificado,
+      mensaje: result.mensaje,
+      // Fase 4 · P7.L: los nombres solo van al canal humano; un dispositivo
+      // recibe el conteo (Sofía dice "notifiqué al residente de la casa X").
+      ...(exposesResidentNames(ctx)
+        ? { residentes_notificados: result.residentes_notificados }
+        : {}),
+      cantidad_notificados: result.cantidad_notificados,
+      visita_creada: result.visita_creada,
+    };
   }
 }

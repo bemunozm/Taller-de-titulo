@@ -23,16 +23,10 @@ import { PendingActionsController } from './pending-actions.controller';
 import { PendingActionsService } from './pending-actions.service';
 import { ToolDispatcherService } from './tool-dispatcher.service';
 import { ToolRegistryService } from './tool-registry.service';
-import { VIGILIA_TOOLS } from './tool-registry.token';
-import { AbrirAccesoTool } from './tools/abrir-acceso.tool';
-import { BuscarResidenteTool } from './tools/buscar-residente.tool';
-import { ConsultarAccesosRecientesTool } from './tools/consultar-accesos-recientes.tool';
-import { ConsultarVehiculoTool } from './tools/consultar-vehiculo.tool';
-import { ConsultarVisitasTool } from './tools/consultar-visitas.tool';
-import { FinalizarLlamadaTool } from './tools/finalizar-llamada.tool';
-import { GuardarDatosVisitanteTool } from './tools/guardar-datos-visitante.tool';
-import { NotificarResidenteTool } from './tools/notificar-residente.tool';
-import { ReenviarNotificacionTool } from './tools/reenviar-notificacion.tool';
+import {
+  VIGILIA_TOOL_CLASSES,
+  vigiliaToolsProvider,
+} from './vigilia-tools.provider';
 
 /**
  * Módulo del agente-cerebro (Fase 1, Bloques A2a/A2b —
@@ -62,9 +56,9 @@ import { ReenviarNotificacionTool } from './tools/reenviar-notificacion.tool';
  * la solución estándar de Nest para este caso, documentada en
  * https://docs.nestjs.com/fundamentals/circular-dependency.
  *
- * Fase 2 (§8 del doc) agrega el resto del catálogo: solo hace falta un nuevo
- * provider de tool + agregarlo a la factory de `VIGILIA_TOOLS` de abajo — el
- * registry/dispatcher/runner no cambian.
+ * Fase 2 (§8 del doc) agrega el resto del catálogo: solo hace falta agregar
+ * la clase de la tool a `VIGILIA_TOOL_CLASSES` (vigilia-tools.provider.ts) —
+ * el registry/dispatcher/runner no cambian.
  */
 @Module({
   imports: [
@@ -90,56 +84,12 @@ import { ReenviarNotificacionTool } from './tools/reenviar-notificacion.tool';
     // arriba — no se re-declaran acá.
     ConciergeAuthGuard,
 
-    // Catálogo de tools (Fase 2 agrega más entradas acá).
-    BuscarResidenteTool,
-    GuardarDatosVisitanteTool,
-    NotificarResidenteTool,
-    ReenviarNotificacionTool,
-    FinalizarLlamadaTool,
-    ConsultarVehiculoTool,
-    ConsultarVisitasTool,
-    ConsultarAccesosRecientesTool,
-    // Fase 2, Bloque F2.2 (docs/modulos/agente-cerebro.md §12): apertura física
-    // de accesos con autonomía condicional (`requiresApproval` dinámico) —
-    // inyecta `DigitalConciergeService` (igual que `finalizar_llamada`/
-    // `notificar_residente`, ver forwardRef abajo) + `HubGateway` (ya exportado
-    // por `HubModule`, importado arriba).
-    AbrirAccesoTool,
-    {
-      provide: VIGILIA_TOOLS,
-      useFactory: (
-        buscarResidente: BuscarResidenteTool,
-        guardarDatosVisitante: GuardarDatosVisitanteTool,
-        notificarResidente: NotificarResidenteTool,
-        reenviarNotificacion: ReenviarNotificacionTool,
-        finalizarLlamada: FinalizarLlamadaTool,
-        consultarVehiculo: ConsultarVehiculoTool,
-        consultarVisitas: ConsultarVisitasTool,
-        consultarAccesosRecientes: ConsultarAccesosRecientesTool,
-        abrirAcceso: AbrirAccesoTool,
-      ) => [
-        buscarResidente,
-        guardarDatosVisitante,
-        notificarResidente,
-        reenviarNotificacion,
-        finalizarLlamada,
-        consultarVehiculo,
-        consultarVisitas,
-        consultarAccesosRecientes,
-        abrirAcceso,
-      ],
-      inject: [
-        BuscarResidenteTool,
-        GuardarDatosVisitanteTool,
-        NotificarResidenteTool,
-        ReenviarNotificacionTool,
-        FinalizarLlamadaTool,
-        ConsultarVehiculoTool,
-        ConsultarVisitasTool,
-        ConsultarAccesosRecientesTool,
-        AbrirAccesoTool,
-      ],
-    },
+    // Catálogo de tools (vigilia-tools.provider.ts): las clases + el provider
+    // `VIGILIA_TOOLS` que las agrupa. `AbrirAccesoTool` inyecta además
+    // `DigitalConciergeService` (forwardRef en `imports`) y `HubGateway`
+    // (HubModule).
+    ...VIGILIA_TOOL_CLASSES,
+    vigiliaToolsProvider,
     ToolRegistryService,
 
     // Fase 2, Bloque F2.1: mecanismo de autonomía/aprobación —

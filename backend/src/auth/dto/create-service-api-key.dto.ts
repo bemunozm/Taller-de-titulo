@@ -1,13 +1,30 @@
 import { IsOptional, IsString, IsIn, IsUUID, MaxLength } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
-// Tarea #18 (docs/modulos/auth-multitenant.md §10.3): credenciales de máquina
-// (worker LPR) vía el plugin `apiKey` de better-auth, en reemplazo del
-// `create-service-token` legacy (JWT largo, ver AuthService.createServiceToken
-// — @deprecated).
+/**
+ * Duraciones permitidas para una API key de servicio. Toda key expira (Fase 4
+ * · P2): sin `'never'`, una key filtrada deja de servir sola aunque nadie la
+ * revoque. Los segundos de cada opción viven en `AuthService`.
+ */
+export const SERVICE_API_KEY_DURATION_OPTIONS = [
+  '30d',
+  '90d',
+  '180d',
+  '365d',
+] as const;
+
+export type ServiceApiKeyDuration =
+  (typeof SERVICE_API_KEY_DURATION_OPTIONS)[number];
+
+export const DEFAULT_SERVICE_API_KEY_DURATION: ServiceApiKeyDuration = '365d';
+
+// Credencial de máquina (worker LPR) vía el plugin `apiKey` de better-auth. La
+// key queda vinculada a UN condominio en sus `permissions` (server-only, ver
+// service-api-key.permissions.ts y AuthService.createServiceApiKey).
 export class CreateServiceApiKeyDto {
   @ApiProperty({
-    description: 'Nombre identificador de la API key (para reconocerla en el panel/listado)',
+    description:
+      'Nombre identificador de la API key (para reconocerla en el panel/listado)',
     example: 'LPR Worker Manager',
   })
   @IsString()
@@ -16,7 +33,8 @@ export class CreateServiceApiKeyDto {
 
   @ApiProperty({
     description: 'Descripción o propósito de la key (se guarda en su metadata)',
-    example: 'Credencial de máquina para el worker de reconocimiento de patentes',
+    example:
+      'Credencial de máquina para el worker de reconocimiento de patentes',
     required: false,
   })
   @IsOptional()
@@ -25,16 +43,16 @@ export class CreateServiceApiKeyDto {
   description?: string;
 
   @ApiProperty({
-    description: 'Duración de la key antes de expirar',
-    example: '365d',
+    description: 'Duración de la key antes de expirar (toda key expira)',
+    example: DEFAULT_SERVICE_API_KEY_DURATION,
     required: false,
-    default: '365d',
-    enum: ['30d', '90d', '180d', '365d', 'never'],
+    default: DEFAULT_SERVICE_API_KEY_DURATION,
+    enum: [...SERVICE_API_KEY_DURATION_OPTIONS],
   })
   @IsOptional()
   @IsString()
-  @IsIn(['30d', '90d', '180d', '365d', 'never'])
-  duration?: string = '365d';
+  @IsIn(SERVICE_API_KEY_DURATION_OPTIONS)
+  duration?: ServiceApiKeyDuration = DEFAULT_SERVICE_API_KEY_DURATION;
 
   @ApiProperty({
     description:

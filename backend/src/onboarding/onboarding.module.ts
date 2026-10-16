@@ -5,13 +5,19 @@ import { OnboardingService } from './onboarding.service';
 import { Role } from '../roles/entities/role.entity';
 import { UsersModule } from '../users/users.module';
 import { AuthModule } from '../auth/auth.module';
+import { OrganizationMembershipModule } from '../organization-membership/organization-membership.module';
 
 /**
  * Onboarding / multi-tenant (Fase 0, tarea #19 —
  * docs/modulos/auth-multitenant.md §7b).
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([Role]), UsersModule, AuthModule],
+  imports: [
+    TypeOrmModule.forFeature([Role]),
+    UsersModule,
+    AuthModule,
+    OrganizationMembershipModule,
+  ],
   controllers: [OnboardingController],
   providers: [OnboardingService],
 })

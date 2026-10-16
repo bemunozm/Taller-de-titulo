@@ -1,7 +1,19 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, OneToMany, Index } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  OneToMany,
+  Index,
+} from 'typeorm';
 import { AccessAttempt } from '../../detections/entities/access-attempt.entity';
 
 @Entity({ name: 'plate_detections' })
+// Fase 4 · P7.R: índices parciales del barrido de retención (filas sin
+// anonimizar y filas con imágenes). Los crea la migración PrivacyRetention;
+// `synchronize: false` evita que `migration:check` los reporte o los borre.
+@Index('IDX_plate_detections_retention_candidates', { synchronize: false })
+@Index('IDX_plate_detections_with_images', { synchronize: false })
 export class PlateDetection {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -49,6 +61,15 @@ export class PlateDetection {
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date; // Timestamp de recepción en backend
+
+  /**
+   * Fase 4 · P7.R (Ley 21.719): cuándo se anonimizó la detección (`plate` =
+   * "******", `plate_raw` e imágenes a null; en sus intentos, `reason` y el
+   * residente a null), por retención (`RETENTION_ACCESS_LOG_DAYS`) o por
+   * supresión. La fila sigue: el dashboard la cuenta. `null` = sin anonimizar.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  anonymizedAt: Date | null;
 
   @OneToMany(() => AccessAttempt, (a) => a.detection, { cascade: true })
   accessAttempts: AccessAttempt[];

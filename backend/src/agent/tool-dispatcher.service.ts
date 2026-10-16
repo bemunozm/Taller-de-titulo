@@ -6,7 +6,8 @@ import {
 } from '@nestjs/common';
 import { PendingActionsService } from './pending-actions.service';
 import { ToolRegistryService } from './tool-registry.service';
-import { auditToolCall } from './tool-audit.util';
+import { hasRequiredScopes, isToolAllowedOnChannel } from './tool-access.util';
+import { auditToolCall, auditToolRejection } from './tool-audit.util';
 import type { AuthorizedContext } from './types/authorized-context.type';
 import type { VigiliaTool } from './types/vigilia-tool.type';
 import { LogsService } from '../logs/logs.service';
@@ -82,7 +83,7 @@ export class ToolDispatcherService {
   }
 
   /**
-   * Ejecuta una tool ya resuelta: evalúa scopes → valida input (Zod) →
+   * Ejecuta una tool ya resuelta: evalúa canal (P4.B) → scopes → valida input (Zod) →
    * ejecuta (o escala, si `requiresApproval`) → valida output (Zod, solo en
    * el camino directo) → audita. Cualquier fallo en estos pasos también se
    * audita (para que un intento denegado o un input inválido quede trazado,
@@ -101,21 +102,22 @@ export class ToolDispatcherService {
   ): Promise<unknown> {
     const startedAt = Date.now();
 
-    if (!this.hasRequiredScopes(tool, ctx)) {
-      const error = new ForbiddenException(
-        `El contexto autorizado no tiene los permisos requeridos por "${tool.name}" (${tool.requiredScopes.join(', ')})`,
-      );
-      await auditToolCall(
+    // Fase 4 · P4.B (D8): el canal se evalúa ANTES que los scopes. Un kiosko
+    // web nunca ejecuta `abrir_acceso` aunque traiga el scope del baseline, y
+    // un contexto `unknown` no ejecuta nada.
+    // Corrección P7 (cyber A1): de un input rechazado se audita solo su
+    // forma (claves, tipos y largos), nunca los valores.
+    const denial = this.authorizationDenial(tool, ctx);
+    if (denial) {
+      await auditToolRejection(
         this.logsService,
         tool,
         ctx,
         rawInput,
-        undefined,
-        false,
         Date.now() - startedAt,
-        error,
+        denial,
       );
-      throw error;
+      throw denial;
     }
 
     let parsedInput: unknown;
@@ -123,13 +125,11 @@ export class ToolDispatcherService {
     try {
       parsedInput = tool.inputSchema.parse(rawInput);
     } catch (error) {
-      await auditToolCall(
+      await auditToolRejection(
         this.logsService,
         tool,
         ctx,
         rawInput,
-        undefined,
-        false,
         Date.now() - startedAt,
         error,
       );
@@ -235,22 +235,24 @@ export class ToolDispatcherService {
   }
 
   /**
-   * Regla dura #6 del §5: mismo criterio "alguno de los requeridos" que
-   * `AuthorizationGuard` para el caso no-vacío. Implementación PROPIA
-   * (no llama a `hasAnyPermission` de auth/utils/permissions.util.ts) porque
-   * el caso `[]` tiene semántica opuesta a propósito: una tool con
-   * `requiredScopes: []` no declaró ningún gate de permisos, así que
-   * cualquier `AuthorizedContext` autenticado (hub físico o sesión humana)
-   * puede ejecutarla — a diferencia de `@RequirePermissions()` vacío en una
-   * ruta HTTP, que ahora deniega (ver el docstring de `hasAnyPermission`).
+   * Motivo por el que el contexto no puede ejecutar la tool (canal y luego
+   * scopes, ver `tool-access.util.ts`), o `null` si puede. Ambas denegaciones
+   * son `ForbiddenException` y se auditan igual.
    */
-  private hasRequiredScopes(
+  private authorizationDenial(
     tool: VigiliaTool<unknown, unknown>,
     ctx: AuthorizedContext,
-  ): boolean {
-    if (tool.requiredScopes.length === 0) {
-      return true;
+  ): ForbiddenException | null {
+    if (!isToolAllowedOnChannel(tool, ctx.channel)) {
+      return new ForbiddenException(
+        `La tool "${tool.name}" no está disponible en el canal "${ctx.channel}"`,
+      );
     }
-    return tool.requiredScopes.some((scope) => ctx.scopes.includes(scope));
+    if (!hasRequiredScopes(tool, ctx)) {
+      return new ForbiddenException(
+        `El contexto autorizado no tiene los permisos requeridos por "${tool.name}" (${tool.requiredScopes.join(', ')})`,
+      );
+    }
+    return null;
   }
 }

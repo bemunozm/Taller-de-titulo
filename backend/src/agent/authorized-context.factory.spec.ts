@@ -2,6 +2,7 @@ import {
   AuthorizedContextFactory,
   type AuthorizedContextRequest,
 } from './authorized-context.factory';
+import { HubType } from '../hub/entities/hub.entity';
 
 /**
  * Fase 1, Bloque A2t — cobertura de `AuthorizedContextFactory`
@@ -19,7 +20,11 @@ describe('AuthorizedContextFactory', () => {
   describe('sesión de hub físico', () => {
     it('usa el baseline fijo digital-concierge.access como scopes, sin importar tenantContext', () => {
       const request: AuthorizedContextRequest = {
-        hub: { hubId: 'hub-A', organizationId: 'condo-A' },
+        hub: {
+          hubId: 'hub-A',
+          type: HubType.PHYSICAL_HUB,
+          organizationId: 'condo-A',
+        },
         tenantContext: { organizationId: 'condo-A', isSuperAdmin: false },
       };
 
@@ -33,7 +38,11 @@ describe('AuthorizedContextFactory', () => {
 
     it('deriva tenantId de tenantContext.organizationId (el mismo que pobló HubAuthGuard)', () => {
       const request: AuthorizedContextRequest = {
-        hub: { hubId: 'hub-A', organizationId: 'condo-A' },
+        hub: {
+          hubId: 'hub-A',
+          type: HubType.PHYSICAL_HUB,
+          organizationId: 'condo-A',
+        },
         tenantContext: { organizationId: 'condo-A', isSuperAdmin: false },
       };
 
@@ -44,7 +53,11 @@ describe('AuthorizedContextFactory', () => {
 
     it('cae en el "cajón nulo" si el hub no tiene tenantContext (hub sin organización asociada)', () => {
       const request: AuthorizedContextRequest = {
-        hub: { hubId: 'hub-huerfano', organizationId: null },
+        hub: {
+          hubId: 'hub-huerfano',
+          type: HubType.PHYSICAL_HUB,
+          organizationId: null,
+        },
       };
 
       const ctx = factory.fromRequest(request);
@@ -55,7 +68,11 @@ describe('AuthorizedContextFactory', () => {
 
     it('prioriza la rama de hub aunque request.user también esté presente', () => {
       const request: AuthorizedContextRequest = {
-        hub: { hubId: 'hub-A', organizationId: 'condo-A' },
+        hub: {
+          hubId: 'hub-A',
+          type: HubType.PHYSICAL_HUB,
+          organizationId: 'condo-A',
+        },
         tenantContext: { organizationId: 'condo-A', isSuperAdmin: false },
         user: {
           id: 'user-1',
@@ -152,10 +169,66 @@ describe('AuthorizedContextFactory', () => {
     });
   });
 
+  describe('channel (Fase 4 · P4.B, D6)', () => {
+    it.each([
+      [HubType.PHYSICAL_HUB, 'physical-hub'],
+      [HubType.WEB_KIOSK, 'web-kiosk'],
+    ])('hub de tipo %s -> canal %s', (type, channel) => {
+      const ctx = factory.fromRequest({
+        hub: { hubId: 'hub-A', type, organizationId: 'condo-A' },
+        tenantContext: { organizationId: 'condo-A', isSuperAdmin: false },
+      });
+
+      expect(ctx.channel).toBe(channel);
+    });
+
+    it('un tipo de hub sin regla de canal cae en unknown (fail-closed)', () => {
+      const ctx = factory.fromRequest({
+        hub: {
+          hubId: 'hub-raro',
+          type: 'tipo-futuro' as HubType,
+          organizationId: 'condo-A',
+        },
+      });
+
+      expect(ctx.channel).toBe('unknown');
+    });
+
+    it('sesión humana -> canal human', () => {
+      const ctx = factory.fromRequest({
+        tenantContext: { organizationId: 'condo-A', isSuperAdmin: false },
+        user: { id: 'user-1', roles: [] },
+      });
+
+      expect(ctx.channel).toBe('human');
+    });
+
+    it('el hub gana sobre el usuario: canal del dispositivo, no human', () => {
+      const ctx = factory.fromRequest({
+        hub: {
+          hubId: 'kiosk-A',
+          type: HubType.WEB_KIOSK,
+          organizationId: 'condo-A',
+        },
+        user: { id: 'user-1', roles: [] },
+      });
+
+      expect(ctx.channel).toBe('web-kiosk');
+    });
+
+    it('sin hub ni usuario -> canal unknown', () => {
+      expect(factory.fromRequest({}).channel).toBe('unknown');
+    });
+  });
+
   describe('requestId', () => {
     it('genera un requestId distinto en cada llamada (correlación por turno, no reutilizable)', () => {
       const request: AuthorizedContextRequest = {
-        hub: { hubId: 'hub-A', organizationId: 'condo-A' },
+        hub: {
+          hubId: 'hub-A',
+          type: HubType.PHYSICAL_HUB,
+          organizationId: 'condo-A',
+        },
         tenantContext: { organizationId: 'condo-A', isSuperAdmin: false },
       };
 

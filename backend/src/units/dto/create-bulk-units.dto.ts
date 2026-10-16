@@ -1,59 +1,78 @@
-import { IsString, IsOptional, IsInt, IsBoolean, Min, Max, MaxLength } from 'class-validator';
+import {
+  IsString,
+  IsOptional,
+  IsInt,
+  IsBoolean,
+  Min,
+  MaxLength,
+  IsUUID,
+} from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class CreateBulkUnitsDto {
-  @ApiPropertyOptional({ 
+  @ApiPropertyOptional({
     description: 'Bloque común para todas las unidades (ej: A, B, Torre 1)',
     example: 'A',
-    maxLength: 16
+    maxLength: 16,
   })
   @IsOptional()
   @IsString()
   @MaxLength(16)
   block?: string;
 
-  @ApiProperty({ 
+  @ApiProperty({
     description: 'Número inicial del rango',
     example: 101,
-    minimum: 1
+    minimum: 1,
   })
   @IsInt()
   @Min(1)
   numberFrom: number;
 
-  @ApiProperty({ 
+  @ApiProperty({
     description: 'Número final del rango',
     example: 110,
-    minimum: 1
+    minimum: 1,
   })
   @IsInt()
   @Min(1)
   numberTo: number;
 
-  @ApiPropertyOptional({ 
+  @ApiPropertyOptional({
     description: 'Piso común para todas las unidades',
-    example: 3
+    example: 3,
   })
   @IsOptional()
   @IsInt()
   floor?: number;
 
-  @ApiPropertyOptional({ 
+  @ApiPropertyOptional({
     description: 'Tipo común para todas las unidades (ej: Departamento, Casa)',
     example: 'Departamento',
-    maxLength: 32
+    maxLength: 32,
   })
   @IsOptional()
   @IsString()
   @MaxLength(32)
   type?: string;
 
-  @ApiPropertyOptional({ 
+  @ApiPropertyOptional({
     description: 'Estado activo/inactivo para todas las unidades',
     example: true,
-    default: true
+    default: true,
   })
   @IsOptional()
   @IsBoolean()
   active?: boolean;
+
+  // Fase 4 · P5.C (creación estricta): solo el super-admin lo envía (y es
+  // obligatorio para él); cualquier otro actor que lo envíe → 403.
+  @ApiPropertyOptional({
+    description:
+      'Condominio de las unidades. Solo super-admin (obligatorio para él); otro actor → 403',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  organizationId?: string;
 }

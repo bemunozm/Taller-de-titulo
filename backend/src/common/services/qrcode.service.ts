@@ -1,78 +1,76 @@
 import { Injectable, Logger } from '@nestjs/common';
 import * as QRCode from 'qrcode';
+import { errorMessage } from '../utils/error-message.util';
+
+/** Opciones de render comunes a todos los QR (PNG, corrección de errores alta). */
+const QR_RENDER_OPTIONS = {
+  errorCorrectionLevel: 'H',
+  margin: 1,
+  width: 300,
+} as const;
 
 /**
- * Servicio para generar códigos QR
+ * Servicio para generar códigos QR.
+ *
+ * El contenido de un QR de acceso es una credencial: nunca se registra en los
+ * logs.
  */
 @Injectable()
 export class QRCodeService {
   private readonly logger = new Logger(QRCodeService.name);
 
   /**
-   * Genera un QR code como data URL (base64)
-   * @param data Datos a codificar en el QR
-   * @returns Data URL del QR code (data:image/png;base64,...)
+   * QR de acceso de una visita como data URL (`data:image/png;base64,...`).
+   *
+   * Codifica `qrCode` TAL CUAL (sin JSON): es el valor que muestra
+   * `QRCodeModal` en el frontend y el que busca el escáner del guardia
+   * (`GET /visits/qr/:qrCode`). Un QR con otro contenido no encuentra la
+   * visita.
    */
-  async generateQRDataURL(data: any): Promise<string> {
+  async generateAccessQR(qrCode: string): Promise<string> {
     try {
-      const qrString = JSON.stringify(data);
-
-      const qrDataUrl = await QRCode.toDataURL(qrString, {
-        errorCorrectionLevel: 'H', // Alto nivel de corrección de errores
+      return await QRCode.toDataURL(qrCode, {
+        ...QR_RENDER_OPTIONS,
         type: 'image/png',
-        margin: 1,
-        width: 300,
-        color: {
-          dark: '#000000',
-          light: '#ffffff',
-        },
+        color: { dark: '#000000', light: '#ffffff' },
       });
-
-      this.logger.debug(`QR code generado para datos:`, data);
-      return qrDataUrl;
     } catch (error) {
-      this.logger.error('Error al generar QR code:', error);
+      this.logger.error(
+        `Error al generar el QR de acceso: ${errorMessage(error)}`,
+      );
       throw new Error('No se pudo generar el código QR');
     }
   }
 
   /**
-   * Genera un QR code como buffer (útil para guardar como archivo)
-   * @param data Datos a codificar
-   * @returns Buffer con la imagen PNG
+   * QR con `data` serializado en JSON, como data URL (base64).
    */
-  async generateQRBuffer(data: any): Promise<Buffer> {
+  async generateQRDataURL(data: unknown): Promise<string> {
     try {
-      const qrString = JSON.stringify(data);
-
-      const buffer = await QRCode.toBuffer(qrString, {
-        errorCorrectionLevel: 'H',
-        type: 'png',
-        margin: 1,
-        width: 300,
+      return await QRCode.toDataURL(JSON.stringify(data), {
+        ...QR_RENDER_OPTIONS,
+        type: 'image/png',
+        color: { dark: '#000000', light: '#ffffff' },
       });
-
-      return buffer;
     } catch (error) {
-      this.logger.error('Error al generar QR buffer:', error);
+      this.logger.error(`Error al generar QR code: ${errorMessage(error)}`);
       throw new Error('No se pudo generar el código QR');
     }
   }
 
   /**
-   * Genera un QR code para una visita
-   * @param visitId ID de la visita
-   * @param action Acción: 'checkin' o 'checkout'
-   * @returns Data URL del QR
+   * QR con `data` serializado en JSON, como buffer PNG (útil para guardarlo
+   * como archivo).
    */
-  async generateVisitQR(visitId: string, action: 'checkin' | 'checkout' = 'checkout'): Promise<string> {
-    const qrData = {
-      type: 'visit',
-      visitId,
-      action,
-      timestamp: new Date().toISOString(),
-    };
-
-    return this.generateQRDataURL(qrData);
+  async generateQRBuffer(data: unknown): Promise<Buffer> {
+    try {
+      return await QRCode.toBuffer(JSON.stringify(data), {
+        ...QR_RENDER_OPTIONS,
+        type: 'png',
+      });
+    } catch (error) {
+      this.logger.error(`Error al generar QR buffer: ${errorMessage(error)}`);
+      throw new Error('No se pudo generar el código QR');
+    }
   }
 }

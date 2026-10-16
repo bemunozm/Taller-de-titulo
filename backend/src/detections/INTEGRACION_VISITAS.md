@@ -14,37 +14,59 @@ IA detecta patente → Busca vehículo → Si existe Y está activo → PERMITID
 
 **Problema:** No consideraba visitas temporales programadas.
 
-### Ahora (Sistema Mejorado)
+### Ahora — modelo vigente (Fase 4 · P5.C y su corrección)
+
+> **Modelo corregido.** `vehicleType` es la **carrocería**
+> (`auto | camioneta | moto | camion | otro | null`) y es solo descriptiva.
+> `accessLevel` (`residente | visitante | servicio | null`) es lo **único**
+> que decide el portón (`vehicleAccessRuleFor`, `vehicles/vehicle-access.ts`).
+> Los valores del modelo viejo (`vehicleType: residente/visitante`,
+> `accessLevel: permanente/temporal`) los convirtió la migración
+> `1791520000000-VehicleAccessModel`; si quedara alguno, escala al conserje.
+
 ```
-IA detecta patente
+IA detecta patente (cámara del condominio de la API key)
     ↓
-1. Busca vehículo registrado
+1. Busca el vehículo registrado EN EL CONDOMINIO de la cámara
     ↓
-    ├─ Si es RESIDENTE (vehicleType='residente' o accessLevel='permanente')
-    │   └─ PERMITIDO - "Vehículo residente registrado y activo"
+    ├─ activo + accessLevel = 'residente'
+    │   ├─ propietario miembro ACTIVO del condominio → PERMITIDO (abre)
+    │   └─ sin propietario / deshabilitado / fuera del condominio → CONSERJE
     │
-    ├─ Si es VISITANTE (vehicleType='visitante' o accessLevel='temporal')
-    │   └─ Busca visita activa para esta patente
-    │       ├─ Si visita válida → PERMITIDO - "Visita autorizada - [Nombre]"
-    │       │   └─ Auto check-in si está PENDING
-    │       └─ Si NO válida → DENEGADO - "Visita no válida o expirada"
+    ├─ activo + accessLevel = 'visitante'
+    │   └─ busca una visita vigente para la patente (mismo condominio)
+    │       ├─ válida y anfitrión ACTIVO → entrada (check-in) o salida (check-out) → PERMITIDO
+    │       ├─ válida pero anfitrión inactivo → CONSERJE
+    │       └─ no válida → DENEGADO
     │
-    └─ Si NO existe vehículo registrado
-        └─ Busca visita activa para esta patente
-            ├─ Si visita válida → PERMITIDO - "Visita autorizada - [Nombre]"
-            │   └─ Auto check-in si está PENDING
-            └─ Si NO válida → DENEGADO - "Vehículo no registrado y sin visita"
+    ├─ activo + accessLevel = 'servicio' o null → CONSERJE
+    ├─ inactivo → CONSERJE
+    │
+    └─ no hay vehículo registrado
+        └─ busca una visita vigente para la patente
+            ├─ válida y anfitrión ACTIVO → PERMITIDO (check-in / check-out)
+            ├─ válida pero anfitrión inactivo → CONSERJE
+            └─ no válida → CONSERJE ("Vehículo no registrado y sin visita autorizada")
 ```
+
+"Permitido" sale SOLO de las ramas explícitas (fail-closed, D4). Una lectura
+repetida dentro de `VISIT_EXIT_COOLDOWN_MINUTES` es "Duplicado" (sin efectos).
+
+> **Cambio operativo (decisión de Benjamin, 2026-10-09):** un vehículo con
+> `accessLevel = 'residente'` abre solo, sin conserje, mientras su propietario
+> sea miembro activo del condominio. Un residente puede registrar así los
+> vehículos de su familia; para editarlos, desde la familia solo puede BAJAR
+> el nivel o desactivarlos (reactivar o subir el nivel es de la administración).
 
 ## 🎯 Casos de Uso Soportados
 
 ### Caso 1: Vehículo Residente
 ```typescript
-// Vehículo registrado con acceso permanente
+// Vehículo de residente (accessLevel decide el portón; el propietario debe ser miembro activo)
 {
   plate: "ABC123",
-  vehicleType: "residente",
-  accessLevel: "permanente",
+  vehicleType: "auto",
+  accessLevel: "residente",
   owner: { id: "user-123", name: "Juan Pérez" },
   active: true
 }
@@ -58,8 +80,8 @@ IA detecta patente
 // 1. Vehículo temporal creado por el sistema de visitas
 {
   plate: "XYZ789",
-  vehicleType: "visitante",
-  accessLevel: "temporal",
+  vehicleType: null,
+  accessLevel: "visitante",
   owner: null,
   active: true
 }
@@ -103,8 +125,8 @@ IA detecta patente
 // Vehículo temporal pero sin visita activa
 {
   plate: "DEF456",
-  vehicleType: "visitante",
-  accessLevel: "temporal",
+  vehicleType: null,
+  accessLevel: "visitante",
   active: true
 }
 // NO existe visita en período válido
@@ -253,7 +275,7 @@ POST /visits
 
 **Sistema crea:**
 - ✅ Visita en estado PENDING
-- ✅ Vehículo temporal (si no existe) con vehicleType="visitante"
+- ✅ Vehículo temporal (si no existe) con accessLevel="visitante" (sin carrocería)
 
 ### 2. Visitante Llega al Condominio (10:30 AM)
 
@@ -312,8 +334,8 @@ POST /detections
 ### Para Residentes:
 ```typescript
 {
-  vehicleType: "residente",
-  accessLevel: "permanente",
+  vehicleType: "auto",
+  accessLevel: "residente",
   active: true,
   owner: User // Siempre debe tener propietario
 }
@@ -322,8 +344,8 @@ POST /detections
 ### Para Visitas (Creado automáticamente por VisitsService):
 ```typescript
 {
-  vehicleType: "visitante",
-  accessLevel: "temporal",
+  vehicleType: null,
+  accessLevel: "visitante",
   active: true,
   owner: null // Sin propietario directo
 }

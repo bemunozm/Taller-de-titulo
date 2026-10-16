@@ -1,5 +1,13 @@
-import { BadRequestException, ForbiddenException, Injectable, UnauthorizedException, NotFoundException, InternalServerErrorException } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
+import {
+  BadRequestException,
+  ForbiddenException,
+  HttpException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  InternalServerErrorException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
@@ -7,13 +15,18 @@ import { AuthService as BetterAuthServiceBase } from '@thallesp/nestjs-better-au
 import { APIError as BetterAuthAPIError } from 'better-auth/api';
 import type { auth } from './better-auth';
 import { UsersService } from 'src/users/users.service';
-import { TokensService } from 'src/tokens/tokens.service';
+import { userFieldConflict } from 'src/users/user-unique-conflict';
 import { CloudinaryService } from 'src/cloudinary/cloudinary.service';
 import { User } from 'src/users/entities/user.entity';
-import { PLATFORM_SUPER_ADMIN_ROLE } from 'src/common/tenant/tenant-context.types';
-import { resolveOrganizationIdForUser } from 'src/common/tenant/tenant-context.util';
-import { RegisterDto } from './dto/register.dto';
-import { LoginDto } from './dto/login.dto';
+import {
+  hasPlatformSuperAdminRole,
+  resolveOrganizationIdForUser,
+} from 'src/common/tenant/tenant-context.util';
+import {
+  evaluateTargetUser,
+  managesOrganization,
+  type PolicyActor,
+} from 'src/roles/role-assignment.policy';
 import { ConfirmAccountDto } from './dto/confirm-account.dto';
 import { RequestConfirmationCodeDto } from './dto/request-confirmation-code.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -22,20 +35,85 @@ import { UpdatePasswordWithTokenDto } from './dto/update-password-with-token.dto
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UpdateCurrentUserPasswordDto } from './dto/update-current-user-password.dto';
 import { CheckPasswordDto } from './dto/check-password.dto';
-import { CreateServiceApiKeyDto } from './dto/create-service-api-key.dto';
-import { hashPassword, checkPassword } from './utils/auth.util';
-import { generateToken } from './utils/token.util';
-import { AuthEmailService } from './services/auth-email.service';
+import {
+  CreateServiceApiKeyDto,
+  DEFAULT_SERVICE_API_KEY_DURATION,
+  ServiceApiKeyDuration,
+} from './dto/create-service-api-key.dto';
+import {
+  buildServiceKeyPermissions,
+  extractServiceKeyOrganizationId,
+} from './service-api-key.permissions';
 
-// Duraciones soportadas por CreateServiceApiKeyDto, en segundos
-// (`expiresIn` de auth.api.createApiKey). 'never' omite el campo por completo.
-const SERVICE_API_KEY_DURATIONS: Record<string, number | undefined> = {
-    '30d': 30 * 24 * 60 * 60,
-    '90d': 90 * 24 * 60 * 60,
-    '180d': 180 * 24 * 60 * 60,
-    '365d': 365 * 24 * 60 * 60,
-    never: undefined,
+/** Resultado de cambiar la contraseña: mensaje + cookies de la sesión nueva. */
+export interface PasswordChangeResult {
+  message: string;
+  /**
+   * `Set-Cookie` que emitió better-auth: `revokeOtherSessions` borra TODAS las
+   * sesiones (también la actual) y abre una nueva. El controller debe
+   * reenviarlas o el usuario queda deslogueado.
+   */
+  setCookieHeaders: string[];
+}
+
+/** Código de error de un `APIError` de better-auth (`body.code`). */
+function betterAuthErrorCode(error: BetterAuthAPIError): string | undefined {
+  return (error.body as { code?: string } | undefined)?.code;
+}
+
+// Duraciones de CreateServiceApiKeyDto en segundos (`expiresIn` de
+// auth.api.createApiKey). Toda key expira: no hay opción sin vencimiento.
+const SERVICE_API_KEY_DURATIONS: Record<ServiceApiKeyDuration, number> = {
+  '30d': 30 * 24 * 60 * 60,
+  '90d': 90 * 24 * 60 * 60,
+  '180d': 180 * 24 * 60 * 60,
+  '365d': 365 * 24 * 60 * 60,
 };
+
+/** Mismo mensaje para una key inexistente y para una de otro condominio. */
+const SERVICE_API_KEY_NOT_FOUND_MESSAGE = 'API key de servicio no encontrada';
+
+/** Resultado de revocar una API key de servicio. */
+export interface RevokedServiceApiKey {
+  id: string;
+  name: string | null;
+  organizationId: string | null;
+  enabled: boolean;
+}
+
+/** Columnas de la tabla `apikey` (plugin `apiKey`) que se leen para revocar. */
+interface ServiceApiKeyRow {
+  id: string;
+  referenceId: string;
+  permissions: unknown;
+}
+
+/** API key de servicio leída de la BD, con el condominio ya extraído. */
+interface StoredServiceApiKey {
+  id: string;
+  ownerUserId: string;
+  organizationId: string | null;
+}
+
+/**
+ * `apikey.permissions` es JSON guardado como texto. Un valor ilegible cuenta
+ * como "sin permisos" (y, por lo tanto, sin condominio).
+ */
+function parseStoredPermissions(raw: unknown): unknown {
+  if (typeof raw !== 'string') {
+    return raw ?? null;
+  }
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/** Rol de plataforma: opera sobre todos los condominios. */
+function isPlatformSuperAdmin(user: Pick<User, 'roles'>): boolean {
+  return hasPlatformSuperAdminRole(user);
+}
 
 // Tipo del `.api` parametrizado con `typeof auth` (import type — no ejecuta
 // el módulo better-auth.ts, solo aporta el tipo) para que incluya los
@@ -50,629 +128,791 @@ type BetterAuthApi = BetterAuthServiceBase<typeof auth>['api'];
 
 @Injectable()
 export class AuthService {
-    constructor(
-        private readonly usersService: UsersService,
-        private readonly tokensService: TokensService,
-        private readonly jwtService: JwtService,
-        private readonly authEmailService: AuthEmailService,
-        private readonly cloudinaryService: CloudinaryService,
-        private readonly configService: ConfigService,
-        // Tarea #18: llamadas server-side a better-auth (sin `headers`/sesión)
-        // para requestPasswordReset/resetPassword/verifyEmail/sendVerificationEmail
-        // /createApiKey. Disponible por DI porque BetterAuthModule.forRoot(...)
-        // es global (app.module.ts) — mismo patrón que src/auth/auth.guard.ts.
-        private readonly betterAuthService: BetterAuthServiceBase,
-        @InjectRepository(User)
-        private readonly userRepository: Repository<User>,
-        // Tarea #21: resuelve la organización del requester/target sin pasar
-        // por TenantContextService (REQUEST-scoped) para no volver AuthService
-        // entero request-scoped solo por este método — reusa el mismo helper
-        // que ya usa el interceptor de tenant (tenant-context.util.ts).
-        @InjectDataSource()
-        private readonly dataSource: DataSource,
-    ) {}
+  private readonly logger = new Logger(AuthService.name);
 
-    /** `.api` tipado con los plugins de nuestro `auth` (ver `BetterAuthApi` arriba) — solo para llamadas plugin-specific (createApiKey). */
-    private get betterAuthApi(): BetterAuthApi {
-        return this.betterAuthService.api as unknown as BetterAuthApi;
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly cloudinaryService: CloudinaryService,
+    private readonly configService: ConfigService,
+    // Tarea #18: llamadas server-side a better-auth (sin `headers`/sesión)
+    // para requestPasswordReset/resetPassword/verifyEmail/sendVerificationEmail
+    // /createApiKey. Disponible por DI porque BetterAuthModule.forRoot(...)
+    // es global (app.module.ts) — mismo patrón que src/auth/auth.guard.ts.
+    private readonly betterAuthService: BetterAuthServiceBase,
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
+    // Tarea #21: resuelve la organización del requester/target sin pasar
+    // por TenantContextService (REQUEST-scoped) para no volver AuthService
+    // entero request-scoped solo por este método — reusa el mismo helper
+    // que ya usa el interceptor de tenant (tenant-context.util.ts).
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
+  ) {}
+
+  /** `.api` tipado con los plugins de nuestro `auth` (ver `BetterAuthApi` arriba) — solo para llamadas plugin-specific (createApiKey, updateApiKey). */
+  private get betterAuthApi(): BetterAuthApi {
+    return this.betterAuthService.api as unknown as BetterAuthApi;
+  }
+
+  /** URL del frontend para construir los `redirectTo`/`callbackURL` de better-auth (rutas aún no migradas — #20). */
+  private get frontendUrl(): string {
+    return (
+      this.configService.get<string>('FRONTEND_URL') || 'http://localhost:5173'
+    );
+  }
+
+  /**
+   * Tarea #18 (docs/modulos/auth-multitenant.md §11/§12): reemplaza los
+   * códigos de 6 dígitos propios (tabla Token) por la verificación nativa de
+   * better-auth (JWT firmado, `emailVerification` en better-auth.ts).
+   * `user.emailVerified` es la MISMA columna que ya leía el login legacy
+   * (doc §12) — no hace falta ningún bridge adicional acá. El email de
+   * bienvenida se re-cableó al hook `emailVerification.afterEmailVerification`
+   * (better-auth.ts), que sí tiene acceso al usuario recién verificado (esta
+   * respuesta no lo trae en el caso normal — ver `verifyEmail` en el SDK).
+   */
+  async confirmAccount(confirmAccountDto: ConfirmAccountDto) {
+    try {
+      await this.betterAuthService.api.verifyEmail({
+        query: { token: confirmAccountDto.token },
+      });
+
+      return '¡Cuenta confirmada exitosamente! Ahora puedes acceder a todas las funcionalidades de la plataforma.';
+    } catch (error) {
+      if (error instanceof BetterAuthAPIError) {
+        throw new NotFoundException('Token no válido');
+      }
+      throw new InternalServerErrorException('Error al confirmar la cuenta');
+    }
+  }
+
+  /** Tarea #18: dispara `emailVerification.sendVerificationEmail` de better-auth en vez del código propio de 6 dígitos. */
+  async requestConfirmationCode(
+    requestConfirmationCodeDto: RequestConfirmationCodeDto,
+  ) {
+    try {
+      const { email } = requestConfirmationCodeDto;
+
+      // Usuario existe (se mantiene el pre-check propio: a diferencia de
+      // forgot-password, esta operación no cambia credenciales, así que
+      // el mensaje específico sigue siendo la UX deseada acá).
+      const user = await this.usersService.findByEmail(email);
+      if (!user) {
+        throw new NotFoundException('El Usuario no existe');
+      }
+
+      if (user.emailVerified) {
+        throw new BadRequestException('El Usuario ya está confirmado');
+      }
+
+      await this.betterAuthService.api.sendVerificationEmail({
+        body: {
+          email: user.email,
+          callbackURL: `${this.frontendUrl}/auth/confirm-account`,
+        },
+      });
+
+      return 'Nuevo código de verificación enviado. Revisa tu email y completa la confirmación de tu cuenta.';
+    } catch (error) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof BadRequestException
+      ) {
+        throw error;
+      }
+      throw new InternalServerErrorException(
+        'Error al solicitar código de confirmación',
+      );
+    }
+  }
+
+  /**
+   * Tarea #18: dispara `requestPasswordReset` de better-auth en vez del
+   * token de 6 dígitos propio. Cambio de comportamiento DELIBERADO
+   * (hardening, skill better-auth-security-best-practices "Account
+   * Enumeration Prevention"): ya no revela si el email existe — better-auth
+   * simula el trabajo y responde igual en ambos casos.
+   */
+  async forgotPassword(forgotPasswordDto: ForgotPasswordDto) {
+    try {
+      await this.betterAuthService.api.requestPasswordReset({
+        body: {
+          email: forgotPasswordDto.email,
+          redirectTo: `${this.frontendUrl}/auth/new-password`,
+        },
+      });
+
+      return 'Si el correo existe en nuestro sistema, revisa tu email para restablecer tu contraseña de forma segura.';
+    } catch (error) {
+      this.logger.error(
+        'Error al solicitar el reset de contraseña',
+        error instanceof Error ? error.stack : String(error),
+      );
+      throw new InternalServerErrorException(
+        'Error al procesar recuperación de password',
+      );
+    }
+  }
+
+  /**
+   * Tarea #18: better-auth no expone un endpoint JSON para "validar sin
+   * consumir" (su GET /reset-password/:token es un redirect de navegador).
+   * Se valida contra la MISMA tabla `verification` que usa
+   * `requestPasswordReset`/`resetPassword` (identifier `reset-password:<token>`).
+   */
+  async validateToken(validateTokenDto: ValidateTokenDto) {
+    try {
+      const rows: Array<{ exists: boolean }> =
+        await this.userRepository.manager.query(
+          `SELECT EXISTS(SELECT 1 FROM verification WHERE identifier = $1 AND "expiresAt" > now()) AS exists`,
+          [`reset-password:${validateTokenDto.token}`],
+        );
+
+      if (!rows[0]?.exists) {
+        throw new NotFoundException('Token no válido');
+      }
+
+      return 'Token verificado correctamente. Ahora puedes establecer tu nueva contraseña.';
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Error al validar el token');
+    }
+  }
+
+  /**
+   * Restablece la contraseña con el token del email vía `auth.api.resetPassword`
+   * (token opaco de un solo uso, tabla `verification`). better-auth reescribe
+   * la única credencial (`account.password`) y, por
+   * `revokeSessionsOnPasswordReset`, cierra todas las sesiones del usuario
+   * (better-auth.ts). Acá solo queda el side-effect histórico: auto-confirmar
+   * la cuenta si no estaba verificada (el link llegó a su email).
+   */
+  async updatePasswordWithToken(
+    updatePasswordWithTokenDto: UpdatePasswordWithTokenDto,
+  ) {
+    try {
+      const { token, password } = updatePasswordWithTokenDto;
+      const identifier = `reset-password:${token}`;
+
+      // Resolvemos el userId ANTES de resetear porque better-auth
+      // CONSUME (borra) el registro de `verification` al resetear —
+      // después no habría forma de saber a quién auto-confirmar.
+      const verificationRows: Array<{ value: string }> =
+        await this.userRepository.manager.query(
+          `SELECT value FROM verification WHERE identifier = $1 AND "expiresAt" > now() LIMIT 1`,
+          [identifier],
+        );
+      if (verificationRows.length === 0) {
+        throw new NotFoundException('Token no válido');
+      }
+      const userId = verificationRows[0].value;
+
+      try {
+        await this.betterAuthService.api.resetPassword({
+          body: { newPassword: password, token },
+        });
+      } catch (error) {
+        if (error instanceof BetterAuthAPIError) {
+          const code = (error.body as { code?: string } | undefined)?.code;
+          if (code === 'PASSWORD_TOO_SHORT' || code === 'PASSWORD_TOO_LONG') {
+            throw new BadRequestException(error.message);
+          }
+          throw new NotFoundException('Token no válido');
+        }
+        throw error;
+      }
+
+      await this.userRepository.update(
+        { id: userId, emailVerified: false },
+        { emailVerified: true },
+      );
+
+      return '¡Contraseña actualizada exitosamente! Ya puedes iniciar sesión con tu nueva contraseña.';
+    } catch (error) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof BadRequestException
+      ) {
+        throw error;
+      }
+      this.logger.error(
+        'Error al actualizar password con token',
+        error instanceof Error ? error.stack : String(error),
+      );
+      throw new InternalServerErrorException(
+        'Error al actualizar password con token',
+      );
+    }
+  }
+
+  async getUser(userId: string) {
+    try {
+      const user = await this.usersService.findOne(userId);
+      return user;
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Error al obtener el usuario');
+    }
+  }
+
+  async updateProfile(userId: string, updateProfileDto: UpdateProfileDto) {
+    try {
+      const { name, email, phone, age } = updateProfileDto;
+
+      // Validar email si se está actualizando
+      if (email) {
+        const userExists = await this.usersService.findByEmail(email);
+        if (userExists && userExists.id !== userId) {
+          // Corrección P5 (QA): 409 con el campo, igual que en /users.
+          throw userFieldConflict('email');
+        }
+      }
+
+      const user = await this.usersService.findOne(userId);
+
+      // Actualizar solo los campos que estén presentes
+      if (name !== undefined) user.name = name;
+      if (email !== undefined) user.email = email.toLowerCase();
+      if (phone !== undefined) user.phone = phone;
+      if (age !== undefined) user.age = age;
+
+      await this.usersService.save(user);
+      return 'Perfil actualizado correctamente';
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Error al actualizar el perfil');
+    }
+  }
+
+  /**
+   * Cambio de contraseña con sesión activa (Fase 4 · P2, hallazgo A1). Delega
+   * en `auth.api.changePassword` de better-auth: verifica y reescribe la
+   * credencial que usa el login (`account.password`, cuenta `credential`), así
+   * que este endpoint y el nativo `/api/auth/change-password` operan sobre la
+   * MISMA credencial. `revokeOtherSessions: true` cierra todas las sesiones
+   * (también la actual) y abre una nueva; sus `Set-Cookie` vuelven en el
+   * resultado para que el controller las reenvíe.
+   *
+   * `headers` son los de la request del usuario (cookie de sesión), ver
+   * `buildBetterAuthHeaders`.
+   */
+  async updateCurrentUserPassword(
+    updateCurrentUserPasswordDto: UpdateCurrentUserPasswordDto,
+    headers: Headers,
+  ): Promise<PasswordChangeResult> {
+    const { current_password, password } = updateCurrentUserPasswordDto;
+
+    // Misma contraseña: primero se informa si la actual es incorrecta (orden
+    // histórico de los errores) y, si es correcta, que no puede repetirse.
+    if (current_password === password) {
+      const isCurrentCorrect = await this.verifyCurrentPassword(
+        current_password,
+        headers,
+      );
+      throw new BadRequestException(
+        isCurrentCorrect
+          ? 'La nueva contraseña no puede ser igual a la actual'
+          : 'El Password Actual es incorrecto',
+      );
     }
 
-    /** URL del frontend para construir los `redirectTo`/`callbackURL` de better-auth (rutas aún no migradas — #20). */
-    private get frontendUrl(): string {
-        return this.configService.get<string>('FRONTEND_URL') || 'http://localhost:5173';
-    }
+    try {
+      const { headers: responseHeaders } =
+        await this.betterAuthService.api.changePassword({
+          body: {
+            currentPassword: current_password,
+            newPassword: password,
+            revokeOtherSessions: true,
+          },
+          headers,
+          returnHeaders: true,
+        });
 
-    async register(registerDto: RegisterDto) {
+      return {
+        message: 'El password se modificó correctamente',
+        setCookieHeaders: responseHeaders.getSetCookie(),
+      };
+    } catch (error) {
+      if (error instanceof BetterAuthAPIError) {
+        const code = betterAuthErrorCode(error);
+        if (code === 'INVALID_PASSWORD') {
+          throw new BadRequestException('El Password Actual es incorrecto');
+        }
+        if (code === 'PASSWORD_TOO_SHORT' || code === 'PASSWORD_TOO_LONG') {
+          throw new BadRequestException(
+            'La nueva contraseña debe tener entre 8 y 128 caracteres',
+          );
+        }
+        if (code === 'CREDENTIAL_ACCOUNT_NOT_FOUND') {
+          throw new BadRequestException(
+            'Tu cuenta aún no tiene contraseña. Usa "Olvidé mi contraseña" para definirla.',
+          );
+        }
+        if (code === 'UNAUTHORIZED') {
+          throw new UnauthorizedException();
+        }
+      }
+      this.logger.error(
+        'Error al cambiar la contraseña',
+        error instanceof Error ? error.stack : String(error),
+      );
+      throw new InternalServerErrorException('Error al cambiar la contraseña');
+    }
+  }
+
+  /**
+   * Verifica la contraseña del usuario de la sesión contra la credencial de
+   * better-auth (`auth.api.verifyPassword`, que usa el verificador configurado
+   * en better-auth.ts). No toca `user`: la única credencial es la de `account`.
+   */
+  async checkPassword(
+    checkPasswordDto: CheckPasswordDto,
+    headers: Headers,
+  ): Promise<string> {
+    const isCorrect = await this.verifyCurrentPassword(
+      checkPasswordDto.password,
+      headers,
+    );
+    if (!isCorrect) {
+      throw new BadRequestException('Password Incorrecto');
+    }
+    return 'Password Correcto';
+  }
+
+  /** `true`/`false` según better-auth; cualquier otro fallo es 401 o 500. */
+  private async verifyCurrentPassword(
+    password: string,
+    headers: Headers,
+  ): Promise<boolean> {
+    try {
+      await this.betterAuthService.api.verifyPassword({
+        body: { password },
+        headers,
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof BetterAuthAPIError) {
+        const code = betterAuthErrorCode(error);
+        if (code === 'INVALID_PASSWORD') {
+          return false;
+        }
+        if (code === 'UNAUTHORIZED') {
+          throw new UnauthorizedException();
+        }
+      }
+      this.logger.error(
+        'Error al verificar la contraseña',
+        error instanceof Error ? error.stack : String(error),
+      );
+      throw new InternalServerErrorException(
+        'Error al verificar la contraseña',
+      );
+    }
+  }
+
+  async uploadProfilePicture(userId: string, file: Express.Multer.File) {
+    try {
+      if (!file) {
+        throw new BadRequestException('No se proporcionó un archivo');
+      }
+
+      // Validar tipo de archivo
+      const allowedTypes = [
+        'image/jpeg',
+        'image/png',
+        'image/jpg',
+        'image/webp',
+      ];
+      if (!allowedTypes.includes(file.mimetype)) {
+        throw new BadRequestException(
+          'Solo se permiten imágenes JPG, PNG o WEBP',
+        );
+      }
+
+      // Validar tamaño (5MB máximo)
+      const maxSize = 5 * 1024 * 1024; // 5MB
+      if (file.size > maxSize) {
+        throw new BadRequestException('La imagen no puede exceder los 5MB');
+      }
+
+      // Obtener usuario para eliminar imagen anterior si existe
+      const user = await this.usersService.findOne(userId);
+
+      // Subir nueva imagen a Cloudinary
+      const result = await this.cloudinaryService.uploadImage(file);
+
+      // Eliminar imagen anterior de Cloudinary si existe
+      if (user.profilePicture) {
+        // Extraer public_id de la URL de Cloudinary
+        const urlParts = user.profilePicture.split('/');
+        const publicIdWithExtension = urlParts.slice(-2).join('/'); // folder/filename.ext
+        const publicId = publicIdWithExtension.split('.')[0]; // folder/filename
+
         try {
-            const { password, email, password_confirmation, ...restData } = registerDto;
-
-            // Prevenir duplicados
-            const userExists = await this.usersService.findByEmail(email);
-            if (userExists) {
-                throw new BadRequestException('El Usuario ya está registrado');
-            }
-
-            // Verificar que las contraseñas coincidan (validación adicional)
-            if (password !== password_confirmation) {
-                throw new BadRequestException('Las contraseñas no coinciden');
-            }
-
-            // Crear un usuario (excluir password_confirmation)
-            const userData = {
-                ...restData,
-                password: await hashPassword(password),
-                email: email.toLowerCase()
-            };
-            
-            const user = await this.usersService.create(userData);
-
-            // Generar el token
-            const tokenValue = generateToken();
-            await this.tokensService.create({ token: tokenValue, userId: user.id });
-
-            // Enviar el email de confirmación con el nuevo template profesional
-            await this.authEmailService.sendConfirmationEmail({
-                email: user.email,
-                name: user.name,
-                token: tokenValue
-            });
-
-            return 'Cuenta creada exitosamente. Revisa tu email para confirmarla y activar todas las funcionalidades.';
+          await this.cloudinaryService.deleteImage(publicId);
         } catch (error) {
-            if (error instanceof BadRequestException) {
-                throw error;
-            }
-            throw new InternalServerErrorException('Error al registrar el usuario');
+          // Si falla la eliminación, continuar (puede que la imagen ya no exista)
+          this.logger.error(
+            'Error al eliminar imagen anterior',
+            error instanceof Error ? error.stack : String(error),
+          );
         }
+      }
+
+      // Actualizar usuario con nueva URL
+      await this.usersService.update(userId, {
+        profilePicture: result.secure_url,
+      });
+
+      return { url: result.secure_url };
+    } catch (error) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof NotFoundException
+      ) {
+        throw error;
+      }
+      this.logger.error(
+        'Error al subir imagen a Cloudinary',
+        error instanceof Error ? error.stack : String(error),
+      );
+      throw new InternalServerErrorException(
+        'Error al subir la imagen de perfil',
+      );
+    }
+  }
+
+  async deleteProfilePicture(userId: string) {
+    try {
+      const user = await this.usersService.findOne(userId);
+
+      if (!user.profilePicture) {
+        throw new BadRequestException('No hay foto de perfil para eliminar');
+      }
+
+      // Extraer public_id de la URL de Cloudinary
+      const urlParts = user.profilePicture.split('/');
+      const publicIdWithExtension = urlParts.slice(-2).join('/'); // folder/filename.ext
+      const publicId = publicIdWithExtension.split('.')[0]; // folder/filename
+
+      // Eliminar imagen de Cloudinary
+      try {
+        await this.cloudinaryService.deleteImage(publicId);
+      } catch (error) {
+        this.logger.error(
+          'Error al eliminar imagen de Cloudinary',
+          error instanceof Error ? error.stack : String(error),
+        );
+        // Continuar para eliminar de BD aunque falle en Cloudinary
+      }
+
+      // Actualizar usuario para remover URL
+      await this.usersService.update(userId, {
+        profilePicture: null,
+      });
+
+      return 'Foto de perfil eliminada exitosamente';
+    } catch (error) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof NotFoundException
+      ) {
+        throw error;
+      }
+      this.logger.error(
+        'Error al eliminar imagen de perfil',
+        error instanceof Error ? error.stack : String(error),
+      );
+      throw new InternalServerErrorException(
+        'Error al eliminar la imagen de perfil',
+      );
+    }
+  }
+
+  /**
+   * Tarea #18 (docs/modulos/auth-multitenant.md §10.3): genera una API key
+   * de better-auth (plugin `apiKey`) para credenciales de máquina (worker
+   * LPR y futuros servicios). Llamada SERVER-SIDE (sin `headers`) a
+   * propósito: better-auth trata las llamadas sin `headers`/`request` como
+   * privilegiadas y permite pasar `userId` explícito en el body — si se
+   * pasaran los headers de la request entrante, better-auth la trataría
+   * como "client request" y forzaría el key a pertenecer al usuario de la
+   * sesión actual (no serviría para asignarla a una cuenta de servicio
+   * distinta). El endpoint que llama a este método ya está protegido con
+   * `@RequirePermissions('auth.manage-service-tokens')`.
+   *
+   * El worker consume la key enviándola en el header `x-api-key` (default
+   * de better-auth, `apiKeyHeaders`) contra los endpoints de ingesta LPR,
+   * protegidos por `ServiceApiKeyGuard` (tarea #21).
+   *
+   * RESTRICCIÓN `targetUserId` (tarea #21, hardening — hallazgo del
+   * cybersecurity-engineer): sin esto, cualquier admin de condominio con el
+   * permiso `auth.manage-service-tokens` podía mintear una API key para
+   * OTRO usuario arbitrario vía `targetUserId` — incluyendo, en el peor
+   * caso, un super-admin de la plataforma, obteniendo así una credencial de
+   * máquina que actúa como esa cuenta. Ahora, si `targetUserId` difiere del
+   * requester, se exige UNA de estas dos condiciones:
+   *   1) El requester es "Super Administrador" (rol de plataforma,
+   *      PLATFORM_SUPER_ADMIN_ROLE) — puede asignar keys cross-tenant.
+   *   2) El target NO es super-admin Y pertenece a la MISMA organización
+   *      (condominio) que el requester (resuelta vía membresía, igual que
+   *      TenantContextService — ver tenant-context.util.ts).
+   */
+  async createServiceApiKey(requestingUser: User, dto: CreateServiceApiKeyDto) {
+    try {
+      const requestingUserId = requestingUser.id;
+      const targetUserId = dto.targetUserId ?? requestingUserId;
+      const targetUser = await this.usersService.findOne(targetUserId);
+
+      if (targetUserId !== requestingUserId) {
+        await this.assertCanAssignServiceApiKeyTo(requestingUser, targetUser);
+      }
+
+      const expiresIn =
+        SERVICE_API_KEY_DURATIONS[
+          dto.duration ?? DEFAULT_SERVICE_API_KEY_DURATION
+        ];
+      const organizationId = await this.resolveServiceKeyOrganizationId(
+        requestingUser,
+        targetUser,
+      );
+      if (!organizationId) {
+        // Una key sin condominio no sirve para nada (ServiceApiKeyGuard
+        // la rechaza): se corta acá, antes de emitirla.
+        throw new BadRequestException(
+          'La API key de servicio debe quedar vinculada a un condominio y no hay uno para esta emisión: emítela desde (o para) un usuario que pertenezca al condominio',
+        );
+      }
+
+      const result = await this.betterAuthApi.createApiKey({
+        body: {
+          userId: targetUserId,
+          name: dto.name,
+          expiresIn,
+          // Server-only (un cliente no puede fijarlos): el condominio
+          // va en `permissions`, que es lo que lee ServiceApiKeyGuard.
+          permissions: buildServiceKeyPermissions(organizationId),
+          // Decisión de Benjamin (2026-10-08): sin el límite por key del
+          // plugin (10 verificaciones / 24 h por defecto, ventana medida
+          // desde el último request) el LPR no se corta en el request 11.
+          // Solo para estas keys; el plugin conserva su default. La
+          // protección por origen llega en la fase P4.
+          rateLimitEnabled: false,
+          // Solo trazabilidad: `metadata` la puede escribir un cliente,
+          // así que NUNCA se usa para autorizar.
+          metadata: {
+            description: dto.description ?? 'Service API key',
+            createdBy: requestingUserId,
+            createdAt: new Date().toISOString(),
+          },
+        },
+      });
+
+      return {
+        id: result.id,
+        key: result.key, // Solo se muestra UNA VEZ — better-auth guarda solo el hash
+        name: result.name,
+        prefix: result.prefix,
+        start: result.start,
+        ownerUserId: targetUserId,
+        ownerEmail: targetUser.email,
+        organizationId,
+        expiresAt: result.expiresAt,
+        createdAt: result.createdAt,
+      };
+    } catch (error) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof ForbiddenException ||
+        error instanceof BadRequestException
+      ) {
+        throw error;
+      }
+      this.logger.error(
+        'Error al crear la API key de servicio',
+        error instanceof Error ? error.stack : String(error),
+      );
+      throw new InternalServerErrorException(
+        'Error al crear la API key de servicio',
+      );
+    }
+  }
+
+  /**
+   * Organización (condominio) a la que queda vinculada la key (en sus
+   * `permissions`): la del solicitante. Un super-admin no tiene condominio
+   * propio, así que se usa la del usuario dueño de la key (si tiene). `null`
+   * = sin organización (la emisión responde 400).
+   */
+  private async resolveServiceKeyOrganizationId(
+    requestingUser: User,
+    targetUser: User,
+  ): Promise<string | null> {
+    const sourceUserId = isPlatformSuperAdmin(requestingUser)
+      ? targetUser.id
+      : requestingUser.id;
+    return resolveOrganizationIdForUser(sourceUserId, this.dataSource);
+  }
+
+  /**
+   * Revoca (deshabilita) una API key de servicio. Desde ese momento
+   * `verifyApiKey` responde `KEY_DISABLED` y `ServiceApiKeyGuard` da 401. Es
+   * la forma de cortar una key filtrada: las rutas de cliente
+   * `/api/auth/api-key/*` están deshabilitadas. Idempotente: revocar una key
+   * ya revocada responde igual.
+   *
+   * Autorización (misma base que la emisión, `managesOrganization`): el
+   * condominio de la key (`permissions.org`) debe ser el del solicitante; un
+   * super-admin revoca cualquiera. Si no, responde 404 igual que una key
+   * inexistente, para no revelar que existe en otro condominio.
+   *
+   * `updateApiKey` se llama sin `headers` (llamada de servidor) y con
+   * `userId` = dueño de la key: sin sesión, el plugin toma `body.userId` como
+   * usuario y exige que coincida con el `referenceId` de la key.
+   */
+  async revokeServiceApiKey(
+    requestingUser: User,
+    keyId: string,
+  ): Promise<RevokedServiceApiKey> {
+    try {
+      const key = await this.findServiceApiKey(keyId);
+      if (
+        !key ||
+        !(await this.managesOrganization(requestingUser, key.organizationId))
+      ) {
+        throw new NotFoundException(SERVICE_API_KEY_NOT_FOUND_MESSAGE);
+      }
+
+      const updated = await this.betterAuthApi.updateApiKey({
+        body: { keyId: key.id, userId: key.ownerUserId, enabled: false },
+      });
+
+      return {
+        id: updated.id,
+        name: updated.name ?? null,
+        organizationId: key.organizationId,
+        enabled: updated.enabled,
+      };
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      // La key se borró entre la lectura y el update.
+      if (
+        error instanceof BetterAuthAPIError &&
+        betterAuthErrorCode(error) === 'KEY_NOT_FOUND'
+      ) {
+        throw new NotFoundException(SERVICE_API_KEY_NOT_FOUND_MESSAGE);
+      }
+      this.logger.error(
+        'Error al revocar la API key de servicio',
+        error instanceof Error ? error.stack : String(error),
+      );
+      throw new InternalServerErrorException(
+        'Error al revocar la API key de servicio',
+      );
+    }
+  }
+
+  /**
+   * Lee una key por id directo de la tabla `apikey` (el plugin usa su
+   * `storage` por defecto, `'database'`). `auth.api.getApiKey` no sirve acá:
+   * exige la sesión del dueño de la key.
+   */
+  private async findServiceApiKey(
+    keyId: string,
+  ): Promise<StoredServiceApiKey | null> {
+    const rows = await this.dataSource.query<ServiceApiKeyRow[]>(
+      `SELECT id, "referenceId", permissions FROM apikey WHERE id = $1 LIMIT 1`,
+      [keyId],
+    );
+    const row = rows[0];
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.id,
+      ownerUserId: row.referenceId,
+      organizationId: extractServiceKeyOrganizationId(
+        parseStoredPermissions(row.permissions),
+      ),
+    };
+  }
+
+  /**
+   * Actor de la política de condominio (`RoleAssignmentPolicy`, P5) a partir
+   * del usuario solicitante. El condominio solo se resuelve si no es
+   * super-admin (un super-admin no lo necesita).
+   */
+  private async policyActorOf(
+    requestingUser: User,
+  ): Promise<Pick<PolicyActor, 'isSuperAdmin' | 'organizationId'>> {
+    if (isPlatformSuperAdmin(requestingUser)) {
+      return { isSuperAdmin: true, organizationId: null };
+    }
+    return {
+      isSuperAdmin: false,
+      organizationId: await resolveOrganizationIdForUser(
+        requestingUser.id,
+        this.dataSource,
+      ),
+    };
+  }
+
+  /**
+   * `true` si el solicitante administra el condominio `organizationId`: un
+   * super-admin, todos; el resto, solo el suyo (por membresía). Es la base de
+   * la emisión (`assertCanAssignServiceApiKeyTo`) y de la revocación. La
+   * regla vive en `RoleAssignmentPolicy.managesOrganization` (P5).
+   */
+  private async managesOrganization(
+    requestingUser: User,
+    organizationId: string | null,
+  ): Promise<boolean> {
+    if (!organizationId && !isPlatformSuperAdmin(requestingUser)) {
+      return false;
+    }
+    return managesOrganization(
+      await this.policyActorOf(requestingUser),
+      organizationId,
+    );
+  }
+
+  /**
+   * Ver docstring de `createServiceApiKey` para el detalle de la política
+   * (regla "mismo condominio" de `RoleAssignmentPolicy.evaluateTargetUser`).
+   * Lanza `ForbiddenException` (403) si el requester NO tiene permiso para
+   * asignar la key a `targetUser`.
+   */
+  private async assertCanAssignServiceApiKeyTo(
+    requestingUser: User,
+    targetUser: User,
+  ): Promise<void> {
+    const actor = await this.policyActorOf(requestingUser);
+    if (actor.isSuperAdmin) {
+      return;
     }
 
-    /**
-     * Tarea #18 (docs/modulos/auth-multitenant.md §11/§12): reemplaza los
-     * códigos de 6 dígitos propios (tabla Token) por la verificación nativa de
-     * better-auth (JWT firmado, `emailVerification` en better-auth.ts).
-     * `user.emailVerified` es la MISMA columna que ya leía el login legacy
-     * (doc §12) — no hace falta ningún bridge adicional acá. El email de
-     * bienvenida se re-cableó al hook `emailVerification.afterEmailVerification`
-     * (better-auth.ts), que sí tiene acceso al usuario recién verificado (esta
-     * respuesta no lo trae en el caso normal — ver `verifyEmail` en el SDK).
-     */
-    async confirmAccount(confirmAccountDto: ConfirmAccountDto) {
-        try {
-            await this.betterAuthService.api.verifyEmail({
-                query: { token: confirmAccountDto.token },
-            });
-
-            return '¡Cuenta confirmada exitosamente! Ahora puedes acceder a todas las funcionalidades de la plataforma.';
-        } catch (error) {
-            if (error instanceof BetterAuthAPIError) {
-                throw new NotFoundException('Token no válido');
-            }
-            throw new InternalServerErrorException('Error al confirmar la cuenta');
-        }
+    const targetIsSuperAdmin = isPlatformSuperAdmin(targetUser);
+    const decision = evaluateTargetUser(actor, {
+      isSuperAdmin: targetIsSuperAdmin,
+      organizationId: targetIsSuperAdmin
+        ? null
+        : await resolveOrganizationIdForUser(targetUser.id, this.dataSource),
+    });
+    if (decision.allowed) {
+      return;
     }
-
-    /**
-     * Tarea #21 (hardening, skill better-auth-security-best-practices
-     * "Account Enumeration Prevention"): unifica los tres motivos de rechazo
-     * (usuario inexistente, cuenta no activada, password incorrecto) al MISMO
-     * mensaje genérico — antes cada uno tenía un mensaje/código distinto, lo
-     * que permitía a un atacante enumerar qué emails están registrados (y
-     * cuáles ya activaron su cuenta) probando logins.
-     *
-     * También se retira el side-effect de disparar `requestPasswordReset`
-     * (better-auth) desde este path: un endpoint NO autenticado no debe poder
-     * gatillar el envío de un email a una cuenta arbitraria con solo conocer
-     * su dirección (abuso de email-bombing / oráculo de enumeración por
-     * timing). Un usuario con cuenta no activada ahora debe usar
-     * `POST /auth/forgot-password` (ya diseñado para ser anti-enumeración —
-     * responde igual exista o no el email) para recibir su link de
-     * activación.
-     */
-    async login(loginDto: LoginDto) {
-        const invalidCredentials = () => new UnauthorizedException('Credenciales inválidas');
-        try {
-            const { email, password } = loginDto;
-
-            const user = await this.usersService.findByEmailWithPassword(email);
-            if (!user) {
-                throw invalidCredentials();
-            }
-
-            if (!user.emailVerified) {
-                throw invalidCredentials();
-            }
-
-            // Revisar password (RESTRICCIÓN CRÍTICA tarea #18: user.password
-            // se mantiene sincronizada con el hash de better-auth vía el
-            // bridge de better-auth.ts, así que este camino JWT legacy sigue
-            // funcionando sin cambios tras un reset/activación por better-auth)
-            const isPasswordCorrect = await checkPassword(password, user.password);
-            if (!isPasswordCorrect) {
-                throw invalidCredentials();
-            }
-
-            // Solo guardar IDs de roles en el JWT para evitar que sea muy grande
-            const roleIds = user.roles?.map(role => role.id) || [];
-            const payload = { id: user.id, email: user.email, name: user.name, roleIds };
-            const jwtToken = this.jwtService.sign(payload);
-
-            return jwtToken;
-        } catch (error) {
-            if (error instanceof UnauthorizedException) {
-                throw error;
-            }
-            throw new InternalServerErrorException('Error al procesar el login');
-        }
-    }
-
-    /** Tarea #18: dispara `emailVerification.sendVerificationEmail` de better-auth en vez del código propio de 6 dígitos. */
-    async requestConfirmationCode(requestConfirmationCodeDto: RequestConfirmationCodeDto) {
-        try {
-            const { email } = requestConfirmationCodeDto;
-
-            // Usuario existe (se mantiene el pre-check propio: a diferencia de
-            // forgot-password, esta operación no cambia credenciales, así que
-            // el mensaje específico sigue siendo la UX deseada acá).
-            const user = await this.usersService.findByEmail(email);
-            if (!user) {
-                throw new NotFoundException('El Usuario no existe');
-            }
-
-            if (user.emailVerified) {
-                throw new BadRequestException('El Usuario ya está confirmado');
-            }
-
-            await this.betterAuthService.api.sendVerificationEmail({
-                body: {
-                    email: user.email,
-                    callbackURL: `${this.frontendUrl}/auth/confirm-account`,
-                },
-            });
-
-            return 'Nuevo código de verificación enviado. Revisa tu email y completa la confirmación de tu cuenta.'
-        } catch (error) {
-            if (error instanceof NotFoundException || error instanceof BadRequestException) {
-                throw error;
-            }
-            throw new InternalServerErrorException('Error al solicitar código de confirmación');
-        }
-    }
-
-    /**
-     * Tarea #18: dispara `requestPasswordReset` de better-auth en vez del
-     * token de 6 dígitos propio. Cambio de comportamiento DELIBERADO
-     * (hardening, skill better-auth-security-best-practices "Account
-     * Enumeration Prevention"): ya no revela si el email existe — better-auth
-     * simula el trabajo y responde igual en ambos casos.
-     */
-    async forgotPassword(forgotPasswordDto: ForgotPasswordDto) {
-        try {
-            await this.betterAuthService.api.requestPasswordReset({
-                body: {
-                    email: forgotPasswordDto.email,
-                    redirectTo: `${this.frontendUrl}/auth/new-password`,
-                },
-            });
-
-            return 'Si el correo existe en nuestro sistema, revisa tu email para restablecer tu contraseña de forma segura.';
-        } catch (error) {
-            throw new InternalServerErrorException('Error al procesar recuperación de password');
-        }
-    }
-
-    /**
-     * Tarea #18: better-auth no expone un endpoint JSON para "validar sin
-     * consumir" (su GET /reset-password/:token es un redirect de navegador).
-     * Se valida contra la MISMA tabla `verification` que usa
-     * `requestPasswordReset`/`resetPassword` (identifier `reset-password:<token>`).
-     */
-    async validateToken(validateTokenDto: ValidateTokenDto) {
-        try {
-            const rows: Array<{ exists: boolean }> = await this.userRepository.manager.query(
-                `SELECT EXISTS(SELECT 1 FROM verification WHERE identifier = $1 AND "expiresAt" > now()) AS exists`,
-                [`reset-password:${validateTokenDto.token}`],
-            );
-
-            if (!rows[0]?.exists) {
-                throw new NotFoundException('Token no válido');
-            }
-
-            return 'Token verificado correctamente. Ahora puedes establecer tu nueva contraseña.';
-        } catch (error) {
-            if (error instanceof NotFoundException) {
-                throw error;
-            }
-            throw new InternalServerErrorException('Error al validar el token');
-        }
-    }
-
-    /**
-     * Tarea #18: dispara `resetPassword` de better-auth (token opaco de un
-     * solo uso) en vez de la tabla Token propia. El bridge de sincronización
-     * `user.password` (better-auth.ts, `emailAndPassword.onPasswordReset`)
-     * corre DENTRO de la llamada de arriba — para cuando esta función retorna,
-     * el login legacy ya ve el hash nuevo. Acá solo falta el side-effect
-     * histórico: auto-confirmar la cuenta si no estaba verificada (mismo
-     * comportamiento que el flujo Token propio tenía).
-     */
-    async updatePasswordWithToken(updatePasswordWithTokenDto: UpdatePasswordWithTokenDto) {
-        try {
-            const { token, password } = updatePasswordWithTokenDto;
-            const identifier = `reset-password:${token}`;
-
-            // Resolvemos el userId ANTES de resetear porque better-auth
-            // CONSUME (borra) el registro de `verification` al resetear —
-            // después no habría forma de saber a quién auto-confirmar.
-            const verificationRows: Array<{ value: string }> = await this.userRepository.manager.query(
-                `SELECT value FROM verification WHERE identifier = $1 AND "expiresAt" > now() LIMIT 1`,
-                [identifier],
-            );
-            if (verificationRows.length === 0) {
-                throw new NotFoundException('Token no válido');
-            }
-            const userId = verificationRows[0].value;
-
-            try {
-                await this.betterAuthService.api.resetPassword({
-                    body: { newPassword: password, token },
-                });
-            } catch (error) {
-                if (error instanceof BetterAuthAPIError) {
-                    const code = (error.body as { code?: string } | undefined)?.code;
-                    if (code === 'PASSWORD_TOO_SHORT' || code === 'PASSWORD_TOO_LONG') {
-                        throw new BadRequestException(error.message);
-                    }
-                    throw new NotFoundException('Token no válido');
-                }
-                throw error;
-            }
-
-            await this.userRepository.update({ id: userId, emailVerified: false }, { emailVerified: true });
-
-            return '¡Contraseña actualizada exitosamente! Ya puedes iniciar sesión con tu nueva contraseña.';
-        } catch (error) {
-            if (error instanceof NotFoundException || error instanceof BadRequestException) {
-                throw error;
-            }
-            console.error('Error al actualizar password con token:', error);
-            throw new InternalServerErrorException('Error al actualizar password con token');
-        }
-    }
-
-    async getUser(userId: string) {
-        try {
-            const user = await this.usersService.findOne(userId);
-            return user;
-        } catch (error) {
-            if (error instanceof NotFoundException) {
-                throw error;
-            }
-            throw new InternalServerErrorException('Error al obtener el usuario');
-        }
-    }
-
-    async updateProfile(userId: string, updateProfileDto: UpdateProfileDto) {
-        try {
-            const { name, email, phone, age } = updateProfileDto;
-
-            // Validar email si se está actualizando
-            if (email) {
-                const userExists = await this.usersService.findByEmail(email);
-                if (userExists && userExists.id !== userId) {
-                    throw new BadRequestException('Ese e-mail ya está en uso');
-                }
-            }
-
-            const user = await this.usersService.findOne(userId);
-            
-            // Actualizar solo los campos que estén presentes
-            if (name !== undefined) user.name = name;
-            if (email !== undefined) user.email = email.toLowerCase();
-            if (phone !== undefined) user.phone = phone;
-            if (age !== undefined) user.age = age;
-
-            await this.usersService.save(user);
-            return 'Perfil actualizado correctamente';
-        } catch (error) {
-            if (error instanceof NotFoundException || error instanceof BadRequestException) {
-                throw error;
-            }
-            throw new InternalServerErrorException('Error al actualizar el perfil');
-        }
-    }
-
-    async updateCurrentUserPassword(userId: string, updateCurrentUserPasswordDto: UpdateCurrentUserPasswordDto) {
-        try {
-            const { current_password, password } = updateCurrentUserPasswordDto;
-
-            const user = await this.usersService.findByIdWithPassword(userId);
-
-            const isPasswordCorrect = await checkPassword(current_password, user.password);
-            if (!isPasswordCorrect) {
-                throw new BadRequestException('El Password Actual es incorrecto');
-            }
-
-            // Verificar que la nueva contraseña sea diferente a la actual
-            const isSamePassword = await checkPassword(password, user.password);
-            if (isSamePassword) {
-                throw new BadRequestException('La nueva contraseña no puede ser igual a la actual');
-            }
-
-            user.password = await hashPassword(password);
-            await this.usersService.save(user);
-
-            return 'El password se modificó correctamente';
-        } catch (error) {
-            if (error instanceof NotFoundException || error instanceof BadRequestException) {
-                throw error;
-            }
-            throw new InternalServerErrorException('Error al cambiar la contraseña');
-        }
-    }
-
-    async checkPassword(userId: string, checkPasswordDto: CheckPasswordDto) {
-        try {
-            const { password } = checkPasswordDto;
-
-            const user = await this.usersService.findByIdWithPassword(userId);
-
-            const isPasswordCorrect = await checkPassword(password, user.password);
-            if (!isPasswordCorrect) {
-                throw new BadRequestException('Password Incorrecto');
-            }
-
-            return 'Password Correcto';
-        } catch (error) {
-            if (error instanceof NotFoundException || error instanceof BadRequestException) {
-                throw error;
-            }
-            throw new InternalServerErrorException('Error al verificar la contraseña');
-        }
-    }
-
-    async uploadProfilePicture(userId: string, file: Express.Multer.File) {
-        try {
-            if (!file) {
-                throw new BadRequestException('No se proporcionó un archivo');
-            }
-
-            // Validar tipo de archivo
-            const allowedTypes = ['image/jpeg', 'image/png', 'image/jpg', 'image/webp'];
-            if (!allowedTypes.includes(file.mimetype)) {
-                throw new BadRequestException('Solo se permiten imágenes JPG, PNG o WEBP');
-            }
-
-            // Validar tamaño (5MB máximo)
-            const maxSize = 5 * 1024 * 1024; // 5MB
-            if (file.size > maxSize) {
-                throw new BadRequestException('La imagen no puede exceder los 5MB');
-            }
-
-            // Obtener usuario para eliminar imagen anterior si existe
-            const user = await this.usersService.findOne(userId);
-            
-            // Subir nueva imagen a Cloudinary
-            const result = await this.cloudinaryService.uploadImage(file);
-
-            // Eliminar imagen anterior de Cloudinary si existe
-            if (user.profilePicture) {
-                // Extraer public_id de la URL de Cloudinary
-                const urlParts = user.profilePicture.split('/');
-                const publicIdWithExtension = urlParts.slice(-2).join('/'); // folder/filename.ext
-                const publicId = publicIdWithExtension.split('.')[0]; // folder/filename
-                
-                try {
-                    await this.cloudinaryService.deleteImage(publicId);
-                } catch (error) {
-                    // Si falla la eliminación, continuar (puede que la imagen ya no exista)
-                    console.error('Error al eliminar imagen anterior:', error);
-                }
-            }
-
-            // Actualizar usuario con nueva URL
-            await this.usersService.update(userId, {
-                profilePicture: result.secure_url,
-            });
-
-            return { url: result.secure_url };
-        } catch (error) {
-            if (error instanceof BadRequestException || error instanceof NotFoundException) {
-                throw error;
-            }
-            console.error('Error al subir imagen a Cloudinary:', error);
-            throw new InternalServerErrorException('Error al subir la imagen de perfil');
-        }
-    }
-
-    async deleteProfilePicture(userId: string) {
-        try {
-            const user = await this.usersService.findOne(userId);
-
-            if (!user.profilePicture) {
-                throw new BadRequestException('No hay foto de perfil para eliminar');
-            }
-
-            // Extraer public_id de la URL de Cloudinary
-            const urlParts = user.profilePicture.split('/');
-            const publicIdWithExtension = urlParts.slice(-2).join('/'); // folder/filename.ext
-            const publicId = publicIdWithExtension.split('.')[0]; // folder/filename
-
-            // Eliminar imagen de Cloudinary
-            try {
-                await this.cloudinaryService.deleteImage(publicId);
-            } catch (error) {
-                console.error('Error al eliminar imagen de Cloudinary:', error);
-                // Continuar para eliminar de BD aunque falle en Cloudinary
-            }
-
-            // Actualizar usuario para remover URL
-            await this.usersService.update(userId, {
-                profilePicture: null,
-            });
-
-            return 'Foto de perfil eliminada exitosamente';
-        } catch (error) {
-            if (error instanceof BadRequestException || error instanceof NotFoundException) {
-                throw error;
-            }
-            console.error('Error al eliminar imagen de perfil:', error);
-            throw new InternalServerErrorException('Error al eliminar la imagen de perfil');
-        }
-    }
-
-    /**
-     * @deprecated Tarea #18 (docs/modulos/auth-multitenant.md §10.3): el
-     * service-token para credenciales de máquina (worker LPR) se resolvió con
-     * el plugin `apiKey` de better-auth — ver `createServiceApiKey` abajo y
-     * `POST /api/v1/auth/service-api-keys` en AuthController. Este método
-     * queda huérfano (nada lo llama hoy — ni frontend ni el worker LPR, que
-     * todavía no tiene su auth cableada, eso es hardening #21) y es candidato
-     * a retiro completo en #21. Se deja funcionando por compatibilidad
-     * mínima mientras tanto (JWT firmado con el mismo `JwtModule` del login
-     * legacy — no confundir con las API keys nuevas, que son opacas y viven
-     * en la tabla `apikey` de better-auth, no en JWT).
-     */
-    async createServiceToken(userId: string, duration: string = '365d', description?: string) {
-        try {
-            const user = await this.usersService.findOne(userId);
-            if (!user) {
-                throw new NotFoundException('Usuario no encontrado');
-            }
-
-            // Verificar que el usuario sea admin
-            const isAdmin = user.roles?.some(role => role.name === 'Administrador' || role.name === 'Super Administrador');
-            if (!isAdmin) {
-                throw new UnauthorizedException('Solo administradores pueden generar tokens de servicio');
-            }
-
-            // Generar token de larga duración
-            const roleIds = user.roles?.map(role => role.id) || [];
-            const payload = {
-                id: user.id,
-                email: user.email,
-                name: user.name,
-                roleIds,
-                isServiceToken: true,
-                description: description || 'Service Token'
-            };
-
-            const serviceToken = this.jwtService.sign(payload, { expiresIn: duration });
-
-            return {
-                token: serviceToken,
-                expiresIn: duration,
-                description: description || 'Service Token',
-                createdAt: new Date().toISOString()
-            };
-        } catch (error) {
-            if (error instanceof NotFoundException || error instanceof UnauthorizedException) {
-                throw error;
-            }
-            throw new InternalServerErrorException('Error al crear el token de servicio');
-        }
-    }
-
-    /**
-     * Tarea #18 (docs/modulos/auth-multitenant.md §10.3): genera una API key
-     * de better-auth (plugin `apiKey`) para credenciales de máquina (worker
-     * LPR y futuros servicios). Llamada SERVER-SIDE (sin `headers`) a
-     * propósito: better-auth trata las llamadas sin `headers`/`request` como
-     * privilegiadas y permite pasar `userId` explícito en el body — si se
-     * pasaran los headers de la request entrante, better-auth la trataría
-     * como "client request" y forzaría el key a pertenecer al usuario de la
-     * sesión actual (no serviría para asignarla a una cuenta de servicio
-     * distinta). El endpoint que llama a este método ya está protegido con
-     * `@RequirePermissions('auth.manage-service-tokens')`.
-     *
-     * El worker consume la key enviándola en el header `x-api-key` (default
-     * de better-auth, `apiKeyHeaders`) contra los endpoints de ingesta LPR,
-     * protegidos por `ServiceApiKeyGuard` (tarea #21).
-     *
-     * RESTRICCIÓN `targetUserId` (tarea #21, hardening — hallazgo del
-     * cybersecurity-engineer): sin esto, cualquier admin de condominio con el
-     * permiso `auth.manage-service-tokens` podía mintear una API key para
-     * OTRO usuario arbitrario vía `targetUserId` — incluyendo, en el peor
-     * caso, un super-admin de la plataforma, obteniendo así una credencial de
-     * máquina que actúa como esa cuenta. Ahora, si `targetUserId` difiere del
-     * requester, se exige UNA de estas dos condiciones:
-     *   1) El requester es "Super Administrador" (rol de plataforma,
-     *      PLATFORM_SUPER_ADMIN_ROLE) — puede asignar keys cross-tenant.
-     *   2) El target NO es super-admin Y pertenece a la MISMA organización
-     *      (condominio) que el requester (resuelta vía membresía, igual que
-     *      TenantContextService — ver tenant-context.util.ts).
-     */
-    async createServiceApiKey(requestingUser: User, dto: CreateServiceApiKeyDto) {
-        try {
-            const requestingUserId = requestingUser.id;
-            const targetUserId = dto.targetUserId ?? requestingUserId;
-            const targetUser = await this.usersService.findOne(targetUserId);
-
-            if (targetUserId !== requestingUserId) {
-                await this.assertCanAssignServiceApiKeyTo(requestingUser, targetUser);
-            }
-
-            const expiresIn = SERVICE_API_KEY_DURATIONS[dto.duration ?? '365d'];
-
-            const result = await this.betterAuthApi.createApiKey({
-                body: {
-                    userId: targetUserId,
-                    name: dto.name,
-                    ...(expiresIn !== undefined ? { expiresIn } : {}),
-                    metadata: {
-                        description: dto.description ?? 'Service API key',
-                        createdBy: requestingUserId,
-                        createdAt: new Date().toISOString(),
-                    },
-                },
-            });
-
-            return {
-                id: result.id,
-                key: result.key, // Solo se muestra UNA VEZ — better-auth guarda solo el hash
-                name: result.name,
-                prefix: result.prefix,
-                start: result.start,
-                ownerUserId: targetUserId,
-                ownerEmail: targetUser.email,
-                expiresAt: result.expiresAt,
-                createdAt: result.createdAt,
-            };
-        } catch (error) {
-            if (error instanceof NotFoundException || error instanceof ForbiddenException) {
-                throw error;
-            }
-            console.error('Error al crear la API key de servicio:', error);
-            throw new InternalServerErrorException('Error al crear la API key de servicio');
-        }
-    }
-
-    /**
-     * Ver docstring de `createServiceApiKey` para el detalle de la política.
-     * Lanza `ForbiddenException` (403) si el requester NO tiene permiso para
-     * asignar la key a `targetUser`.
-     */
-    private async assertCanAssignServiceApiKeyTo(requestingUser: User, targetUser: User): Promise<void> {
-        const isRequesterSuperAdmin = requestingUser.roles?.some((role) => role.name === PLATFORM_SUPER_ADMIN_ROLE) ?? false;
-        if (isRequesterSuperAdmin) {
-            return;
-        }
-
-        const isTargetSuperAdmin = targetUser.roles?.some((role) => role.name === PLATFORM_SUPER_ADMIN_ROLE) ?? false;
-        if (isTargetSuperAdmin) {
-            throw new ForbiddenException(
-                'No tiene permisos de plataforma para asignar una API key de servicio a una cuenta de super-administrador',
-            );
-        }
-
-        const [requesterOrgId, targetOrgId] = await Promise.all([
-            resolveOrganizationIdForUser(requestingUser.id, this.dataSource),
-            resolveOrganizationIdForUser(targetUser.id, this.dataSource),
-        ]);
-
-        if (!requesterOrgId || requesterOrgId !== targetOrgId) {
-            throw new ForbiddenException(
-                'Solo puede asignar la API key de servicio a un usuario de su misma organización',
-            );
-        }
-    }
+    throw new ForbiddenException(
+      decision.reason === 'target-is-super-admin'
+        ? 'No tiene permisos de plataforma para asignar una API key de servicio a una cuenta de super-administrador'
+        : 'Solo puede asignar la API key de servicio a un usuario de su misma organización',
+    );
+  }
 }

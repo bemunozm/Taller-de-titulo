@@ -4,31 +4,61 @@ import { DigitalConciergeService } from '../../digital-concierge/services/digita
 import type { AuthorizedContext } from '../types/authorized-context.type';
 import type { VigiliaTool } from '../types/vigilia-tool.type';
 
+/**
+ * Topes de la entrada (Fase 4 · P6.M, corrección QA), acordes a las columnas
+ * de `concierge_sessions`. `nombre`, `motivo` y `casa` se guardan tal cual:
+ * mismo largo que la columna (128 / 256 / 50); antes un valor más largo
+ * llegaba a la BD y respondía 500. `rut`, `telefono` y `patente` se
+ * normalizan y validan antes de guardarse (RUT formateado, +569XXXXXXXX,
+ * patente sin espacios) y el valor guardado cabe en su columna (32 / 15 /
+ * 10); el tope de la entrada dictada es algo mayor para tolerar espacios y
+ * guiones de la transcripción, y acota el texto que vuelve en el mensaje de
+ * error.
+ */
+export const VISITOR_DATA_MAX_LENGTHS = {
+  nombre: 128,
+  rut: 32,
+  telefono: 32,
+  patente: 20,
+  motivo: 256,
+  casa: 50,
+} as const;
+
 const inputSchema = z.object({
   nombre: z
     .string()
     .min(1)
+    .max(VISITOR_DATA_MAX_LENGTHS.nombre)
     .optional()
     .describe('Nombre completo del visitante.'),
   rut: z
     .string()
     .min(1)
+    .max(VISITOR_DATA_MAX_LENGTHS.rut)
     .optional()
     .describe('RUT o pasaporte del visitante, tal como lo dictó.'),
   telefono: z
     .string()
     .min(1)
+    .max(VISITOR_DATA_MAX_LENGTHS.telefono)
     .optional()
     .describe('Teléfono de contacto del visitante.'),
   patente: z
     .string()
     .min(1)
+    .max(VISITOR_DATA_MAX_LENGTHS.patente)
     .optional()
     .describe('Patente del vehículo, si el visitante viene motorizado.'),
-  motivo: z.string().min(1).optional().describe('Motivo de la visita.'),
+  motivo: z
+    .string()
+    .min(1)
+    .max(VISITOR_DATA_MAX_LENGTHS.motivo)
+    .optional()
+    .describe('Motivo de la visita.'),
   casa: z
     .string()
     .min(1)
+    .max(VISITOR_DATA_MAX_LENGTHS.casa)
     .optional()
     .describe('Número/código de la casa o departamento de destino.'),
 });
@@ -91,6 +121,11 @@ export class GuardarDatosVisitanteTool
   // introduce granularidad por-tool todavía (Fase 2 la agrega junto con la
   // política de autonomía real).
   readonly requiredScopes = ['digital-concierge.access'];
+  /**
+   * Fase 4 · P4.B (D8): conversación con el visitante, disponible en todos
+   * los canales con identidad (citófono físico, kiosko web y humano).
+   */
+  readonly allowedChannels = ['physical-hub', 'web-kiosk', 'human'] as const;
 
   constructor(private readonly conciergeService: DigitalConciergeService) {}
 

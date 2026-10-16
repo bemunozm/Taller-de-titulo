@@ -242,3 +242,24 @@ Para visitas vehiculares:
 - [ ] Dashboard de estadísticas de visitas
 - [ ] Integración con sistema de control de acceso físico
 - [ ] Foto captura al momento de entrada/salida
+
+## Alcance por condominio y por familia (Fase 4 · P5)
+
+- **Condominio:** toda visita tiene `organizationId` (el del anfitrión o el del
+  actor). Un actor sin condominio no ve ninguna visita y recibe 403 al crear.
+  El super-admin crea con un anfitrión que pertenezca a una familia de un
+  condominio (si no, 400).
+- **Familia (`condominium.view-all`):** sin ese permiso (el Residente), todas
+  las rutas (`GET /visits`, `/active`, `/pending`, `/qr/:qrCode`,
+  `/plate/:plate`, `/:id`, `PATCH`, `cancel`, `DELETE`, check-in/out) solo
+  alcanzan las visitas de su familia (`visit.family`) o en las que es el
+  anfitrión; fuera de alcance → 404. Al crear o reasignar, el anfitrión debe
+  ser él o alguien de su familia (403). Sin familia, solo las suyas.
+- **`qrCode`:** es una credencial. Solo la recibe el anfitrión o su familia, en
+  TODAS las respuestas (también la del alta, corrección P5): el Conserje o el
+  Administrador que crea una visita para otro recibe `qrCode: null`. En la
+  auditoría (`audit_logs`) el `qrCode` siempre va `[REDACTED]`.
+- **Anfitrión embebido:** quien no tiene `users.update` lo recibe como
+  `{ id, name }`.
+- **LPR:** una visita válida cuyo anfitrión ya no es miembro activo del
+  condominio no abre sola: la decide el conserje.

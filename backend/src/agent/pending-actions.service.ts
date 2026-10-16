@@ -28,6 +28,74 @@ import { auditToolCall, describeToolError } from './tool-audit.util';
 import type { AuthorizedContext } from './types/authorized-context.type';
 import type { VigiliaTool } from './types/vigilia-tool.type';
 import type { TenantScope } from '../common/tenant/tenant-context.types';
+import { ABRIR_ACCESO_TOOL_NAME } from './tools/abrir-acceso.tool';
+import { isAgentChannel, type AgentChannel } from './agent-channel';
+import { isToolAllowedOnChannel } from './tool-access.util';
+import { isInTenantScope } from '../common/tenant/tenant-context.util';
+import { scrubPiiInText } from '../common/privacy/pii-mask';
+import { redactPersonalData } from '../common/privacy/pii-redaction';
+
+/**
+ * Antigüedad máxima para ejecutar una acción aprobada (Fase 4 · P4.B, cyber
+ * B1): 15 minutos, el mismo timeout de la sesión del citófono. Pasado ese
+ * tiempo, el visitante que la originó ya no está esperando.
+ */
+export const PENDING_ACTION_MAX_AGE_MS = 15 * 60_000;
+
+/**
+ * ¿La tool ejecutada abrió un acceso físico? Solo `abrir_acceso` lo hace, y lo
+ * confirma con `abierto: true` (un hub físico recibió la orden). Cualquier
+ * otra salida cuenta como "no se abrió" (fail-closed).
+ */
+function accessWasOpened(toolName: string, output: unknown): boolean {
+  return (
+    toolName === ABRIR_ACCESO_TOOL_NAME &&
+    typeof output === 'object' &&
+    output !== null &&
+    (output as { abierto?: unknown }).abierto === true
+  );
+}
+
+/**
+ * Fase 4 · P7.L (docs/modulos/privacidad-ley-21719.md §3): lo que se persiste
+ * de una acción pendiente, con los datos personales minimizados.
+ *
+ *  - `contextSnapshot`: SOLO los campos de `AuthorizedContext` que necesita
+ *    el replay (condominio, usuario, rol, canal, scopes, request y sesión),
+ *    copiados uno a uno: un campo que se agregue al contexto no se persiste
+ *    por omisión. Ninguno es un dato personal (son ids y permisos).
+ *  - `input`: ÍNTEGRO mientras la acción se puede ejecutar (`pending`,
+ *    `approved` en curso y `failed`, que se reintenta con el mismo input):
+ *    `approve()` lo pasa tal cual a `tool.execute`. Al llegar a un estado
+ *    terminal (`executed`, `rejected`, `expired`) ya no se va a ejecutar, y
+ *    se reemplaza por su versión redactada (`redactPersonalData`).
+ *  - `result` y `lastError`: redactados al persistir. La primera aprobación
+ *    devuelve al aprobador la salida en memoria; una relectura (doble
+ *    aprobación) devuelve la persistida, ya redactada.
+ *
+ * Hoy solo `abrir_acceso` escala (input `{ tipo }`, salida `{ abierto,
+ * mensaje }`): no hay datos personales, pero la regla vale para cualquier
+ * tool que escale en el futuro.
+ */
+function replaySnapshotOf(ctx: AuthorizedContext): AuthorizedContext {
+  return {
+    tenantId: ctx.tenantId,
+    isSuperAdmin: ctx.isSuperAdmin,
+    userId: ctx.userId,
+    role: ctx.role,
+    channel: ctx.channel,
+    scopes: [...ctx.scopes],
+    requestId: ctx.requestId,
+    sessionId: ctx.sessionId,
+  };
+}
+
+/** Versión persistible (jsonb) de un valor redactado. */
+function redactedJson(value: unknown): Record<string, unknown> {
+  // TypeORM's `QueryDeepPartialEntity` no acepta un `unknown` literal para
+  // una columna jsonb en `update()` (ver el comentario de `result` abajo).
+  return redactPersonalData(value) as Record<string, unknown>;
+}
 
 /**
  * Fase 2, Bloque F2.1 (docs/modulos/agente-cerebro.md §12): mecanismo de
@@ -77,10 +145,11 @@ export class PendingActionsService {
       tenantId: ctx.tenantId,
       sessionId: ctx.sessionId ?? null,
       toolName: tool.name,
+      // Íntegro: lo necesita el replay (ver `replaySnapshotOf`).
       input,
       requestId: ctx.requestId,
       status: PendingActionStatus.PENDING,
-      contextSnapshot: ctx,
+      contextSnapshot: replaySnapshotOf(ctx),
       result: null,
       resolvedBy: null,
       resolvedAt: null,
@@ -110,7 +179,8 @@ export class PendingActionsService {
       throw new NotFoundException(`Acción pendiente "${id}" no encontrada`);
     }
 
-    if (!tenantScope.isSuperAdmin && action.tenantId !== tenantScope.tenantId) {
+    // Fase 4 · P5.C: un scope sin condominio no alcanza ninguna acción.
+    if (!isInTenantScope(action.tenantId, tenantScope)) {
       throw new ForbiddenException(
         `La acción pendiente "${id}" no pertenece al condominio del contexto autorizado`,
       );
@@ -213,9 +283,10 @@ export class PendingActionsService {
     // ANTES de ejecutar — ver docstring de `validateExecutionContext`. Si no
     // es válido, esto deja la acción en `expired` y lanza (fail-closed): el
     // catch de abajo nunca llega a invocar `tool.execute`.
+    // Fase 4 · P4.B (cyber B1, QA B9): también la antigüedad y el canal del
+    // snapshot (ver `validateReplay`).
+    const replayCtx = await this.validateReplay(action, tool);
     await this.validateExecutionContext(action, tool);
-
-    const replayCtx = action.contextSnapshot as AuthorizedContext;
     const startedAt = Date.now();
 
     try {
@@ -231,7 +302,9 @@ export class PendingActionsService {
           // null`) — el output de una `VigiliaTool` siempre es el objeto que
           // valida su `outputSchema` (Zod `z.object({...})` por convención,
           // ver §5 del diseño), nunca un primitivo.
-          result: output as Record<string, unknown>,
+          // Fase 4 · P7.L: terminal → input y result redactados.
+          input: redactedJson(action.input),
+          result: redactedJson(output),
         },
       );
 
@@ -245,7 +318,11 @@ export class PendingActionsService {
         Date.now() - startedAt,
       );
       await this.notifyResolution(action, tool, 'executed');
-      await this.notifyVisitorLive(action, 'approved');
+      await this.notifyVisitorLive(
+        action,
+        'approved',
+        accessWasOpened(tool.name, output),
+      );
 
       const finalAction = await this.repo.findOneOrFail({ where: { id } });
       return {
@@ -265,7 +342,8 @@ export class PendingActionsService {
         error,
       );
 
-      const errorMessage = describeToolError(error);
+      // Fase 4 · P7.L: sin RUT, teléfono, email ni patente (log y lastError).
+      const errorMessage = scrubPiiInText(describeToolError(error));
       this.logger.error(
         `Fallo al ejecutar la tool "${tool.name}" tras aprobación (acción pendiente "${id}"): ${errorMessage}`,
       );
@@ -274,6 +352,7 @@ export class PendingActionsService {
       // (reclamable por un reintento vía `approve()`, ver docstring arriba).
       // Claim acotado a `approved` porque es el único estado desde el que
       // este catch puede correr (lo acabamos de reclamar más arriba).
+      // `input` sigue íntegro: `failed` se puede reintentar.
       await this.repo.update(
         { id, status: PendingActionStatus.APPROVED },
         { status: PendingActionStatus.FAILED, lastError: errorMessage },
@@ -282,6 +361,49 @@ export class PendingActionsService {
 
       throw error;
     }
+  }
+
+  /**
+   * Fase 4 · P4.B (cyber B1, QA B9): condiciones del replay, ANTES de
+   * ejecutar. Si alguna falla, la acción pasa a `expired` sin ejecutar
+   * (fail-closed) y se lanza `BadRequestException`:
+   *  - Antigüedad: la acción tiene más de `PENDING_ACTION_MAX_AGE_MS` (15 min,
+   *    el mismo timeout de la sesión del citófono). No depende del timeout
+   *    perezoso de la sesión.
+   *  - Canal: la tool debe estar permitida en el canal del snapshot
+   *    (`isToolAllowedOnChannel`). Un snapshot sin canal (anterior a P4.B o
+   *    alterado) cuenta como `unknown` y nunca ejecuta.
+   *
+   * @returns el contexto del snapshot, con el canal normalizado.
+   */
+  private async validateReplay(
+    action: PendingAction,
+    tool: VigiliaTool<unknown, unknown>,
+  ): Promise<AuthorizedContext> {
+    const ageMs = Date.now() - new Date(action.createdAt).getTime();
+    if (!(ageMs <= PENDING_ACTION_MAX_AGE_MS)) {
+      const reason = `La acción tiene más de ${PENDING_ACTION_MAX_AGE_MS / 60_000} minutos`;
+      await this.expireAction(action, tool, reason);
+      throw new BadRequestException(
+        `La acción pendiente "${action.id}" expiró: ${reason}`,
+      );
+    }
+
+    const snapshot = action.contextSnapshot as AuthorizedContext;
+    const channel: AgentChannel = isAgentChannel(
+      (action.contextSnapshot as { channel?: unknown } | null)?.channel,
+    )
+      ? snapshot.channel
+      : 'unknown';
+    if (!isToolAllowedOnChannel(tool, channel)) {
+      const reason = `La tool "${tool.name}" no está disponible en el canal "${channel}" del contexto original`;
+      await this.expireAction(action, tool, reason);
+      throw new BadRequestException(
+        `La acción pendiente "${action.id}" expiró: ${reason}`,
+      );
+    }
+
+    return { ...snapshot, channel };
   }
 
   /**
@@ -345,6 +467,18 @@ export class PendingActionsService {
         `La acción pendiente "${action.id}" expiró: ${reason}`,
       );
     }
+
+    // Fase 4 · P4.B (cyber B1): una sesión de más de 15 min ya venció aunque
+    // nadie la haya marcado TIMEOUT todavía (el timeout de la sesión es
+    // perezoso: lo aplica quien la consulta).
+    const sessionAgeMs = Date.now() - new Date(session.startTime).getTime();
+    if (!(sessionAgeMs <= PENDING_ACTION_MAX_AGE_MS)) {
+      const reason = `La sesión de conserjería "${action.sessionId}" tiene más de ${PENDING_ACTION_MAX_AGE_MS / 60_000} minutos`;
+      await this.expireAction(action, tool, reason);
+      throw new BadRequestException(
+        `La acción pendiente "${action.id}" expiró: ${reason}`,
+      );
+    }
   }
 
   /**
@@ -359,12 +493,19 @@ export class PendingActionsService {
     tool: VigiliaTool<unknown, unknown> | null,
     reason: string,
   ): Promise<void> {
+    // Fase 4 · P7.L: terminal → input redactado; el motivo sin datos
+    // personales (log y lastError).
+    const safeReason = scrubPiiInText(reason);
     await this.repo.update(
       { id: action.id, status: PendingActionStatus.APPROVED },
-      { status: PendingActionStatus.EXPIRED, lastError: reason },
+      {
+        status: PendingActionStatus.EXPIRED,
+        lastError: safeReason,
+        input: redactedJson(action.input),
+      },
     );
     this.logger.warn(
-      `Acción pendiente "${action.id}" expiró antes de ejecutar: ${reason}`,
+      `Acción pendiente "${action.id}" expiró antes de ejecutar: ${safeReason}`,
     );
     await this.notifyResolution(action, tool, 'expired');
   }
@@ -410,12 +551,14 @@ export class PendingActionsService {
         status: PendingActionStatus.REJECTED,
         resolvedBy: resolvedByUserId,
         resolvedAt: new Date(),
+        // Fase 4 · P7.L: terminal → input redactado.
+        input: redactedJson(action.input),
       },
     );
 
     const rejected = await this.repo.findOneOrFail({ where: { id } });
     await this.notifyResolution(rejected, null, 'rejected');
-    await this.notifyVisitorLive(rejected, 'rejected');
+    await this.notifyVisitorLive(rejected, 'rejected', false);
     return rejected;
   }
 
@@ -530,11 +673,9 @@ export class PendingActionsService {
    *
    * Reusa EXACTAMENTE el mismo canal/patrón que
    * `DigitalConciergeService.respondToVisitor` (`visitor:response:<sessionId>`,
-   * ver su docstring) y el mismo mecanismo de entrega que ya usa
-   * `AbrirAccesoTool` para dirigir un evento al hub de la llamada
-   * (`HubGateway.sendToHub` si el hub propio de la sesión está conectado, si
-   * no `sendToOrganization` — nunca un broadcast global, mismo criterio anti
-   * cross-tenant que el hallazgo H2). NO se agrega un canal nuevo: es el
+   * ver su docstring): `HubGateway.sendVisitorResponse` lo entrega SOLO al
+   * dispositivo dueño de la sesión, sin caer al condominio (Fase 4 · P4, D7).
+   * NO se agrega un canal nuevo: es el
    * MISMO evento que ya escucha el cliente de voz
    * (`vigilia-hub/src/services/websocket-client.service.ts`), así que Sofía
    * puede reaccionar a la respuesta sin cambios en el hub.
@@ -549,6 +690,7 @@ export class PendingActionsService {
   private async notifyVisitorLive(
     action: PendingAction,
     outcome: 'approved' | 'rejected',
+    accessOpened: boolean,
   ): Promise<void> {
     if (!action.sessionId) {
       return;
@@ -564,20 +706,23 @@ export class PendingActionsService {
         return;
       }
 
-      const event = `visitor:response:${action.sessionId}`;
-      const payload = {
-        sessionId: action.sessionId,
+      // Fase 4 · P4: mismo contrato que `respondToVisitor`. `approved` y
+      // `entryRegistered` siempre van; `entryRegistered` es `true` solo si el
+      // acceso realmente se abrió (la tool confirmó que un hub físico recibió
+      // la orden), así el hub/kiosko nunca dice "pase" sin apertura.
+      const approved = outcome === 'approved';
+      const entryRegistered = approved && accessOpened;
+      this.hubGateway.sendVisitorResponse(session, {
+        approved,
+        entryRegistered,
         pendingActionId: action.id,
         toolName: action.toolName,
         outcome,
-        message:
-          outcome === 'approved'
-            ? 'El residente autorizó la solicitud, procesando...'
-            : 'El residente rechazó la solicitud.',
+        message: approved
+          ? 'El residente autorizó la solicitud, procesando...'
+          : 'El residente rechazó la solicitud.',
         timestamp: new Date(),
-      };
-
-      this.hubGateway.sendToSession(session, event, payload);
+      });
     } catch (error) {
       // No terminal: la sesión pudo cerrarse entre la escalada y la
       // aprobación (`findSessionForTenant` lanza `NotFoundException`/

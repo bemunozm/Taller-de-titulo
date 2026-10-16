@@ -1,4 +1,5 @@
 import type { ZodType } from 'zod';
+import type { IdentifiedAgentChannel } from '../agent-channel';
 import type { AuthorizedContext, Permission } from './authorized-context.type';
 
 /**
@@ -52,6 +53,16 @@ export interface VigiliaTool<TInput = unknown, TOutput = unknown> {
 
   /** Permisos (nombres `module.action` de DEFAULT_PERMISSIONS) requeridos para ejecutar. */
   readonly requiredScopes: Permission[];
+
+  /**
+   * Fase 4 · P4.B (D8, cyber B2): canales desde los que se puede ver y
+   * ejecutar la tool. OBLIGATORIO y sin default: cada tool declara su lista
+   * explícita (una tool nueva no queda abierta a todos los canales por
+   * omisión). `unknown` no se puede declarar y nunca ejecuta. El dispatcher
+   * lo evalúa ANTES que los scopes, y `ToolRegistryService.getAvailableFor`
+   * lo usa para no exponerle al modelo tools que no podría ejecutar.
+   */
+  readonly allowedChannels: readonly IdentifiedAgentChannel[];
 
   /** Lógica de la tool — delega el cálculo real al servicio de dominio inyectado. */
   execute(ctx: AuthorizedContext, input: TInput): Promise<TOutput>;

@@ -5,6 +5,7 @@ import { NON_TERMINAL_VISIT_STATUSES } from '../../visits/visits.constants';
 import { VisitsService } from '../../visits/visits.service';
 import type { AuthorizedContext } from '../types/authorized-context.type';
 import type { VigiliaTool } from '../types/vigilia-tool.type';
+import { isInTenantScope } from '../../common/tenant/tenant-context.util';
 
 const inputSchema = z.object({
   casa: z
@@ -17,7 +18,7 @@ const inputSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      'Si es true (default), solo devuelve visitas pendientes o en curso — no completadas/canceladas/expiradas/rechazadas.',
+      'Si es true (default), solo devuelve visitas autorizadas pendientes o en curso — no solicitudes sin aprobar por el residente ni completadas/canceladas/expiradas/rechazadas.',
     ),
 });
 type ConsultarVisitasInput = z.infer<typeof inputSchema>;
@@ -69,7 +70,13 @@ export class ConsultarVisitasTool
   readonly outputSchema = outputSchema;
   readonly access = 'read' as const;
   readonly requiresApproval = false;
-  readonly requiredScopes = ['digital-concierge.access'];
+  /**
+   * Fase 4 · P4.B (D8): consulta de datos del condominio, solo para humanos
+   * con `digital-concierge.manage` (Conserje, Administrador). Un hub o un
+   * kiosko no la ven ni la ejecutan; el prompt de voz no la usa.
+   */
+  readonly requiredScopes = ['digital-concierge.manage'];
+  readonly allowedChannels = ['human'] as const;
 
   constructor(
     private readonly familiesService: FamiliesService,
@@ -82,10 +89,7 @@ export class ConsultarVisitasTool
   ): Promise<ConsultarVisitasOutput> {
     const family = await this.familiesService.findByDepartment(input.casa);
 
-    if (
-      !family ||
-      (!ctx.isSuperAdmin && family.organizationId !== ctx.tenantId)
-    ) {
+    if (!family || !isInTenantScope(family.organizationId, ctx)) {
       return {
         encontrado: false,
         mensaje: `No se encontró ninguna familia registrada en ${input.casa}.`,
@@ -95,7 +99,9 @@ export class ConsultarVisitasTool
     const soloActivas = input.soloActivas ?? true;
     const allVisits = await this.visitsService.findAll({ familyId: family.id });
     const visits = soloActivas
-      ? allVisits.filter((visit) => NON_TERMINAL_VISIT_STATUSES.has(visit.status))
+      ? allVisits.filter((visit) =>
+          NON_TERMINAL_VISIT_STATUSES.has(visit.status),
+        )
       : allVisits;
 
     return {

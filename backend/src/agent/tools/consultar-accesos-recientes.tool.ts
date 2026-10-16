@@ -36,7 +36,8 @@ const DEFAULT_LIMIT = 10;
 /**
  * Tercera `VigiliaTool` de consulta de Fase 2 (Bloque F2.1 —
  * docs/modulos/agente-cerebro.md §12). `access: 'read'`. Fuente: `AccessAttempt`
- * (decisión de acceso ya tomada — Permitido/Denegado/Pendiente), no
+ * (decisión de acceso ya tomada — Permitido/Denegado/Pendiente, o Duplicado
+ * para una lectura repetida sin efectos, Fase 4 · P3), no
  * `PlateDetection` cruda: es la entidad que responde "qué pasó en el acceso",
  * que es lo que un residente/conserje pregunta por el citófono/chat.
  *
@@ -56,12 +57,18 @@ export class ConsultarAccesosRecientesTool
 {
   readonly name = 'consultar_accesos_recientes';
   readonly description =
-    'Lista los accesos (entradas/salidas de vehículos) más recientes del condominio, con su decisión (Permitido/Denegado/Pendiente) y el residente asociado si aplica.';
+    'Lista los accesos (entradas/salidas de vehículos) más recientes del condominio, con su decisión (Permitido/Denegado/Pendiente/Duplicado) y el residente asociado si aplica. "Duplicado" es una lectura repetida de una entrada o salida que ya quedó registrada: no abrió el portón ni cambió nada, no es un acceso nuevo.';
   readonly inputSchema = inputSchema;
   readonly outputSchema = outputSchema;
   readonly access = 'read' as const;
   readonly requiresApproval = false;
-  readonly requiredScopes = ['digital-concierge.access'];
+  /**
+   * Fase 4 · P4.B (D8): consulta de datos del condominio, solo para humanos
+   * con `digital-concierge.manage` (Conserje, Administrador). Un hub o un
+   * kiosko no la ven ni la ejecutan; el prompt de voz no la usa.
+   */
+  readonly requiredScopes = ['digital-concierge.manage'];
+  readonly allowedChannels = ['human'] as const;
 
   constructor(private readonly detectionsService: DetectionsService) {}
 

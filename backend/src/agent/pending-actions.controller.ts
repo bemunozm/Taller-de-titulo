@@ -19,6 +19,7 @@ import type { Request } from 'express';
 import { AuthGuard } from '../auth/auth.guard';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
 import { AuthorizationGuard } from '../auth/guards/authorization.guard';
+import { RateLimit } from '../common/rate-limit/rate-limit.decorator';
 import { TenantContextService } from '../common/tenant/tenant-context.service';
 import { PendingActionsService } from './pending-actions.service';
 
@@ -38,6 +39,9 @@ type AuthenticatedRequest = Request & { user?: { id: string } };
  * acción del agente" encaja en "gestionar conserjería digital" más que en
  * `digital-concierge.access` (que es el baseline de "puede operar el
  * agente", ver `authorized-context.factory.ts`).
+ *
+ * Rate limit (Fase 4 · P4.B, cyber B5): `pending-action-resolve` (20/min por
+ * usuario) en aprobar y rechazar; corre después de los guards de la clase.
  *
  * Aislamiento de tenant: `TenantContextService` (request-scoped, ya resuelto
  * por `TenantInterceptor` global) arma el `TenantScope` que
@@ -64,6 +68,7 @@ export class PendingActionsController {
    * `executed` devuelve el mismo `result`, sin re-ejecutar la tool.
    */
   @Post(':id/approve')
+  @RateLimit('pending-action-resolve')
   @RequirePermissions('digital-concierge.manage')
   @ApiOperation({
     summary: 'Aprobar una acción del agente pendiente de autorización',
@@ -99,6 +104,7 @@ export class PendingActionsController {
    * Rechaza — estado terminal, la tool nunca se ejecuta.
    */
   @Post(':id/reject')
+  @RateLimit('pending-action-resolve')
   @RequirePermissions('digital-concierge.manage')
   @ApiOperation({
     summary: 'Rechazar una acción del agente pendiente de autorización',

@@ -3,6 +3,11 @@ import { z } from 'zod';
 import { VehiclesService } from '../../vehicles/vehicles.service';
 import type { AuthorizedContext } from '../types/authorized-context.type';
 import type { VigiliaTool } from '../types/vigilia-tool.type';
+import { isInTenantScope } from '../../common/tenant/tenant-context.util';
+import {
+  vehicleAccessRuleFor,
+  type VehicleAccessRule,
+} from '../../vehicles/vehicle-access';
 
 const inputSchema = z.object({
   patente: z
@@ -21,12 +26,20 @@ const outputSchema = z.object({
   marca: z.string().nullable().optional(),
   modelo: z.string().nullable().optional(),
   color: z.string().nullable().optional(),
-  tipo: z.string().nullable().optional(),
+  carroceria: z.string().nullable().optional(),
   nivelAcceso: z.string().nullable().optional(),
+  accesoPorton: z.string().optional(),
   activo: z.boolean().nullable().optional(),
   propietario: z.string().nullable().optional(),
 });
 type ConsultarVehiculoOutput = z.infer<typeof outputSchema>;
+
+/** Qué hace el portón con el vehículo, en palabras para el agente (P5.C). */
+const GATE_ACCESS_DESCRIPTION: Record<VehicleAccessRule, string> = {
+  allow: 'abre (vehículo de residente)',
+  'requires-visit': 'abre solo con una visita válida',
+  concierge: 'lo decide el conserje',
+};
 
 /**
  * Primera `VigiliaTool` de consulta de Fase 2 (Bloque F2.1 —
@@ -48,12 +61,18 @@ export class ConsultarVehiculoTool
 {
   readonly name = 'consultar_vehiculo';
   readonly description =
-    'Busca un vehículo registrado por su patente. Devuelve marca, modelo, color, tipo de acceso y propietario si existe y pertenece a este condominio.';
+    'Busca un vehículo registrado por su patente. Devuelve marca, modelo, color, carrocería, nivel de acceso (residente, visitante o servicio), qué hace el portón con él y propietario si existe y pertenece a este condominio.';
   readonly inputSchema = inputSchema;
   readonly outputSchema = outputSchema;
   readonly access = 'read' as const;
   readonly requiresApproval = false;
-  readonly requiredScopes = ['digital-concierge.access'];
+  /**
+   * Fase 4 · P4.B (D8): consulta de datos del condominio, solo para humanos
+   * con `digital-concierge.manage` (Conserje, Administrador). Un hub o un
+   * kiosko no la ven ni la ejecutan; el prompt de voz no la usa.
+   */
+  readonly requiredScopes = ['digital-concierge.manage'];
+  readonly allowedChannels = ['human'] as const;
 
   constructor(private readonly vehiclesService: VehiclesService) {}
 
@@ -63,10 +82,7 @@ export class ConsultarVehiculoTool
   ): Promise<ConsultarVehiculoOutput> {
     const vehicle = await this.vehiclesService.findByPlate(input.patente);
 
-    if (
-      !vehicle ||
-      (!ctx.isSuperAdmin && vehicle.organizationId !== ctx.tenantId)
-    ) {
+    if (!vehicle || !isInTenantScope(vehicle.organizationId, ctx)) {
       return {
         encontrado: false,
         mensaje: `No se encontró ningún vehículo registrado con patente ${input.patente}.`,
@@ -79,8 +95,12 @@ export class ConsultarVehiculoTool
       marca: vehicle.brand,
       modelo: vehicle.model,
       color: vehicle.color,
-      tipo: vehicle.vehicleType,
+      // Fase 4 · P5.C (modelo corregido): `vehicleType` es la carrocería y
+      // `accessLevel` lo único que decide el portón.
+      carroceria: vehicle.vehicleType,
       nivelAcceso: vehicle.accessLevel,
+      accesoPorton:
+        GATE_ACCESS_DESCRIPTION[vehicleAccessRuleFor(vehicle.accessLevel)],
       activo: vehicle.active,
       propietario: vehicle.owner?.name ?? null,
     };

@@ -11,7 +11,7 @@ import {
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiUnauthorizedResponse, ApiQuery, ApiBody } from '@nestjs/swagger';
 import { AuthGuard } from '../auth/auth.guard';
 import { NotificationsService } from './notifications.service';
-import { GetNotificationsDto } from './dto/get-notifications.dto';
+import { ListMyNotificationsDto } from './dto/list-my-notifications.dto';
 import { MarkAsReadDto } from './dto/mark-as-read.dto';
 
 @ApiTags('Gestión de Notificaciones')
@@ -68,7 +68,8 @@ export class NotificationsController {
   })
   async getNotifications(
     @Request() req: any,
-    @Query() dto: GetNotificationsDto,
+    // P5.B (IDOR): sin `recipientId`; siempre las del usuario de la sesión.
+    @Query() dto: ListMyNotificationsDto,
   ) {
     const userId = req.user.id;
     this.logger.log(`📬 Obteniendo notificaciones para usuario ${userId}`);

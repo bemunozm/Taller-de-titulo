@@ -6,6 +6,7 @@ import {
 } from '../auth/utils/permissions.util';
 import type { AuthenticatedHub } from '../hub/guards/hub-auth.guard';
 import type { TenantContext } from '../common/tenant/tenant-context.types';
+import { channelForHubType } from './agent-channel';
 import type { AuthorizedContext } from './types/authorized-context.type';
 
 /**
@@ -59,12 +60,15 @@ export class AuthorizedContextFactory {
       isSuperAdmin: false,
     };
 
+    // Fase 4 · P4.B (D6): el canal sale de la credencial ya autenticada
+    // (`request.hub.type` o la sesión humana), nunca del body.
     if (request.hub) {
       return {
         tenantId: tenantContext.organizationId,
         isSuperAdmin: false,
         userId: undefined,
         role: 'hub',
+        channel: channelForHubType(request.hub.type),
         scopes: [...HUB_BASELINE_SCOPES],
         requestId: uuidv4(),
       };
@@ -76,6 +80,7 @@ export class AuthorizedContextFactory {
         isSuperAdmin: tenantContext.isSuperAdmin,
         userId: request.user.id,
         role: request.user.roles?.[0]?.name ?? 'user',
+        channel: 'human',
         scopes: getUserPermissionNames(request.user),
         requestId: uuidv4(),
       };
@@ -83,13 +88,15 @@ export class AuthorizedContextFactory {
 
     // ConciergeAuthGuard exige uno de los dos transportes — llegar acá sería
     // un bug del guard, no un caso de negocio válido. Se devuelve un
-    // contexto sin scopes (deniega todo) en vez de lanzar, para que el
-    // dispatcher sea el único punto de decisión de autorización.
+    // contexto sin scopes y con canal `unknown` (deniega todo) en vez de
+    // lanzar, para que el dispatcher sea el único punto de decisión de
+    // autorización.
     return {
       tenantId: null,
       isSuperAdmin: false,
       userId: undefined,
       role: 'unknown',
+      channel: 'unknown',
       scopes: [],
       requestId: uuidv4(),
     };

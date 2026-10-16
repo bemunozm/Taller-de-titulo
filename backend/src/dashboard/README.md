@@ -69,7 +69,8 @@ Todos los endpoints requieren:
 - `detectionsWeek`: Detecciones última semana
 - `detectionsMonth`: Detecciones último mes
 - `activeVisits`: Visitas activas
-- `pendingVisits`: Visitas pendientes
+- `pendingVisits`: Visitas pendientes (programadas sin ingresar + listas para reingresar)
+- `awaitingApprovalVisits`: Solicitudes del conserje digital esperando la aprobación del residente
 - `completedVisitsToday`: Visitas completadas hoy
 - `unauthorizedVehicles`: Vehículos no autorizados
 - `alertsPending`: Alertas pendientes

@@ -1,19 +1,59 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MailerService } from '@nestjs-modules/mailer';
+import { maskPhone, scrubPiiInText } from '../privacy/pii-mask';
+import { errorMessage } from '../utils/error-message.util';
+import { parseBooleanFlag } from '../../config/env.validation';
+import { escapeHtml, safeHttpUrl } from '../utils/escape-html.util';
+
+/**
+ * Dominio al que se manda el "SMS": Mailtrap convierte `sms+<número>@...` en
+ * un SMS de prueba. Es un sandbox, no un proveedor de SMS real.
+ */
+export const SMS_GATEWAY_DOMAIN = 'sandbox.mailtrap.io';
+
+/** Dominios de sandbox (el mensaje no llega a un teléfono real). */
+const SANDBOX_SMS_DOMAINS: ReadonlySet<string> = new Set([
+  'sandbox.mailtrap.io',
+]);
+
+/** ¿El destino del "SMS" es un sandbox de pruebas? */
+export function isSandboxSmsDomain(domain: string): boolean {
+  return SANDBOX_SMS_DOMAINS.has(domain.toLowerCase());
+}
 
 /**
  * Servicio para enviar SMS usando Mailtrap
  * Mailtrap soporta SMS testing en sandbox
+ *
+ * Corrección P7 (cyber B6, decisión de Nova): detrás de
+ * `VISITOR_QR_SMS_ENABLED` (default `false`, validado en
+ * config/env.validation.ts). El "SMS" es un email al sandbox de Mailtrap que
+ * lleva el teléfono del visitante y el QR (una credencial de acceso).
+ * Apagado: no se envía nada ni se registra el teléfono (ni enmascarado).
+ * Encendido: el comportamiento de siempre, con logs enmascarados y un `warn`
+ * en cada envío a un sandbox.
  */
 @Injectable()
 export class SmsService {
   private readonly logger = new Logger(SmsService.name);
+  private readonly enabled: boolean;
 
   constructor(
     private readonly mailerService: MailerService,
     private readonly configService: ConfigService,
-  ) {}
+  ) {
+    this.enabled = parseBooleanFlag(
+      'VISITOR_QR_SMS_ENABLED',
+      this.configService.get<string>('VISITOR_QR_SMS_ENABLED'),
+      false,
+    );
+  }
+
+  /** ¿Está habilitado el envío del QR por "SMS" (`VISITOR_QR_SMS_ENABLED`)? */
+  isEnabled(): boolean {
+    return this.enabled;
+  }
 
   /**
    * Envía un SMS con un QR code adjunto (simulado como imagen)
@@ -21,17 +61,30 @@ export class SmsService {
    * @param visitorName Nombre del visitante
    * @param qrDataUrl QR code en formato data URL (base64)
    * @param visitId ID de la visita
+   * @returns `true` si se envió; `false` si el envío está desactivado.
    */
   async sendQRCodeSMS(params: {
     phone: string;
     visitorName: string;
     qrDataUrl: string;
     visitId: string;
-  }): Promise<void> {
+  }): Promise<boolean> {
     const { phone, visitorName, qrDataUrl, visitId } = params;
 
+    if (!this.enabled) {
+      this.logger.debug(
+        `Envío del QR por SMS desactivado (VISITOR_QR_SMS_ENABLED): visita ${visitId}`,
+      );
+      return false;
+    }
+
     try {
-      this.logger.log(`📱 Enviando QR por SMS a ${phone} (visitante: ${visitorName})`);
+      // Fase 4 · P7.L: sin el nombre del visitante y con el teléfono
+      // enmascarado (docs/modulos/privacidad-ley-21719.md §3).
+      this.logger.log(
+        `📱 Enviando QR por SMS a ${maskPhone(phone)} (visita ${visitId})`,
+      );
+      this.warnIfSandbox(`el QR de la visita ${visitId}`);
 
       // Normalizar número de teléfono (remover espacios y caracteres especiales)
       const normalizedPhone = this.normalizePhoneNumber(phone);
@@ -43,7 +96,7 @@ export class SmsService {
       // Simular SMS mediante email a Mailtrap
       // En producción, esto se reemplazaría con una API de SMS real
       await this.mailerService.sendMail({
-        to: `sms+${normalizedPhone}@sandbox.mailtrap.io`, // Formato especial de Mailtrap para SMS
+        to: `sms+${normalizedPhone}@${SMS_GATEWAY_DOMAIN}`, // Formato especial de Mailtrap para SMS
         subject: `QR de Visita - Condominio San Lorenzo`,
         html: message,
         attachments: [
@@ -56,9 +109,16 @@ export class SmsService {
         ],
       });
 
-      this.logger.log(`✅ SMS/QR enviado exitosamente a ${normalizedPhone}`);
+      this.logger.log(
+        `✅ SMS/QR enviado exitosamente a ${maskPhone(normalizedPhone)} (visita ${visitId})`,
+      );
+      return true;
     } catch (error) {
-      this.logger.error(`❌ Error al enviar SMS a ${phone}:`, error);
+      // Solo el mensaje (enmascarado): el error del transporte de correo
+      // puede repetir el destinatario (`sms+<teléfono>@...`).
+      this.logger.error(
+        `❌ Error al enviar SMS a ${maskPhone(phone)} (visita ${visitId}): ${scrubPiiInText(errorMessage(error))}`,
+      );
       throw error;
     }
   }
@@ -68,6 +128,14 @@ export class SmsService {
    * Elimina espacios, guiones y caracteres especiales
    * Agrega +56 si es un número chileno sin código de país
    */
+  private warnIfSandbox(what: string): void {
+    if (isSandboxSmsDomain(SMS_GATEWAY_DOMAIN)) {
+      this.logger.warn(
+        `El "SMS" con ${what} va a un sandbox (${SMS_GATEWAY_DOMAIN}), no a un teléfono real`,
+      );
+    }
+  }
+
   private normalizePhoneNumber(phone: string): string {
     // Remover espacios, guiones, paréntesis
     let normalized = phone.replace(/[\s\-()]/g, '');
@@ -88,8 +156,16 @@ export class SmsService {
   /**
    * Genera el template del mensaje SMS/Email
    */
-  private generateSMSMessageTemplate(visitorName: string, visitId: string): string {
-    const frontendUrl = this.configService.get('FRONTEND_URL') || 'http://localhost:5173';
+  private generateSMSMessageTemplate(
+    visitorName: string,
+    visitId: string,
+  ): string {
+    // Escapados: el nombre lo dicta el visitante por voz.
+    const frontendUrl = safeHttpUrl(
+      this.configService.get<string>('FRONTEND_URL') || 'http://localhost:5173',
+    );
+    const safeVisitorName = escapeHtml(visitorName);
+    const safeVisitId = escapeHtml(visitId);
 
     return `
       <!DOCTYPE html>
@@ -195,7 +271,7 @@ export class SmsService {
           
           <div class="content">
             <div class="greeting">
-              ¡Hola ${visitorName}! 👋
+              ¡Hola ${safeVisitorName}! 👋
             </div>
             
             <div class="message">
@@ -226,7 +302,7 @@ export class SmsService {
             </div>
             
             <div class="visit-id">
-              ID de Visita: ${visitId}
+              ID de Visita: ${safeVisitId}
             </div>
           </div>
           
@@ -247,19 +323,28 @@ export class SmsService {
   /**
    * Envía un SMS de texto simple (sin QR)
    */
-  async sendSimpleSMS(phone: string, message: string): Promise<void> {
+  async sendSimpleSMS(phone: string, message: string): Promise<boolean> {
+    // Corrección P7 (cyber B6): mismo interruptor que el QR.
+    if (!this.enabled) {
+      this.logger.debug('Envío de SMS desactivado (VISITOR_QR_SMS_ENABLED)');
+      return false;
+    }
     try {
       const normalizedPhone = this.normalizePhoneNumber(phone);
+      this.warnIfSandbox('un SMS simple');
 
       await this.mailerService.sendMail({
-        to: `sms+${normalizedPhone}@sandbox.mailtrap.io`,
+        to: `sms+${normalizedPhone}@${SMS_GATEWAY_DOMAIN}`,
         subject: 'Condominio San Lorenzo',
         text: message,
       });
 
-      this.logger.log(`✅ SMS simple enviado a ${normalizedPhone}`);
+      this.logger.log(`✅ SMS simple enviado a ${maskPhone(normalizedPhone)}`);
+      return true;
     } catch (error) {
-      this.logger.error(`❌ Error al enviar SMS:`, error);
+      this.logger.error(
+        `❌ Error al enviar SMS a ${maskPhone(phone)}: ${scrubPiiInText(errorMessage(error))}`,
+      );
       throw error;
     }
   }

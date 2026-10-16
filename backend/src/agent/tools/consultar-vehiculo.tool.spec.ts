@@ -27,6 +27,7 @@ describe('ConsultarVehiculoTool', () => {
       isSuperAdmin: false,
       userId: undefined,
       role: 'hub',
+      channel: 'physical-hub',
       scopes: ['digital-concierge.access'],
       requestId: 'req-1',
       ...overrides,
@@ -45,15 +46,15 @@ describe('ConsultarVehiculoTool', () => {
       model: 'Yaris',
       color: 'Rojo',
       year: 2020,
-      vehicleType: 'residente',
-      accessLevel: 'permanente',
+      vehicleType: 'auto',
+      accessLevel: 'residente',
       active: true,
       owner: { id: 'user-1', name: 'Juan Pérez' } as unknown as User,
       ownerId: 'user-1',
       createdAt: new Date(),
       updatedAt: new Date(),
       ...overrides,
-    } as Vehicle;
+    };
   }
 
   beforeEach(() => {
@@ -83,11 +84,45 @@ describe('ConsultarVehiculoTool', () => {
       marca: 'Toyota',
       modelo: 'Yaris',
       color: 'Rojo',
-      tipo: 'residente',
-      nivelAcceso: 'permanente',
+      carroceria: 'auto',
+      nivelAcceso: 'residente',
+      accesoPorton: 'abre (vehículo de residente)',
       activo: true,
       propietario: 'Juan Pérez',
     });
+  });
+
+  it.each([
+    ['visitante', 'abre solo con una visita válida'],
+    ['servicio', 'lo decide el conserje'],
+    [null, 'lo decide el conserje'],
+  ])(
+    'P5.C: nivelAcceso %p -> accesoPorton %p (solo accessLevel decide el portón)',
+    async (accessLevel, accesoPorton) => {
+      vehiclesService.findByPlate.mockResolvedValue(
+        makeVehicle('condo-A', { vehicleType: 'moto', accessLevel }),
+      );
+
+      const result = await tool.execute(makeCtx(), { patente: 'ABCD12' });
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          carroceria: 'moto',
+          nivelAcceso: accessLevel,
+          accesoPorton,
+        }),
+      );
+    },
+  );
+
+  it('P5.C: un contexto sin condominio no ve vehículos sin condominio (null === null ya no calza)', async () => {
+    vehiclesService.findByPlate.mockResolvedValue(makeVehicle(null));
+
+    const result = await tool.execute(makeCtx({ tenantId: null }), {
+      patente: 'ABCD12',
+    });
+
+    expect(result.encontrado).toBe(false);
   });
 
   describe('regresión cross-tenant (§6 del diseño)', () => {

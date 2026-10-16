@@ -38,12 +38,7 @@ describe('AbrirAccesoTool', () => {
   >;
   let familiesService: jest.Mocked<Pick<FamiliesService, 'findByDepartment'>>;
   let visitsService: jest.Mocked<Pick<VisitsService, 'findAll'>>;
-  let hubGateway: jest.Mocked<
-    Pick<
-      HubGateway,
-      'isHubConnected' | 'sendToHub' | 'sendToOrganization' | 'sendToSession'
-    >
-  >;
+  let hubGateway: jest.Mocked<Pick<HubGateway, 'sendDoorOpen'>>;
 
   const NOW = new Date('2026-07-12T12:00:00Z');
 
@@ -55,6 +50,7 @@ describe('AbrirAccesoTool', () => {
       isSuperAdmin: false,
       userId: undefined,
       role: 'hub',
+      channel: 'physical-hub',
       scopes: ['digital-concierge.access'],
       requestId: 'req-1',
       sessionId: 'session-1',
@@ -141,29 +137,10 @@ describe('AbrirAccesoTool', () => {
     conciergeService = { findSessionForTenant: jest.fn() };
     familiesService = { findByDepartment: jest.fn() };
     visitsService = { findAll: jest.fn() };
-    hubGateway = {
-      isHubConnected: jest.fn().mockReturnValue(false),
-      sendToHub: jest.fn().mockReturnValue(true),
-      sendToOrganization: jest.fn(),
-      // Réplica fiel de `HubGateway.sendToSession` real (limpieza post-
-      // auditoría, dedup DUP1): delega en los mocks de arriba en vez de
-      // mockearse por separado, así las aserciones existentes sobre
-      // `sendToHub`/`sendToOrganization` siguen validando el mismo criterio
-      // (hub propio conectado vs. broadcast por organización) sin cambios.
-      sendToSession: jest.fn(
-        (
-          session: { hubId: string | null; organizationId: string | null },
-          event: string,
-          data: unknown,
-        ) => {
-          if (session.hubId && hubGateway.isHubConnected(session.hubId)) {
-            hubGateway.sendToHub(session.hubId, event, data);
-            return;
-          }
-          hubGateway.sendToOrganization(session.organizationId, event, data);
-        },
-      ),
-    };
+    // Fase 4 · P4 (D7): el enrutamiento (solo hubs físicos, el de la sesión o
+    // los del condominio) vive en `HubGateway.sendDoorOpen` y se prueba en
+    // hub.gateway.spec.ts; acá basta con la cantidad de hubs que recibieron.
+    hubGateway = { sendDoorOpen: jest.fn().mockReturnValue(1) };
 
     tool = new AbrirAccesoTool(
       conciergeService as unknown as DigitalConciergeService,
@@ -316,6 +293,24 @@ describe('AbrirAccesoTool', () => {
       expect(needsApproval).toBe(true);
     });
 
+    it('Fase 4 · P3: una solicitud AWAITING_APPROVAL que matchea la identidad NO es pre-aprobada — escala (true)', async () => {
+      conciergeService.findSessionForTenant.mockResolvedValue(makeSession());
+      mockVerifiedIdentity({ kind: 'plate', plate: 'ABCD12' });
+      familiesService.findByDepartment.mockResolvedValue(makeFamily('condo-A'));
+      visitsService.findAll.mockResolvedValue([
+        makeVisit({
+          status: VisitStatus.AWAITING_APPROVAL,
+          vehicle: { plate: 'ABCD12' } as Vehicle,
+        }),
+      ]);
+
+      const needsApproval = await tool.requiresApproval(makeCtx(), {
+        tipo: 'porton',
+      });
+
+      expect(needsApproval).toBe(true);
+    });
+
     it('con visita que matchea la identidad pero fuera de la ventana de validez (ya expiró), escala (true)', async () => {
       conciergeService.findSessionForTenant.mockResolvedValue(makeSession());
       mockVerifiedIdentity({ kind: 'plate', plate: 'ABCD12' });
@@ -389,44 +384,56 @@ describe('AbrirAccesoTool', () => {
       ).rejects.toThrow(BadRequestException);
 
       expect(conciergeService.findSessionForTenant).not.toHaveBeenCalled();
-      expect(hubGateway.sendToHub).not.toHaveBeenCalled();
-      expect(hubGateway.sendToOrganization).not.toHaveBeenCalled();
+      expect(hubGateway.sendDoorOpen).not.toHaveBeenCalled();
     });
 
-    it('dirige la apertura al hub propio de la sesión cuando está conectado (tipo "porton" -> vehicular)', async () => {
-      conciergeService.findSessionForTenant.mockResolvedValue(
-        makeSession({ hubId: 'hub-001', organizationId: 'condo-A' }),
-      );
-      hubGateway.isHubConnected.mockReturnValue(true);
+    it('usa sendDoorOpen con la sesión (hub + condominio) y tipo "porton" -> vehicular', async () => {
+      const session = makeSession({
+        hubId: 'hub-001',
+        organizationId: 'condo-A',
+        createdVisit: { id: 'visit-9' } as Visit,
+      });
+      conciergeService.findSessionForTenant.mockResolvedValue(session);
 
       const result = await tool.execute(makeCtx(), { tipo: 'porton' });
 
-      expect(hubGateway.sendToHub).toHaveBeenCalledWith(
-        'hub-001',
-        'hub:door_open',
-        expect.objectContaining({ type: 'vehicular' }),
-      );
-      expect(hubGateway.sendToOrganization).not.toHaveBeenCalled();
+      expect(hubGateway.sendDoorOpen).toHaveBeenCalledTimes(1);
+      expect(hubGateway.sendDoorOpen).toHaveBeenCalledWith(session, {
+        type: 'vehicular',
+        visitId: 'visit-9',
+      });
       expect(result.abierto).toBe(true);
       expect(result.mensaje).toContain('portón');
     });
 
-    it('(a) dirige por condominio (sendToOrganization) cuando el hub propio no está conectado (tipo "puerta" -> pedestrian)', async () => {
+    it('tipo "puerta" -> pedestrian (sin visita asociada: visitId null)', async () => {
       conciergeService.findSessionForTenant.mockResolvedValue(
-        makeSession({ hubId: 'hub-001', organizationId: 'condo-A' }),
+        makeSession({ hubId: 'kiosk-001', organizationId: 'condo-A' }),
       );
-      hubGateway.isHubConnected.mockReturnValue(false);
 
       const result = await tool.execute(makeCtx(), { tipo: 'puerta' });
 
-      expect(hubGateway.sendToHub).not.toHaveBeenCalled();
-      expect(hubGateway.sendToOrganization).toHaveBeenCalledWith(
-        'condo-A',
-        'hub:door_open',
-        expect.objectContaining({ type: 'pedestrian' }),
+      expect(hubGateway.sendDoorOpen).toHaveBeenCalledWith(
+        expect.objectContaining({
+          hubId: 'kiosk-001',
+          organizationId: 'condo-A',
+        }),
+        { type: 'pedestrian', visitId: null },
       );
       expect(result.abierto).toBe(true);
       expect(result.mensaje).toContain('puerta');
+    });
+
+    it('si ningún hub físico recibe la orden, responde abierto: false (no promete la apertura)', async () => {
+      conciergeService.findSessionForTenant.mockResolvedValue(
+        makeSession({ hubId: 'kiosk-001', organizationId: 'condo-A' }),
+      );
+      hubGateway.sendDoorOpen.mockReturnValue(0);
+
+      const result = await tool.execute(makeCtx(), { tipo: 'porton' });
+
+      expect(result.abierto).toBe(false);
+      expect(result.mensaje).toContain('No pude enviar la orden de apertura');
     });
 
     it('(d) nunca dirige la apertura a la organización de OTRO condominio — la sesión ya viene tenant-scoped', async () => {
@@ -438,8 +445,7 @@ describe('AbrirAccesoTool', () => {
         tool.execute(makeCtx({ tenantId: 'condo-A' }), { tipo: 'porton' }),
       ).rejects.toThrow(ForbiddenException);
 
-      expect(hubGateway.sendToHub).not.toHaveBeenCalled();
-      expect(hubGateway.sendToOrganization).not.toHaveBeenCalled();
+      expect(hubGateway.sendDoorOpen).not.toHaveBeenCalled();
     });
   });
 });

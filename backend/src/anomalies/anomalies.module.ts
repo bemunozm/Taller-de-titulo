@@ -5,13 +5,15 @@ import { Camera } from '../cameras/entities/camera.entity';
 import { AnomaliesService } from './anomalies.service';
 import { AnomaliesController } from './anomalies.controller';
 import { VisionAnalysisService } from './services/vision-analysis.service';
-import { HubModule } from '../hub/hub.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { User } from '../users/entities/user.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([AnomalyEvent, Camera]),
-    HubModule,
+    // User: repositorio de AuthGuard/AuthorizationGuard (`GET /anomalies`
+    // con sesión humana, Fase 4 · P5.C).
+    TypeOrmModule.forFeature([AnomalyEvent, Camera, User]),
+    // Fase 4 · P6.R: sin HubModule (`HubGateway` estaba inyectado sin uso).
     NotificationsModule,
   ],
   controllers: [AnomaliesController],

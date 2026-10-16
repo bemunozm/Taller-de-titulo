@@ -23,7 +23,7 @@ Este módulo maneja la comunicación con los dispositivos físicos **VigilIA Hub
 │              Backend NestJS (Este módulo)                   │
 │  - HubGateway: WebSocket para comunicación en tiempo real  │
 │  - Hub Entity: Registro de dispositivos                     │
-│  - Endpoints: /units/ai-enabled (cache local)              │
+│  - Endpoints: /api/v1/units/ai-enabled (cache local)       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -44,42 +44,97 @@ hubs, lo que permitía a un hub suplantar el `hubId` de otro condominio):
   guarda su hash bcrypt en `hubs.secretHash`). Se valida contra ESE hash
   específico, no contra un valor global.
 
-**Eventos Recibidos del Hub**:
+**Autenticación antes del CONNECT** (Fase 4 · P4): las credenciales se validan
+en un middleware del namespace (`afterInit` → `server.use`), no en
+`handleConnection`. Ante cualquier rechazo (hub desconocido, inactivo, sin
+secret, secret inválido, revocado durante la verificación o error de BD) el
+cliente recibe `connect_error` con el mensaje genérico `unauthorized` y
+nunca ve `connect`. Siempre se paga un bcrypt (contra un hash ficticio si el
+hub no existe), así que ni el mensaje ni el tiempo revelan si el `hubId`
+existe. Mismo criterio en `HubAuthGuard` (HTTP): un único 401 `Credencial de
+dispositivo inválida` (`hub-credentials.ts`). Como socket.io-client no
+reintenta tras un rechazo del middleware (`connect_error` con
+`socket.active === false`) ni tras un corte del servidor (`io server
+disconnect`), `vigilia-hub` reintenta a mano con backoff exponencial (5 s →
+máx. 60 s, con jitter, un solo reintento pendiente) y lo reinicia recién
+cuando la conexión lleva 30 s estable después de `hub:connected`.
+
+**Identidad del socket** (Fase 4 · P4): el middleware guarda
+`{ hubId, type, organizationId }` en `client.data.hub` y `handleConnection`
+solo registra el socket (last-wins) y emite `hub:connected`. Es la única
+fuente de verdad de los handlers `hub:*`: el `hubId` que venga en el body se
+ignora, y un mensaje desde un socket no registrado (o ya reemplazado) se
+ignora con `warn` y responde `{ success: false }`.
+
+- **Reconexión con el mismo `hubId`** (last-wins): el socket nuevo reemplaza
+  al anterior y el anterior se desconecta. La desconexión de un socket solo
+  borra la entrada si sigue siendo la suya.
+- **Rotar el secret o desactivar el hub** (`POST /hubs/:hubId/rotate-secret`,
+  `PATCH /hubs/:hubId` con `active: false`, o un cambio de `type` u
+  `organizationId`) desconecta su socket (`HubGateway.disconnectHub`). Un
+  handshake que estaba en curso en ese momento se rechaza (contador de
+  revocaciones), y un socket autenticado justo antes tampoco se registra.
+  `vigilia-hub` reintenta solo (backoff de 5 s a 60 s): si el hub sigue
+  activo con la misma credencial (p. ej. cambió de tipo o condominio) vuelve
+  a conectarse con la identidad nueva; con la credencial revocada recibe
+  `connect_error` en cada reintento hasta que se configure el secret nuevo en
+  su `.env`. Dos procesos con la misma credencial se expulsan entre sí
+  (last-wins), pero el backoff solo se reinicia tras 30 s de conexión estable,
+  así que los reintentos se espacian.
+
+**Rutas HTTP de una sesión con credencial de dispositivo** (Fase 4 · P4):
+`POST /concierge/session/:id/execute-tool`, `/end` y `/status` solo aceptan
+al dispositivo dueño de la sesión: `session.hubId === req.hub.hubId` **y** el
+`organizationId` actual del hub igual al de la sesión. Otro hub o kiosko del
+mismo condominio, o el dueño movido de condominio, recibe 403. El camino
+humano no cambia.
+
+**Eventos Recibidos del Hub** (el body ya no necesita `hubId`):
 
 | Evento | Descripción | Payload |
 |--------|-------------|---------|
-| `hub:keypad` | Número marcado en teclado | `{ hubId, houseNumber }` |
-| `hub:stateChanged` | Cambio de estado FSM | `{ hubId, state, metadata }` |
-| `hub:error` | Error crítico en el hub | `{ hubId, error, stack }` |
-| `hub:heartbeat` | Señal de vida (cada 30s) | `{ hubId, uptime, cpuUsage, memoryUsage }` |
+| `hub:keypad` | Número marcado en teclado | `{ houseNumber, timestamp }` |
+| `hub:stateChanged` | Cambio de estado FSM | `{ state, metadata }` |
+| `hub:error` | Error crítico en el hub | `{ error, stack }` |
+| `hub:heartbeat` | Señal de vida (cada 30s) | `{ uptime (ms), timestamp, status }` |
 
 **Eventos Enviados al Hub**:
 
-| Evento | Descripción | Payload |
-|--------|-------------|---------|
-| `hub:connected` | Confirmación de conexión | `{ hubId, serverTime, message }` |
+| Evento | Descripción | Payload | A quién |
+|--------|-------------|---------|---------|
+| `hub:connected` | Confirmación de conexión | `{ hubId, serverTime, message }` | Al socket que se conectó |
+| `hub:door_open` | Orden de apertura del relé | `{ type: 'vehicular' \| 'pedestrian', visitId?, plate? }` | Solo hubs `physical-hub` (ver 2.2) |
+| `visitor:response:<sessionId>` | Respuesta a la solicitud de visita | `{ sessionId, approved, entryRegistered, timestamp, ... }` | Solo al dispositivo dueño de la sesión (ver 2.2) |
 
 **Métodos Públicos**:
 
 ```typescript
-// Enviar mensaje a un hub específico
-sendToHub(hubId: string, event: string, data: any): boolean
+// Orden de apertura SOLO a hubs físicos: al de la sesión si es físico y está
+// conectado; si no, a los físicos del condominio. Nunca a un web-kiosk.
+// Condominio nulo o sin hubs físicos conectados: no-op con warn. Devuelve la
+// cantidad de hubs que la recibieron.
+sendDoorOpen(target: { hubId: string | null; organizationId: string | null }, command: DoorOpenCommand): number
 
-// Enviar mensaje a todos los hubs de UN condominio (Fase 1, Bloque A1.1 —
-// hallazgo H2: usar esto para eventos sensibles como hub:door_open, NUNCA
-// broadcastToAllHubs, que cruzaría el aislamiento entre condominios)
-sendToOrganization(organizationId: string | null, event: string, data: any): number
+// visitor:response:<sessionId> SOLO al socket dueño de la sesión (hub o
+// kiosko), sin caer al condominio. Devuelve si se entregó.
+sendVisitorResponse(session: { sessionId; hubId; organizationId }, payload): boolean
 
-// Broadcast a TODOS los hubs conectados (de cualquier condominio) — solo
-// para eventos genuinamente globales, no para acciones físicas dirigidas
-broadcastToAllHubs(event: string, data: any): void
+// Corta el socket de un hub (rotar secret / desactivar / cambiar tipo u org)
+disconnectHub(hubId: string, reason: string): boolean
 
 // Verificar si un hub está conectado
 isHubConnected(hubId: string): boolean
 
 // Obtener hubs conectados
-getConnectedHubs(): Array<{ hubId: string; lastSeen: Date }>
+getConnectedHubs(): Array<{ hubId: string; type: HubType; lastSeen: Date }>
 ```
+
+No hay emisores genéricos: `broadcastToAllHubs` y `sendToSession` se
+eliminaron (el primero cruzaba condominios y el segundo caía al condominio,
+justo lo que D7 prohíbe para `hub:door_open` y `visitor:response:*`), y
+`sendToHub`/`sendToOrganization` también, porque ya no tenían llamadas. Un
+evento nuevo hacia los dispositivos se agrega con su propio método y su
+propio enrutamiento.
 
 ### 2. Hub Entity (`entities/hub.entity.ts`)
 
@@ -114,8 +169,39 @@ defecto — mismo criterio que `platform.manage-organizations`).
 | POST | `/hubs` | Provisiona un hub nuevo. Genera el secret y lo devuelve **en texto plano una única vez**. |
 | GET | `/hubs` | Lista los hubs (sin `secretHash`). |
 | GET | `/hubs/:hubId` | Detalle de un hub. |
-| PATCH | `/hubs/:hubId` | Actualiza ubicación/descripción/organización/estado activo. |
-| POST | `/hubs/:hubId/rotate-secret` | Invalida el secret anterior y genera uno nuevo (p.ej. ante sospecha de compromiso). |
+| PATCH | `/hubs/:hubId` | Actualiza ubicación/descripción/organización/estado activo. Si lo desactiva o cambia su `type` u `organizationId`, desconecta su socket. |
+| POST | `/hubs/:hubId/rotate-secret` | Invalida el secret anterior y genera uno nuevo (p.ej. ante sospecha de compromiso). Desconecta el socket conectado con el secret viejo. |
+
+Identidad del dispositivo (Fase 4 · P4): `GET /concierge/device` (solo
+`HubAuthGuard`, headers `X-Hub-Id` + `X-Hub-Secret`) devuelve
+`{ hubId, type, organizationId }`; sin credencial de hub responde 401. El
+emparejamiento del kiosko lo usa para validar la credencial y exigir
+`type = web-kiosk`. No va en `/hubs/me` porque chocaría con `GET /hubs/:hubId`.
+CORS HTTP permite `X-Hub-Id`/`X-Hub-Secret` porque el kiosko los manda desde
+el navegador.
+
+### 2.1.1 Paso operativo: asociar cada hub a su condominio
+
+Desde la Fase 4 · P5.C, un contexto **sin condominio** no ve ninguna fila
+(`scopeWhere`/`applyTenantFilter`) ni puede crear recursos (403). Un hub
+activo con `organizationId = null` autentica, pero `GET /units/ai-enabled`
+le devuelve `[]`, `buscar_residente`/`notificar_residente` no encuentran a
+nadie y el citófono no intercepta ninguna llamada.
+
+Por eso, al provisionar o migrar hubs:
+
+1. Provisiona el hub con su condominio: `POST /hubs` con `organizationId`.
+2. Para los que ya existen: `PATCH /hubs/:hubId` con `{ "organizationId": "<uuid del condominio>" }`
+   (desconecta el socket; el hub se reconecta solo).
+3. Configura en el dispositivo `HUB_ID` **y** `HUB_SECRET`: `HubAuthGuard`
+   exige los dos headers (`X-Hub-Id` + `X-Hub-Secret`).
+4. Al arrancar, el backend avisa en el log cuántos hubs activos no tienen
+   condominio (`HubsService.warnAboutHubsWithoutOrganization`): ese número
+   debe ser 0.
+
+El Conserje Digital se activa por familia: `PATCH /families/:id` con
+`{ "digitalConciergeEnabled": true }` (permiso `families.update`). Sin eso,
+`GET /units/ai-enabled` no lista la unidad.
 
 ### 2.2 Tipos de hub (`HubType`, `hub.entity.ts`)
 
@@ -134,37 +220,61 @@ de `'physical-hub'`.
   solo existiría si se escribe directo en BD), así que no hizo falta agregar
   ninguna validación condicional por tipo.
 
-**Confirmado sin cambios de código** (`type` no participa en autenticación ni
-en resolución de tenant):
-- `HubAuthGuard` autentica por `hubId` + `secretHash` sin mirar `type` — un
-  `web-kiosk` se autentica exactamente igual que un `physical-hub`.
-- `ConciergeAuthGuard`/`AuthorizedContextFactory` (`src/agent/`) arman el
-  contexto del agente a partir de `request.hub: AuthenticatedHub` (solo
-  `hubId`/`organizationId`, sin `type`) — `startSession`/`execute-tool`/
-  `agent-config` funcionan igual para un `web-kiosk`.
+**Autenticación**: `type` no participa. `HubAuthGuard` autentica por
+`hubId` + `secretHash`, así que un `web-kiosk` se autentica igual que un
+`physical-hub`. Desde la Fase 4 · P4 (D6) el guard expone el `type` en
+`request.hub: AuthenticatedHub` (`{ hubId, type, organizationId }`) y el
+gateway lo guarda en `ConnectedHubInfo` y en `client.data.hub`. Las reglas que
+dependen del canal (tools por canal, P4.B) lo leen de ahí.
 
-**Pendiente de decisión de producto (fuera de este alcance)**: si un
-`web-kiosk` debe o no poder disparar `hub:door_open` — hoy
-`HubGateway.sendToOrganization` (usado por `abrir-acceso.tool.ts` y
-`DigitalConciergeService.respondToVisitor`) envía el evento a TODOS los
-sockets conectados de la organización sin distinguir `type`, porque
-`ConnectedHubInfo` (mapa interno de `HubGateway`) no guarda el `type` del hub
-— solo `organizationId`. Si un totem físicamente junto a un portón debe abrir
-la reja igual que un hub físico, esto ya funciona tal cual; si NO debe, hace
-falta filtrar por `type` en `sendToOrganization`/`connectedHubs` — se deja
-documentado a propósito, sin implementarlo, porque es una decisión de
-comportamiento físico que le corresponde a Benjamin, no una corrección de bug.
+**Decisión D7 (Fase 4 · P4, docs/modulos/hardening-pre-piloto.md §2)** — el
+kiosko se conecta a `/hub` igual que un hub físico, y:
+
+- **`hub:door_open` solo va a hubs `physical-hub`** (`HubGateway.sendDoorOpen`):
+  al hub de la sesión si es físico, está conectado y es del mismo condominio;
+  si no, a todos los hubs físicos conectados del condominio. **Nunca a un
+  `web-kiosk`**: no tiene relés, y si recibiera la orden el portón no se
+  abriría. Sin condominio, o sin hubs físicos conectados, no se envía nada
+  (`warn`). Lo usan las tres fuentes de apertura: la respuesta del residente
+  (`DigitalConciergeService.respondToVisitor`), la tool `abrir_acceso`
+  (también cuando la ejecuta una `PendingAction` aprobada) y el LPR
+  (`DetectionsService.createDetection`, por el condominio de la cámara). Si
+  ningún hub físico recibe la orden, `abrir_acceso` responde `abierto: false`
+  y `respondToVisitor` alerta a los conserjes. `respondToVisitor` envía la
+  orden de apertura ANTES de `visitor:response`, para que este lleve el
+  acceso efectivo.
+- **`visitor:response:<sessionId>` solo va al dispositivo dueño de la sesión**
+  (`session.hubId`, `HubGateway.sendVisitorResponse`), **sin caer al
+  condominio**: esa caída filtraría la respuesta a otros hubs o kioskos. Si el
+  dueño no está conectado no se entrega; el kiosko se respalda con el polling
+  de `POST /concierge/session/:id/status`, que ahora devuelve `visitId`,
+  `residentResponse` y `entryRegistered` (el valor persistido en
+  `concierge_sessions.entryRegistered`; `null` mientras se procesa).
+- **Payload uniforme y mensaje fail-closed**: todo emisor de
+  `visitor:response:*` manda `approved` y `entryRegistered`. El hub y el
+  kiosko solo le dicen al visitante que pase si `approved === true &&
+  entryRegistered === true`; aprobada sin ingreso registrado → que espere
+  (conserjería fue avisada); payload inesperado → igual que "no registrado".
+  `entryRegistered` es el acceso EFECTIVO: `true` solo si esa respuesta
+  registró el ingreso y un hub físico recibió la orden de apertura (con el
+  ingreso ya registrado por otra vía, o sin hubs físicos, es `false` y se
+  alerta a conserjería).
 
 ### 3. Endpoint de Sincronización de Cache
 
-**GET** `/units/ai-enabled`
+**GET** `/api/v1/units/ai-enabled` (`HubAuthGuard`)
 
-Retorna lista de unidades con Conserje Digital habilitado.
+Retorna lista de unidades con Conserje Digital habilitado, del condominio del
+hub autenticado.
 
 **Headers**:
 ```
-X-Hub-Secret: tu_secreto_aqui
+X-Hub-Id: hub-001
+X-Hub-Secret: <secret propio del hub>
 ```
+
+Sin credencial válida responde 401 con el mensaje genérico `Credencial de
+dispositivo inválida`.
 
 **Response**:
 ```json
@@ -189,11 +299,15 @@ X-Hub-Secret: tu_secreto_aqui
 ### 1. Conexión Inicial
 
 ```typescript
-// En el Raspberry Pi
-const socket = io('http://backend.com/hub', {
+// En el Raspberry Pi — vigilia-hub/src/services/websocket-client.service.ts.
+// HUB_ID / HUB_SECRET salen del .env del hub (validado por loadHubConfig):
+// el secret es el PROPIO de este hub, devuelto una sola vez por POST /hubs
+// (o por POST /hubs/:hubId/rotate-secret). El backend solo guarda su
+// `secretHash`. En producción la URL es https:// (wss://).
+const socket = io(`${config.backendSocketUrl}/hub`, {
   auth: {
-    hubId: 'hub-001',
-    hubSecret: process.env.HUB_SECRET
+    hubId: config.hubId,
+    hubSecret: config.hubSecret
   }
 });
 
@@ -205,9 +319,14 @@ socket.on('hub:connected', (data) => {
 ### 2. Sincronización de Cache
 
 ```typescript
-// En el Raspberry Pi (cada 5 minutos)
-const response = await axios.get('http://backend.com/units/ai-enabled', {
-  headers: { 'X-Hub-Secret': process.env.HUB_SECRET }
+// En el Raspberry Pi (cada 5 minutos) — vigilia-hub/src/services/local-cache.service.ts
+// Credenciales PROPIAS del hub (X-Hub-Id + X-Hub-Secret), las mismas del
+// handshake; HubAuthGuard las verifica contra el secretHash de ESE hubId.
+const response = await axios.get(`${config.backendUrl}/api/v1/units/ai-enabled`, {
+  headers: {
+    'X-Hub-Id': config.hubId,
+    'X-Hub-Secret': config.hubSecret,
+  },
 });
 
 // Guardar en cache local
@@ -231,12 +350,12 @@ cacheService.updateCache(response.data);
 ### 4. Heartbeat y Monitoreo
 
 ```typescript
-// En el Raspberry Pi (cada 30 segundos)
+// En el Raspberry Pi (cada 30 segundos). Sin hubId: el gateway usa la
+// identidad del handshake.
 socket.emit('hub:heartbeat', {
-  hubId: 'hub-001',
-  uptime: process.uptime() * 1000,
-  cpuUsage: os.loadavg()[0],
-  memoryUsage: process.memoryUsage().heapUsed / 1024 / 1024
+  uptime: Math.round(process.uptime() * 1000),
+  timestamp: Date.now(),
+  status: 'active'
 });
 ```
 
@@ -258,17 +377,13 @@ rotarlo (invalida el anterior).
 
 ## Migración de Base de Datos
 
-Ejecutar la migración para crear las tablas necesarias:
-
-```bash
-npm run migration:run
-```
-
-Esto creará:
-- Tabla `hubs` para registro de dispositivos
-- Campos `hubId` y `source` en `concierge_sessions`
-- Campo `digitalConciergeEnabled` en `families`
-- Índices para optimizar consultas
+El esquema se crea con las migraciones del backend (`npm run migration:run`,
+ver `src/migrations/`): la tabla `hubs` y las columnas de
+`concierge_sessions` vienen en la migración base (`InitialSchema`), y la
+Fase 4 · P4 agrega `concierge_sessions.entryRegistered` y
+`visits.respondedById`/`respondedAt` (`ConciergeResponseTracking`). Las
+migraciones viejas del módulo quedaron en `src/migrations/legacy/` y ya no se
+ejecutan.
 
 ## Seguridad
 
@@ -281,7 +396,7 @@ Los hubs se autentican mediante:
 
 El secret se valida (contra el `secretHash` de ESE hub específico, `Hub.hubId`) en:
 - Conexión WebSocket al HubGateway (`hub.gateway.ts`)
-- Llamada HTTP a `/units/ai-enabled` y `/concierge/*` (`HubAuthGuard`)
+- Llamada HTTP a `/api/v1/units/ai-enabled` y `/api/v1/concierge/*` (`HubAuthGuard`)
 
 ### 2. Recomendaciones
 
@@ -301,11 +416,11 @@ El secret se valida (contra el `secretHash` de ESE hub específico, `Hub.hubId`)
 ### 1. Simular Hub con cURL
 
 ```bash
-# Test del endpoint de cache (Fase 1, Bloque A1.1: ahora requiere X-Hub-Id
-# además de X-Hub-Secret — el secret se valida contra ESE hub específico)
+# Test del endpoint de cache: requiere X-Hub-Id además de X-Hub-Secret (el
+# secret se valida contra ESE hub específico) y el prefijo global /api/v1
 curl -H "X-Hub-Secret: tu_secret_aqui" \
   -H "X-Hub-Id: hub-001" \
-  http://localhost:3000/units/ai-enabled
+  http://localhost:3000/api/v1/units/ai-enabled
 ```
 
 ### 2. Cliente WebSocket de Prueba
@@ -323,9 +438,8 @@ const socket = io('http://localhost:3000/hub', {
 socket.on('hub:connected', (data) => {
   console.log('✅ Conectado:', data);
   
-  // Simular marcación de teclado
+  // Simular marcación de teclado (el hubId sale del handshake)
   socket.emit('hub:keypad', {
-    hubId: 'hub-test-001',
     houseNumber: '504'
   });
 });
@@ -365,10 +479,65 @@ getConnectedHubs() {
 3. Ver logs del backend: `npm run start:dev`
 4. Ver logs del hub: `sudo journalctl -u vigilia-hub -f`
 
+### Hub o kiosko rechazado por el límite de intentos (HTTP 429 / WS `unauthorized`)
+
+Verificar una credencial de dispositivo cuesta un bcrypt. `HubAuthGuard`
+(HTTP) y el middleware de `/hub` (WebSocket) la resuelven en dos pasos:
+
+1. **Caché de credenciales verificadas** (`hub/hub-credential-cache.ts`). Si
+   el `hubId` + secret ya se verificó, entra sin bcrypt y sin pasar por el
+   limitador, aunque su IP esté bloqueada o el backend esté bajo una ráfaga.
+   - Guarda un HMAC-SHA256 del secret con una clave aleatoria por proceso
+     (nunca el secret en claro), comparado en tiempo constante, más la
+     identidad verificada (`type`, `organizationId`).
+   - Vence a los 10 min sin uso y, aunque se use, a las 24 h (Fase 4 · P6.R).
+     El heartbeat de un socket `/hub` registrado la renueva (`touch`), así un
+     hub conectado no vuelve al camino con bcrypt solo por no hacer requests
+     HTTP. Tope de 10 000 entradas.
+   - Se invalida en `HubGateway.disconnectHub`: rotar el secret, desactivar
+     el hub, cambiar su tipo o su condominio (`HubsService`) cortan también
+     la credencial cacheada. Un cambio hecho directo en la BD (sin pasar por
+     la API) tarda hasta 24 h en verse; reiniciar el backend lo limpia.
+   - Un secret distinto para un `hubId` cacheado es un fallo normal (paso 2).
+2. **Limitador del camino con bcrypt** (`hub/hub-auth-failure-limiter.ts`):
+
+| Límite | Valor | Efecto al superarlo |
+|---|---|---|
+| Fallos por IP (IPv6: por /64) | 20 en 5 min (ventana deslizante) | Rechazo sin verificar, para cualquier `hubId` |
+| Verificaciones en curso por IP | 3 | Rechazo inmediato del exceso |
+| Verificaciones en curso en todo el backend | 8 | Rechazo inmediato del exceso |
+
+- Cada intento cuenta como fallo al empezar y se perdona si la credencial
+  es válida. Un error de BD no cuenta.
+- HTTP responde **429** (`Demasiados intentos de autenticación de
+  dispositivo`); el WebSocket responde el mismo `connect_error`
+  **`unauthorized`** que una credencial inválida. vigilia-hub reintenta con
+  backoff (5 s a 60 s).
+- Bajo bloqueo, la respuesta es la misma para un `hubId` existente, uno
+  inexistente o un secret incorrecto: no revela qué `hubId` existen.
+- Un dispositivo que verificó su credencial en los últimos minutos (caché)
+  no queda fuera por basura de otros equipos detrás de la misma NAT. Uno
+  que no está en caché (p. ej. recién reiniciado el backend, o sin uso ni
+  heartbeat por más de 10 min) espera a que la ventana de su IP se libere.
+- `hubId` con formato inválido (más de 64 caracteres o fuera de
+  `[A-Za-z0-9_-]`) se rechaza sin consultar la BD.
+- Contadores y caché viven en memoria (una instancia del backend); un
+  reinicio los limpia.
+
+**Dependencia de `TRUST_PROXY`:** la IP sale de `req.ip` (HTTP) y de
+`X-Forwarded-For` del handshake (WebSocket), ambos con la cantidad de proxies
+de `TRUST_PROXY`. Debe coincidir EXACTAMENTE con la cantidad de reverse
+proxies delante del backend:
+- Si es menor (o falta), todos los clientes comparten la IP del proxy: 20
+  fallos de cualquiera bloquean a todos los dispositivos que no estén en
+  caché.
+- Si es mayor, un cliente elige su IP con `X-Forwarded-For` y evade el
+  límite.
+
 ### Cache desactualizado
 
 1. El hub sincroniza cada 5 minutos automáticamente
-2. Verificar endpoint: `GET /units/ai-enabled` retorna datos correctos
+2. Verificar endpoint: `GET /api/v1/units/ai-enabled` retorna datos correctos
 3. Reiniciar el servicio del hub: `sudo systemctl restart vigilia-hub`
 
 ### Audio con latencia

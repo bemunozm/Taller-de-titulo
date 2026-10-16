@@ -9,10 +9,12 @@ import {
   type ToolLoopAgentSettings,
 } from 'ai';
 import { z } from 'zod';
+import { AGENT_CHANNELS } from './agent-channel';
 import { AGENT_LANGUAGE_MODEL } from './agent-model.provider';
 import { buildSofiaInstructions } from './prompts/sofia.prompt';
 import { ToolDispatcherService } from './tool-dispatcher.service';
 import { ToolRegistryService } from './tool-registry.service';
+import { ABRIR_ACCESO_TOOL_NAME } from './tools/abrir-acceso.tool';
 import type { AuthorizedContext } from './types/authorized-context.type';
 
 /**
@@ -29,6 +31,8 @@ const authorizedContextSchema = z.object({
   isSuperAdmin: z.boolean(),
   userId: z.string().optional(),
   role: z.string(),
+  // Fase 4 · P4.B (D6/D8): canal del turno, lo fija el backend.
+  channel: z.enum(AGENT_CHANNELS),
   scopes: z.array(z.string()),
   requestId: z.string(),
   // Bloque A2b: presente solo cuando el consumidor opera sobre una
@@ -44,9 +48,11 @@ const authorizedContextSchema = z.object({
  * del diseño (§2): si mañana cambia el framework de orquestación, el
  * catálogo/dispatcher no se tocan, solo este archivo.
  *
- * El `ToolSet` (adaptador de cada `VigiliaTool` a `tool()`) se arma UNA sola
- * vez en el constructor — no depende de ningún dato de request. El
- * `ToolLoopAgent` en sí, en cambio, se instancia UNA VEZ POR TURNO en
+ * Fase 4 · P4.B (D8): el `ToolSet` (adaptador de cada `VigiliaTool` a
+ * `tool()`) se arma POR TURNO con `ToolRegistryService.getAvailableFor(ctx)`:
+ * el modelo solo ve las tools que ese canal y esos scopes pueden ejecutar
+ * (antes era fijo, todo el catálogo para cualquier contexto). El dispatcher
+ * sigue siendo el gate real. El `ToolLoopAgent` también se instancia UNA VEZ POR TURNO en
  * `streamChat`: en la versión instalada del AI SDK (`ai@7.0.22`),
  * `toolsContext` e `instructions` solo son configurables en el constructor
  * del agente, no como parámetro de `.generate()`/`.stream()` (a diferencia
@@ -60,7 +66,6 @@ const authorizedContextSchema = z.object({
 export class AgentRunnerService {
   private readonly logger = new Logger(AgentRunnerService.name);
   private readonly model: LanguageModel;
-  private readonly tools: ToolSet;
 
   constructor(
     @Inject(AGENT_LANGUAGE_MODEL) model: LanguageModel,
@@ -68,10 +73,18 @@ export class AgentRunnerService {
     private readonly dispatcher: ToolDispatcherService,
   ) {
     this.model = model;
-    this.tools = {};
+  }
 
-    for (const vigiliaTool of this.registry.getAll()) {
-      this.tools[vigiliaTool.name] = tool({
+  /**
+   * `ToolSet` del turno: solo las tools que `ctx` puede ejecutar (canal y
+   * scopes, ver `ToolRegistryService.getAvailableFor`). Construir los
+   * adaptadores es trabajo en memoria, sin red.
+   */
+  buildToolSet(ctx: AuthorizedContext): ToolSet {
+    const tools: ToolSet = {};
+
+    for (const vigiliaTool of this.registry.getAvailableFor(ctx)) {
+      tools[vigiliaTool.name] = tool({
         description: vigiliaTool.description,
         inputSchema: vigiliaTool.inputSchema,
         contextSchema: authorizedContextSchema,
@@ -87,14 +100,18 @@ export class AgentRunnerService {
           ),
       });
     }
+
+    return tools;
   }
 
   /**
-   * Corre un turno de conversación por TEXTO (canal verificable de A2a — la
-   * voz Realtime es un bloque posterior, ver §8 del doc). `ctx` viaja idéntico
-   * a TODAS las tools del catálogo vía `toolsContext` (un solo
-   * `AuthorizedContext` por turno, no uno distinto por tool) — armado y
-   * fijado ACÁ, nunca por el modelo (regla dura #1 del §5).
+   * Corre un turno de conversación por TEXTO (`POST /concierge/agent/chat`;
+   * la voz Realtime la orquestan los clientes con `agent-config` +
+   * `execute-tool`). `ctx` viaja idéntico a todas las tools del `ToolSet` del
+   * turno (solo las que ese canal y esos scopes pueden ejecutar, ver
+   * `buildToolSet`) vía `toolsContext`: un solo `AuthorizedContext` por
+   * turno, armado y fijado ACÁ, nunca por el modelo (regla dura #1 del §5).
+   * El prompt sigue al mismo `ToolSet` (sin `abrir_acceso`, no la menciona).
    */
   async streamChat(params: {
     houseNumber: string;
@@ -106,17 +123,16 @@ export class AgentRunnerService {
     // (ningún output estructurado en A2a) y `Context` se reemplaza por su
     // forma real (`Record<string, unknown>`, ver @ai-sdk/provider-utils).
   }): Promise<StreamTextResult<ToolSet, Record<string, unknown>, never>> {
+    const tools = this.buildToolSet(params.ctx);
     const toolsContext: Record<string, AuthorizedContext> = Object.fromEntries(
-      this.registry
-        .getAll()
-        .map((vigiliaTool) => [vigiliaTool.name, params.ctx]),
+      Object.keys(tools).map((toolName) => [toolName, params.ctx]),
     );
 
     // `ToolLoopAgentSettings['toolsContext']` se tipa como `InferToolSetContext<TOOLS>`,
     // que solo se resuelve a partir de un `ToolSet` con CLAVES LITERALES
     // conocidas en compilación (el patrón usual: `tools: { toolA: tool({...}) }`
-    // escrito a mano). Acá `this.tools` es un `ToolSet` armado en runtime desde
-    // el catálogo (`ToolRegistryService`), así que TypeScript no puede inferir
+    // escrito a mano). Acá `tools` es un `ToolSet` armado en runtime, por turno,
+    // desde el catálogo (`buildToolSet`), así que TypeScript no puede inferir
     // ese mapa y colapsa `toolsContext` a `never` — limitación real del tipado
     // del AI SDK con catálogos dinámicos, no un descuido. El objeto que se
     // castea es exactamente el que la firma en runtime espera
@@ -124,8 +140,10 @@ export class AgentRunnerService {
     // tool) y `ToolDispatcherService` son la validación real, no este tipo.
     const settings = {
       model: this.model,
-      tools: this.tools,
-      instructions: buildSofiaInstructions(params.houseNumber),
+      tools,
+      instructions: buildSofiaInstructions(params.houseNumber, {
+        accessOpening: ABRIR_ACCESO_TOOL_NAME in tools,
+      }),
       toolsContext,
       // Revisión de calidad — observabilidad: `onError` NO está en el tipo
       // público `ToolLoopAgentSettings` de `ai@7.0.22` (se verificó contra
@@ -136,7 +154,7 @@ export class AgentRunnerService {
       // allowlist fijo de callbacks conocidos (onStart/onStepStart/
       // onToolExecutionStart/onToolExecutionEnd/onStepEnd/onFinish/onEnd) y
       // pasa el RESTO tal cual al `streamText(...)` interno — que sí declara
-      // `onError` y, si no se provee, cae por defecto a `console.error`
+      // `onError` y, si no se provee, cae por defecto a la consola de Node
       // (fuera del logger de la app). Sin este callback, un fallo de
       // streaming (proveedor caído, rate limit, timeout, corte de stream) es
       // invisible en los logs — el `try/catch` alrededor de `agent.stream(...)`

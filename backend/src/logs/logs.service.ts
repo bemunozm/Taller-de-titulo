@@ -1,15 +1,31 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Between, LessThanOrEqual, MoreThanOrEqual, In } from 'typeorm';
-import { Cron, CronExpression } from '@nestjs/schedule';
-import { SystemLog, LogLevel, LogType, ServiceName } from './entities/system-log.entity';
+import { Repository } from 'typeorm';
+import {
+  SystemLog,
+  LogLevel,
+  LogType,
+  ServiceName,
+} from './entities/system-log.entity';
 import { CreateSystemLogDto } from './dto/create-system-log.dto';
 import { GetLogsQueryDto } from './dto/get-logs-query.dto';
+import { assertPlatformSuperAdmin } from '../common/tenant/tenant-context.util';
+import type { TenantContext } from '../common/tenant/tenant-context.types';
+import { errorMessage } from '../common/utils/error-message.util';
+
+/** Quién lee los logs del sistema: solo importa si es super-admin (P5). */
+export type SystemLogReader = Pick<TenantContext, 'isSuperAdmin'>;
+
+const SYSTEM_LOGS_FORBIDDEN_MESSAGE =
+  'Los logs del sistema son de la plataforma: solo el super-admin los lee';
+
+function errorStackOf(error: unknown): string | undefined {
+  return error instanceof Error ? error.stack : undefined;
+}
 
 @Injectable()
 export class LogsService {
   private readonly logger = new Logger(LogsService.name);
-  private readonly retentionDays = 30; // Retención de logs por 30 días
 
   constructor(
     @InjectRepository(SystemLog)
@@ -26,7 +42,10 @@ export class LogsService {
       await this.systemLogRepository.save(log);
     } catch (error) {
       // No queremos que un error al guardar logs rompa la aplicación
-      this.logger.error(`Failed to save system log: ${error.message}`, error.stack);
+      this.logger.error(
+        `Failed to save system log: ${errorMessage(error)}`,
+        errorStackOf(error),
+      );
     }
   }
 
@@ -37,7 +56,7 @@ export class LogsService {
     service: ServiceName;
     method: string;
     url: string;
-    requestData?: any;
+    requestData?: unknown;
     correlationId?: string;
     ipAddress?: string;
     userAgent?: string;
@@ -65,12 +84,15 @@ export class LogsService {
     url: string;
     statusCode: number;
     responseTime: number;
-    responseData?: any;
+    responseData?: unknown;
     correlationId?: string;
   }): Promise<void> {
-    const level = data.statusCode >= 500 ? LogLevel.ERROR : 
-                  data.statusCode >= 400 ? LogLevel.WARN : 
-                  LogLevel.INFO;
+    const level =
+      data.statusCode >= 500
+        ? LogLevel.ERROR
+        : data.statusCode >= 400
+          ? LogLevel.WARN
+          : LogLevel.INFO;
 
     await this.log({
       level,
@@ -95,7 +117,7 @@ export class LogsService {
     url: string;
     error: Error;
     correlationId?: string;
-    requestData?: any;
+    requestData?: unknown;
   }): Promise<void> {
     await this.log({
       level: LogLevel.ERROR,
@@ -117,7 +139,7 @@ export class LogsService {
   async logMediaMTX(data: {
     action: string;
     success: boolean;
-    details?: any;
+    details?: Record<string, unknown>;
     error?: Error;
     correlationId?: string;
   }): Promise<void> {
@@ -140,7 +162,7 @@ export class LogsService {
     action: string;
     cameraId?: string;
     success: boolean;
-    details?: any;
+    details?: Record<string, unknown>;
     error?: Error;
     correlationId?: string;
   }): Promise<void> {
@@ -164,7 +186,7 @@ export class LogsService {
     licensePlate?: string;
     confidence?: number;
     processingTime?: number;
-    metadata?: any;
+    metadata?: Record<string, unknown>;
   }): Promise<void> {
     await this.log({
       level: LogLevel.INFO,
@@ -182,10 +204,20 @@ export class LogsService {
   }
 
   /**
-   * Obtener logs con filtros y paginación
+   * Obtener logs con filtros y paginación. Los logs del sistema son de
+   * plataforma (no tienen condominio): solo el super-admin los lee, con
+   * chequeo explícito además del permiso `logs.read` (Fase 4 · P5).
    */
-  async getLogs(query: GetLogsQueryDto) {
-    const { page = 1, limit = 50, search, startDate, endDate, ...filters } = query;
+  async getLogs(query: GetLogsQueryDto, reader: SystemLogReader) {
+    assertPlatformSuperAdmin(reader, SYSTEM_LOGS_FORBIDDEN_MESSAGE);
+    const {
+      page = 1,
+      limit = 50,
+      search,
+      startDate,
+      endDate,
+      ...filters
+    } = query;
 
     const queryBuilder = this.systemLogRepository.createQueryBuilder('log');
 
@@ -199,21 +231,27 @@ export class LogsService {
     }
 
     if (filters.service) {
-      queryBuilder.andWhere('log.service = :service', { service: filters.service });
+      queryBuilder.andWhere('log.service = :service', {
+        service: filters.service,
+      });
     }
 
     if (filters.statusCode) {
-      queryBuilder.andWhere('log.statusCode = :statusCode', { statusCode: filters.statusCode });
+      queryBuilder.andWhere('log.statusCode = :statusCode', {
+        statusCode: filters.statusCode,
+      });
     }
 
     if (filters.correlationId) {
-      queryBuilder.andWhere('log.correlationId = :correlationId', { correlationId: filters.correlationId });
+      queryBuilder.andWhere('log.correlationId = :correlationId', {
+        correlationId: filters.correlationId,
+      });
     }
 
     if (search) {
       queryBuilder.andWhere(
         '(log.message ILIKE :search OR log.url ILIKE :search OR log.errorMessage ILIKE :search)',
-        { search: `%${search}%` }
+        { search: `%${search}%` },
       );
     }
 
@@ -223,9 +261,13 @@ export class LogsService {
         endDate: new Date(endDate),
       });
     } else if (startDate) {
-      queryBuilder.andWhere('log.createdAt >= :startDate', { startDate: new Date(startDate) });
+      queryBuilder.andWhere('log.createdAt >= :startDate', {
+        startDate: new Date(startDate),
+      });
     } else if (endDate) {
-      queryBuilder.andWhere('log.createdAt <= :endDate', { endDate: new Date(endDate) });
+      queryBuilder.andWhere('log.createdAt <= :endDate', {
+        endDate: new Date(endDate),
+      });
     }
 
     // Ordenar por fecha descendente
@@ -247,9 +289,14 @@ export class LogsService {
   }
 
   /**
-   * Obtener estadísticas de logs
+   * Obtener estadísticas de logs (solo super-admin, ver getLogs).
    */
-  async getStats(startDate?: string, endDate?: string) {
+  async getStats(
+    reader: SystemLogReader,
+    startDate?: string,
+    endDate?: string,
+  ) {
+    assertPlatformSuperAdmin(reader, SYSTEM_LOGS_FORBIDDEN_MESSAGE);
     const queryBuilder = this.systemLogRepository.createQueryBuilder('log');
 
     if (startDate && endDate) {
@@ -258,26 +305,24 @@ export class LogsService {
         endDate: new Date(endDate),
       });
     } else if (startDate) {
-      queryBuilder.where('log.createdAt >= :startDate', { startDate: new Date(startDate) });
+      queryBuilder.where('log.createdAt >= :startDate', {
+        startDate: new Date(startDate),
+      });
     } else if (endDate) {
-      queryBuilder.where('log.createdAt <= :endDate', { endDate: new Date(endDate) });
+      queryBuilder.where('log.createdAt <= :endDate', {
+        endDate: new Date(endDate),
+      });
     }
 
-    const [
-      total,
-      byLevel,
-      byType,
-      byService,
-      errorLogs,
-      avgResponseTime,
-    ] = await Promise.all([
-      queryBuilder.getCount(),
-      this.getGroupedCount('level', startDate, endDate),
-      this.getGroupedCount('type', startDate, endDate),
-      this.getGroupedCount('service', startDate, endDate),
-      this.getErrorCount(startDate, endDate),
-      this.getAverageResponseTime(startDate, endDate),
-    ]);
+    const [total, byLevel, byType, byService, errorLogs, avgResponseTime] =
+      await Promise.all([
+        queryBuilder.getCount(),
+        this.getGroupedCount('level', startDate, endDate),
+        this.getGroupedCount('type', startDate, endDate),
+        this.getGroupedCount('service', startDate, endDate),
+        this.getErrorCount(startDate, endDate),
+        this.getAverageResponseTime(startDate, endDate),
+      ]);
 
     return {
       totalLogs: total,
@@ -289,7 +334,11 @@ export class LogsService {
     };
   }
 
-  private async getGroupedCount(field: string, startDate?: string, endDate?: string) {
+  private async getGroupedCount(
+    field: string,
+    startDate?: string,
+    endDate?: string,
+  ) {
     const queryBuilder = this.systemLogRepository
       .createQueryBuilder('log')
       .select(`log.${field}`, 'key')
@@ -302,22 +351,34 @@ export class LogsService {
         endDate: new Date(endDate),
       });
     } else if (startDate) {
-      queryBuilder.where('log.createdAt >= :startDate', { startDate: new Date(startDate) });
+      queryBuilder.where('log.createdAt >= :startDate', {
+        startDate: new Date(startDate),
+      });
     } else if (endDate) {
-      queryBuilder.where('log.createdAt <= :endDate', { endDate: new Date(endDate) });
+      queryBuilder.where('log.createdAt <= :endDate', {
+        endDate: new Date(endDate),
+      });
     }
 
-    const results = await queryBuilder.getRawMany();
-    return results.reduce((acc, { key, count }) => {
-      acc[key] = parseInt(count);
+    const results = await queryBuilder.getRawMany<{
+      key: string;
+      count: string;
+    }>();
+    return results.reduce<Record<string, number>>((acc, { key, count }) => {
+      acc[key] = parseInt(count, 10);
       return acc;
     }, {});
   }
 
-  private async getErrorCount(startDate?: string, endDate?: string): Promise<number> {
+  private async getErrorCount(
+    startDate?: string,
+    endDate?: string,
+  ): Promise<number> {
     const queryBuilder = this.systemLogRepository
       .createQueryBuilder('log')
-      .where('log.level IN (:...levels)', { levels: [LogLevel.ERROR, LogLevel.FATAL] });
+      .where('log.level IN (:...levels)', {
+        levels: [LogLevel.ERROR, LogLevel.FATAL],
+      });
 
     if (startDate && endDate) {
       queryBuilder.andWhere('log.createdAt BETWEEN :startDate AND :endDate', {
@@ -325,15 +386,22 @@ export class LogsService {
         endDate: new Date(endDate),
       });
     } else if (startDate) {
-      queryBuilder.andWhere('log.createdAt >= :startDate', { startDate: new Date(startDate) });
+      queryBuilder.andWhere('log.createdAt >= :startDate', {
+        startDate: new Date(startDate),
+      });
     } else if (endDate) {
-      queryBuilder.andWhere('log.createdAt <= :endDate', { endDate: new Date(endDate) });
+      queryBuilder.andWhere('log.createdAt <= :endDate', {
+        endDate: new Date(endDate),
+      });
     }
 
     return queryBuilder.getCount();
   }
 
-  private async getAverageResponseTime(startDate?: string, endDate?: string): Promise<number> {
+  private async getAverageResponseTime(
+    startDate?: string,
+    endDate?: string,
+  ): Promise<number> {
     const queryBuilder = this.systemLogRepository
       .createQueryBuilder('log')
       .select('AVG(log.responseTime)', 'avg')
@@ -345,34 +413,20 @@ export class LogsService {
         endDate: new Date(endDate),
       });
     } else if (startDate) {
-      queryBuilder.andWhere('log.createdAt >= :startDate', { startDate: new Date(startDate) });
+      queryBuilder.andWhere('log.createdAt >= :startDate', {
+        startDate: new Date(startDate),
+      });
     } else if (endDate) {
-      queryBuilder.andWhere('log.createdAt <= :endDate', { endDate: new Date(endDate) });
+      queryBuilder.andWhere('log.createdAt <= :endDate', {
+        endDate: new Date(endDate),
+      });
     }
 
-    const result = await queryBuilder.getRawOne();
+    const result = await queryBuilder.getRawOne<{ avg: string | null }>();
     return result?.avg ? Math.round(parseFloat(result.avg)) : 0;
   }
 
-  /**
-   * Limpieza automática de logs antiguos
-   * Se ejecuta diariamente a las 3 AM
-   */
-  @Cron(CronExpression.EVERY_DAY_AT_3AM)
-  async cleanupOldLogs() {
-    try {
-      const cutoffDate = new Date();
-      cutoffDate.setDate(cutoffDate.getDate() - this.retentionDays);
-
-      const result = await this.systemLogRepository
-        .createQueryBuilder()
-        .delete()
-        .where('createdAt < :cutoffDate', { cutoffDate })
-        .execute();
-
-      this.logger.log(`Cleaned up ${result.affected} old logs (older than ${this.retentionDays} days)`);
-    } catch (error) {
-      this.logger.error(`Failed to cleanup old logs: ${error.message}`, error.stack);
-    }
-  }
+  // Fase 4 · P7.R: la limpieza de `system_logs` (antes un cron de las 3 AM
+  // con 30 días fijos) la hace `RetentionService` (privacy/), por lotes, con
+  // `RETENTION_SYSTEM_LOGS_DAYS` y el dry-run de la retención: un solo cron.
 }

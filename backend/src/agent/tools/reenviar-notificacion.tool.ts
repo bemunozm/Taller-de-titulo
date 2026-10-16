@@ -38,6 +38,11 @@ export class ReenviarNotificacionTool
   readonly access = 'write' as const;
   readonly requiresApproval = false;
   readonly requiredScopes = ['digital-concierge.access'];
+  /**
+   * Fase 4 · P4.B (D8): conversación con el visitante, disponible en todos
+   * los canales con identidad (citófono físico, kiosko web y humano).
+   */
+  readonly allowedChannels = ['physical-hub', 'web-kiosk', 'human'] as const;
 
   constructor(private readonly conciergeService: DigitalConciergeService) {}
 

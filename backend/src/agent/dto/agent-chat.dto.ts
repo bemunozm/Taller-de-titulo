@@ -9,6 +9,7 @@ import {
   MaxLength,
   ValidateNested,
 } from 'class-validator';
+import { IsHouseNumber } from '../../common/validation/house-number';
 
 /**
  * Mensaje del canal de TEXTO (Fase 1, Bloque A2a — endpoint verificable del
@@ -37,10 +38,11 @@ export class AgentChatRequestDto {
   /**
    * Casa/departamento de destino (ya conocida por el flujo del DialPad —
    * ver Sofía prompt §"INFORMACIÓN INICIAL"). Requerida porque el system
-   * prompt la interpola directamente.
+   * prompt la interpola directamente; por eso se acota (Fase 4 · P4.B, cyber
+   * B8: hasta 32 caracteres, palabras de letras y números separadas por un
+   * espacio o guion; ver common/validation/house-number.ts).
    */
-  @IsString()
-  @IsNotEmpty()
+  @IsHouseNumber()
   houseNumber: string;
 
   // Revisión de calidad (FIX 3): acota el largo del historial — el cliente

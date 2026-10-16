@@ -4,6 +4,8 @@ import { ConfigModule } from '@nestjs/config';
 import { HubGateway } from './hub.gateway';
 import { Hub } from './entities/hub.entity';
 import { HubAuthGuard } from './guards/hub-auth.guard';
+import { HubAuthFailureLimiter } from './hub-auth-failure-limiter';
+import { HubCredentialCache } from './hub-credential-cache';
 import { HubController } from './hub.controller';
 import { HubsService } from './hub.service';
 import { AuthModule } from '../auth/auth.module';
@@ -27,13 +29,32 @@ import { UsersModule } from '../users/users.module';
     AuthModule,
   ],
   controllers: [HubController],
-  providers: [HubGateway, HubAuthGuard, HubsService],
+  // Fase 4 · P4.B (D9, cyber N1): `HubAuthFailureLimiter` y
+  // `HubCredentialCache` son UNA instancia compartida por `HubAuthGuard`
+  // (HTTP) y el middleware de `HubGateway` (WebSocket); `disconnectHub`
+  // invalida el caché que usan ambos.
+  providers: [
+    HubGateway,
+    HubAuthGuard,
+    HubsService,
+    HubAuthFailureLimiter,
+    HubCredentialCache,
+  ],
   // Re-exporta `TypeOrmModule` (no solo `HubAuthGuard`): otros módulos que
   // usan `@UseGuards(HubAuthGuard)` por referencia de clase (p.ej.
   // UnitsController en GET /units/ai-enabled) necesitan que `HubRepository`
   // (registrado acá vía `TypeOrmModule.forFeature([Hub])`) también sea
   // visible en su propio contexto — mismo motivo por el que HubModule mismo
-  // necesitó importar `UsersModule` directamente para `AuthGuard`.
-  exports: [TypeOrmModule, HubGateway, HubAuthGuard, HubsService],
+  // necesitó importar `UsersModule` directamente para `AuthGuard`. Por la
+  // misma razón se exportan `HubAuthFailureLimiter` y `HubCredentialCache`
+  // (dependencias del guard).
+  exports: [
+    TypeOrmModule,
+    HubGateway,
+    HubAuthGuard,
+    HubsService,
+    HubAuthFailureLimiter,
+    HubCredentialCache,
+  ],
 })
 export class HubModule {}
