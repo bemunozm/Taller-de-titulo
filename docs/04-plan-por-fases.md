@@ -55,7 +55,7 @@ El agente como gestor con acceso a todas las capacidades, sobre el core de Fase 
 > - ⏳ **Diferido (no bloquea el entregable):** orquestación **event-driven** (over-engineering sin canal conversacional), tools **write de gestión** (crear visitas / reportes), y cablear identidad verificada LPR/QR↔sesión (redundante con el flujo LPR para el caso vehicular).
 > - 🟠 **Follow-up de seguridad:** la service-key del worker LPR es global → ligar por-condominio (como el secret-por-hub de F1).
 
-## Fase 3 — Visión: robustez, instalabilidad y operabilidad del `lpr/` 🟡 *en progreso*
+## Fase 3 — Visión: robustez, instalabilidad y operabilidad del `lpr/` 🟢 *hecho (PR #56, mergeado)*
 > **Reencuadre (2026-07-17):** una auditoría integral de `lpr/` (5 frentes adversariales; ver [modulos/vision-auditoria.md](modulos/vision-auditoria.md)) reveló que el subsistema **no filtra las detecciones que emite** (el gate de confianza está desconectado), **es incapaz de reportar sus propios fallos** (el manejador de excepciones es código muerto → 7 meses de bugs invisibles) y **no se instala en una Raspberry limpia**. Optimizar modelos sobre esa base habría producido números sobre ruido. Por eso la Fase 3 pasa a ser **correctitud + producto**, y la evaluación/benchmark de modelos se movió a la nueva **Fase 5**.
 
 Dejar el pipeline de visión **correcto, desplegable y operable** antes de medirlo o migrarlo.
@@ -72,7 +72,26 @@ Dejar el pipeline de visión **correcto, desplegable y operable** antes de medir
   - Commitear la Fase 3 por bloques, abrir PR a `main` y mergear.
   - ✅ Investigación del citófono versionada en [`docs/investigaciones/aiphone-gt-vs-kiosko-qr/`](investigaciones/aiphone-gt-vs-kiosko-qr/informe.md).
 
-## Fase 4 — Hardening pre-piloto: seguridad, base de producción y privacidad 🔴
+## Fase 4 — Hardening pre-piloto: seguridad, base de producción y privacidad 🟢 *hecho en código; faltan el smoke manual y la operación*
+> **Estado (2026-10-09):** P1–P9 están cerradas en `feature/fase-4-hardening` y el gate completo pasa en verde:
+> - backend: 130 suites / 2823 tests, con umbrales de cobertura;
+> - **36 e2e de caja negra** con la app compilada y Postgres real;
+> - migraciones sin drift;
+> - hub: 176 tests;
+> - frontend: 627 tests;
+> - lpr: 53 tests.
+>
+> En cada fase, ciberseguridad y QA revisaron hasta aprobar. La revisión final quedó así: ciberseguridad **APROBADO CON OBSERVACIONES** (sin hallazgos críticos ni altos en el código); QA, con su único bloqueante corregido.
+>
+> El diseño, los contratos y el cierre de cada fase están en [modulos/hardening-pre-piloto.md](modulos/hardening-pre-piloto.md). La privacidad está en [modulos/privacidad-ley-21719.md](modulos/privacidad-ley-21719.md) y la guía de smoke en [modulos/smoke-pre-piloto.md](modulos/smoke-pre-piloto.md).
+>
+> Pendiente:
+> - **P10:** commits y PR.
+> - **Smoke manual.**
+> - **Operación de Benjamin** (§7 del doc de hardening): secretos, BD limpia, backfill, hubs, Vercel, ruleset de `main` y Raspberry de 64 bits.
+>
+> La planificación original queda abajo como referencia.
+
 > **Origen:** auditoría de seguridad y de builds/tests del 2026-10-08. **Nada de esta fase es opcional antes de un piloto con personas reales**, porque el sistema abre puertas físicas y guarda datos personales. Se trabaja en ramas separadas por bloque, desde `main` ya con la Fase 3 mergeada.
 
 - **4.A — Seguridad de la apertura física (1–2 días)**
