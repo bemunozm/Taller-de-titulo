@@ -46,41 +46,23 @@ runOnDisconnect:
 # * internal: credentials are stored in the configuration file
 # * http: an external HTTP URL is contacted to perform authentication
 # * jwt: an external identity server provides authentication through JWTs
-authMethod: internal
+#
+# Vigilia (Fase 4 · P6.M, D14): "http". Every publish/read/playback request is
+# authorized by the backend (POST /api/v1/internal/mediamtx/auth), which only
+# accepts a WebRTC "read" of a registered, active camera path carrying the
+# shared secret MEDIAMTX_AUTH_SECRET (Basic auth sent by the backend's WHEP
+# forward). Everything else is denied (fail-closed). The secret lives ONLY in
+# the backend env: this file holds no credentials.
+authMethod: http
 
 # Internal authentication.
 # list of users.
-authInternalUsers:
-  # Default unprivileged user.
-  # Username. 'any' means any user, including anonymous ones.
-- user: any
-  # Password. Not used in case of 'any' user.
-  pass:
-  # IPs or networks allowed to use this user. An empty list means any IP.
-  ips: []
-  # List of permissions.
-  permissions:
-    # Available actions are: publish, read, playback, api, metrics, pprof.
-  - action: publish
-    # Paths can be set to further restrict access to a specific path.
-    # An empty path means any path.
-    # Regular expressions can be used by using a tilde as prefix.
-    path:
-  - action: read
-    path:
-  - action: playback
-    path:
-
-  # Default administrator.
-  # This allows to use API, metrics and PPROF without authentication,
-  # if the IP is localhost.
-- user: any
-  pass:
-  ips: ['127.0.0.1', '::1']
-  permissions:
-  - action: api
-  - action: metrics
-  - action: pprof
+#
+# Vigilia (P6.M): ignored with authMethod "http", and intentionally empty.
+# The factory defaults granted publish/read/playback to the anonymous user
+# 'any' from any IP (anyone on the network could watch every camera or
+# publish a fake stream).
+authInternalUsers: []
 
 # HTTP-based authentication.
 # URL called to perform authentication. Every time a user wants
@@ -99,13 +81,28 @@ authInternalUsers:
 # }
 # If the response code is 20x, authentication is accepted, otherwise
 # it is discarded.
-authHTTPAddress:
+#
+# Vigilia (P6.M): internal endpoint of the backend. Assumes MediaMTX runs on
+# the same host as the backend (port 3000, global prefix /api/v1). If the
+# backend runs elsewhere, override it without editing this file through the
+# environment of the MediaMTX process, e.g.:
+#   MTX_AUTHHTTPADDRESS=http://10.0.0.5:3000/api/v1/internal/mediamtx/auth
+# (any parameter can be overridden with MTX_<PARAMETER IN UPPERCASE>). Use an
+# internal network address: the request carries the shared secret.
+authHTTPAddress: http://127.0.0.1:3000/api/v1/internal/mediamtx/auth
 # Actions to exclude from HTTP-based authentication.
 # Format is the same as the one of user permissions.
-authHTTPExclude:
-- action: api
-- action: metrics
-- action: pprof
+#
+# Vigilia (P6.M, cyber correction): nothing is excluded. An excluded action
+# skips authentication entirely, and an unauthenticated Control API on
+# loopback is still reachable from a browser on this host (CSRF with a
+# text/plain POST, DNS rebinding): adding a path with runOnInit would run
+# commands on the host, change the global config or read the camera RTSP URLs
+# (with credentials). Now every API call is authorized by the backend, which
+# only accepts the backend itself (Basic vigilia-backend:<secret>).
+# metrics/pprof/playback stay disabled; if someone enables them, the backend
+# denies them anyway (fail-closed).
+authHTTPExclude: []
 
 # JWT-based authentication.
 # Users have to login through an external identity server and obtain a JWT.
@@ -142,6 +139,12 @@ authJWTInHTTPQuery: true
 # Global settings -> Control API
 
 # Enable controlling the server through the Control API.
+#
+# Vigilia (P6.M): the backend registers camera paths here
+# (MEDIAMTX_CONTROL_URL) and probes /v3/info, always with Basic
+# vigilia-backend:<MEDIAMTX_AUTH_SECRET>; every call goes through the HTTP
+# auth (action "api"). It still listens only on loopback (defense in depth):
+# whoever controls it can add paths and read their RTSP sources.
 api: yes
 # Address of the Control API listener.
 apiAddress: 127.0.0.1:9997
@@ -156,7 +159,11 @@ apiServerKey: server.key
 # Path to the server certificate.
 apiServerCert: server.crt
 # Value of the Access-Control-Allow-Origin header provided in every HTTP response.
-apiAllowOrigin: '*'
+#
+# Vigilia (P6.M): no '*'. Only the backend calls the API (server to server,
+# CORS does not apply); a loopback origin that no browser page has keeps a
+# web page from reading API responses.
+apiAllowOrigin: 'http://127.0.0.1'
 # List of IPs or CIDRs of proxies placed before the HTTP server.
 # If the server receives a request from one of these entries, IP in logs
 # will be taken from the X-Forwarded-For header.
@@ -235,7 +242,14 @@ playbackTrustedProxies: []
 # Global settings -> RTSP server
 
 # Enable publishing and reading streams with the RTSP protocol.
-rtsp: yes
+#
+# Vigilia (P6.M, D14): disabled. This is the RTSP *server* (clients reading or
+# publishing through MediaMTX on :8554). Pulling from the cameras is done by
+# the RTSP *source* client of each path ("source: rtsp://..." registered by the
+# backend, see "RTSP source" settings under pathDefaults), which does not
+# depend on this server and keeps working. lpr/ reads the cameras directly,
+# not through MediaMTX.
+rtsp: no
 # List of enabled RTSP transport protocols.
 # UDP is the most performant, but doesn't work when there's a NAT/firewall between
 # server and clients.
@@ -287,7 +301,8 @@ rtspUDPReadBufferSize: 0
 # Global settings -> RTMP server
 
 # Enable publishing and reading streams with the RTMP protocol.
-rtmp: yes
+# Vigilia (P6.M, D14): disabled, unused (only WebRTC through the backend).
+rtmp: no
 # Address of the RTMP listener. This is needed only when encryption is "no" or "optional".
 rtmpAddress: :1935
 # Encrypt connections with TLS (RTMPS).
@@ -307,7 +322,8 @@ rtmpServerCert: server.crt
 # Global settings -> HLS server
 
 # Enable reading streams with the HLS protocol.
-hls: yes
+# Vigilia (P6.M, D14): disabled, unused (only WebRTC through the backend).
+hls: no
 # Address of the HLS listener.
 hlsAddress: :8888
 # Enable TLS/HTTPS on the HLS server.
@@ -368,7 +384,14 @@ hlsMuxerCloseAfter: 60s
 # Enable publishing and reading streams with the WebRTC protocol.
 webrtc: yes
 # Address of the WebRTC HTTP listener.
-webrtcAddress: :8889
+#
+# Vigilia (P6.M, D14): loopback only. WHEP signaling goes exclusively through
+# the backend (POST /api/v1/streams/whep -> MEDIAMTX_URL), which authorizes
+# the user and the camera first; browsers never reach this listener. If
+# MediaMTX runs on another host, bind it to the internal interface instead
+# (e.g. 10.0.0.6:8889) and point MEDIAMTX_URL there. The media itself does NOT
+# use this listener: it flows over ICE (webrtcLocalUDPAddress below).
+webrtcAddress: 127.0.0.1:8889
 # Enable TLS/HTTPS on the WebRTC server.
 webrtcEncryption: no
 # Path to the server key.
@@ -380,13 +403,22 @@ webrtcServerKey: server.key
 webrtcServerCert: server.crt
 # Value of the Access-Control-Allow-Origin header provided in every HTTP response.
 # This allows to play the WebRTC stream from an external website.
-webrtcAllowOrigin: '*'
+#
+# Vigilia (P6.M): no '*'. Signaling is server to server (backend -> MediaMTX),
+# so no browser origin needs access.
+webrtcAllowOrigin: 'http://127.0.0.1'
 # List of IPs or CIDRs of proxies placed before the WebRTC server.
 # If the server receives a request from one of these entries, IP in logs
 # will be taken from the X-Forwarded-For header.
 webrtcTrustedProxies: []
 # Address of a local UDP listener that will receive connections.
 # Use a blank string to disable.
+#
+# Vigilia (P6.M): stays on all interfaces. This is where the browser's media
+# (ICE/DTLS/SRTP) arrives once the backend negotiated the WHEP session, so
+# UDP 8189 must be reachable from the clients' network (open it in the host
+# firewall; forward it if viewers are outside the LAN). It only carries
+# sessions that the HTTP auth already accepted.
 webrtcLocalUDPAddress: :8189
 # Address of a local TCP listener that will receive connections.
 # This is disabled by default since TCP is less efficient than UDP and
@@ -399,6 +431,12 @@ webrtcIPsFromInterfaces: yes
 # An empty value means to use all available interfaces.
 webrtcIPsFromInterfacesList: []
 # List of additional hosts or IPs to send to clients.
+#
+# Vigilia (P6.M): the ICE candidates sent to the browser come from the host
+# interfaces (webrtcIPsFromInterfaces). If viewers reach the server through a
+# public IP / DNS name or a NAT, add it here (e.g. [vigilia.example.cl] or
+# [203.0.113.10]) and limit webrtcIPsFromInterfacesList to the LAN interface
+# so internal addresses (Docker, VPN) are not advertised.
 webrtcAdditionalHosts: []
 # ICE servers. Needed only when local listeners can't be reached by clients.
 # STUN servers allows to obtain and share the public IP of the server.
@@ -421,7 +459,8 @@ webrtcSTUNGatherTimeout: 5s
 # Global settings -> SRT server
 
 # Enable publishing and reading streams with the SRT protocol.
-srt: yes
+# Vigilia (P6.M, D14): disabled, unused (only WebRTC through the backend).
+srt: no
 # Address of the SRT listener.
 srtAddress: :8890
 
@@ -764,11 +803,15 @@ pathDefaults:
 # It's possible to use regular expressions by using a tilde as prefix,
 # for example "~^(test1|test2)$" will match both "test1" and "test2",
 # for example "~^prefix" will match all paths that start with "prefix".
-paths:
+#
+# Vigilia (P6.M): no static paths and no "all_others" catch-all. Camera paths
+# are added at runtime by the backend through the Control API
+# (/v3/config/paths/add/<mountPath>, "source: rtsp://..."); they live in
+# memory only, so after restarting MediaMTX each camera must be registered
+# again (POST /api/v1/cameras/:id/register). Without a catch-all, a request
+# for an unknown path is rejected before reaching the auth endpoint and nobody
+# can publish to an arbitrary path.
+paths: {}
   # example:
   # my_camera:
   #   source: rtsp://my_camera
-
-  # Settings under path "all_others" are applied to all paths that
-  # do not match another entry.
-  all_others:
