@@ -1,3 +1,9 @@
+# Variables de entorno con secretos, en cualquier carpeta (Fase 4 · P9). Solo
+# se versionan las plantillas `.env.example`.
+.env
+.env.*
+!.env.example
+
 # Videos grandes de pruebas
 mediamtx/*.mp4
 lpr/test_video/*.mp4
@@ -20,6 +26,9 @@ vigilia-hub-temp/
 
 # Modelos YOLO (pesos grandes, no versionar en git)
 *.pt
+
+# Dependencias / cachés de Node en la raíz (p.ej. vitest corrido desde aquí)
+node_modules/
 
 # Python
 __pycache__/
