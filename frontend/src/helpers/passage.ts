@@ -1,4 +1,4 @@
-import type { AttemptPassage, PassageSighting } from '@/api/DetectionsAPI'
+import type { AttemptPassage, PassageSighting } from '@/types/passage'
 import type { DetectionImageSource } from '@/helpers/detectionImage'
 
 const DIRECTION_LABELS: Record<AttemptPassage['direction'], string> = {

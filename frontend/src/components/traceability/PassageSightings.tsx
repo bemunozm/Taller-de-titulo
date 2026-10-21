@@ -1,4 +1,4 @@
-import type { AttemptPassage } from '@/api/DetectionsAPI'
+import type { AttemptPassage } from '@/types/passage'
 import { getDirectionSourceLabel, getPassageDirectionLabel, resolveCameraName, sightingImageSource, sortedSightings } from '@/helpers/passage'
 import { DetectionImages } from './DetectionImages'
 

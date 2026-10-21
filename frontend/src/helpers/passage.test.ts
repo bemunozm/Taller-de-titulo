@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseAttemptPassage, type AttemptPassage } from '@/api/DetectionsAPI'
+import { parseAttemptPassage, type AttemptPassage } from '@/types/passage'
 import {
   countPassageCameras,
   getDirectionSourceLabel,
