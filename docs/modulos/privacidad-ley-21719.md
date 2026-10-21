@@ -112,12 +112,43 @@ El art. 15 ter probablemente no la exige a un condominio, porque no es gran esca
 | Perfilado de visitantes | Se eliminan los "frecuentes" del contexto (P6) y se anonimiza a los 90 días | Bajo |
 | Datos personales en logs | Redacción desde la captura y `LOG_LEVEL` | Bajo |
 | Brecha de seguridad | Hardening P2–P6 y deber de reporte a la Agencia (art. 14 sexies) | Medio: sin un procedimiento formal de respuesta a incidentes en el piloto |
+| Video que sale del condominio (relay de cámaras, ver 7.1) | Pull on-demand: solo sale lo que alguien mira. Sin grabación en la Pi, túnel cifrado, ACL por tags y usuario del NVR con solo vista en vivo | Medio: un dataset de entrenamiento implica copias de imágenes fuera del condominio |
+
+### 7.1 Relay de cámaras y dataset de entrenamiento (2026-10-16)
+
+Una Raspberry Pi 3B en la conserjería retransmite las cámaras del NVR por **Tailscale** hacia el PC de desarrollo y, más adelante, al servidor central (kit en `edge/camera-relay/`). Cómo se trata cada aspecto:
+
+- **Qué sale y cuándo:** solo los streams que alguien está mirando (on-demand). La Pi **no almacena video**. Su journald guarda las IPs de los lectores y los nombres de los paths, con un tope de 64 MB.
+- **Encargado nuevo, Tailscale:** coordina las conexiones y solo ve metadatos (nodos, IPs y horarios). Hay que sumarlo al inventario de encargados de la política (5.3, punto 4).
+- **Cifrado por tramo:**
+  - **NVR → Pi:** viaja en claro por la LAN del condominio, porque RTSP del Hikvision no tiene TLS.
+  - **Pi → consumidores:** va cifrado de punta a punta con WireGuard, también cuando pasa por los relays DERP de Tailscale.
+  - **Mitigación del tramo en claro:** el usuario del NVR solo tiene "vista en vivo" y el relay solo puede hablar con la IP del NVR.
+- **Antes de grabar cualquier dataset para entrenar** hacen falta tres cosas:
+  1. autorización escrita de la administración (el responsable);
+  2. definir la finalidad (entrenar y evaluar modelos de LPR y de detección de personas para la tesis), el plazo de conservación y la eliminación al cerrar la tesis;
+  3. guardarlo cifrado y fuera del repo, con acceso solo de los autores.
+
+  Las imágenes que se publiquen en la tesis van anonimizadas: patentes y rostros difuminados.
+- **Transferencia internacional:** el servidor central (Hetzner) está en Alemania. La UE tiene un nivel de protección equivalente (RGPD), pero falta confirmarlo con la lista de la Agencia.
+
+### 7.2 Datos de evaluación del LPR (2026-10-20)
+
+Para calibrar el LPR de `porton-hd` se grabaron clips reales del portón y se armó una verdad terreno con las patentes ([vision.md](vision.md#evaluación-lpr-sobre-cámara-real-porton-hd)). Son datos personales (patentes e imágenes de personas), así que se tratan así:
+
+- **Fuera del repo, que es público.** Los clips, el CSV de verdad terreno y las salidas del harness viven en `lpr/eval-data/`, que está en `.gitignore`. También se ignoran todo video bajo `lpr/` (`*.mkv`, `*.mp4`, `*.avi`, `*.mov`) y las salidas `replay-*.json`. Solo se versiona la herramienta (`lpr/tools/replay_eval.py`), nunca los datos.
+- **Documentos y reportes sin patentes reales.** Las pasadas se publican anonimizadas como P1…P8 y los clips no se identifican por nombre, porque el nombre lleva fecha y hora. El reporte del harness enmascara las patentes salvo con `--show-plates`, que es solo para uso local.
+- **Logs del worker enmascarados.** `lpr/utils/pii.py` (`mask_plate`) aplica la misma regla que `maskPlate` del backend: quedan los 2 primeros y los 2 últimos caracteres (`AB**12`). Se usa en todos los logs de lecturas, emisiones y dedupe, y en el DTO que se loguea en dry-run, que además va sin la imagen base64. El POST al backend sí lleva la patente real, porque es el dato del tratamiento.
+- **Tests con patentes sintéticas.** Ningún test del worker, del backend ni del frontend usa patentes vistas en las cámaras.
+- **Borrado al terminar.** Cuando termine la calibración, los clips y la verdad terreno de esta prueba se borran del equipo de desarrollo, incluidas las copias temporales. Si hiciera falta un dataset de evaluación permanente para la tesis, rigen los tres requisitos de 7.1: autorización escrita, finalidad y plazo definidos, y almacenamiento cifrado.
 
 ## 8. Incierto o pendiente
 
 - Prórroga de la vigencia, normativa de la Agencia (videovigilancia, LPR, formato de reporte de brechas) y lista de países adecuados.
 - Firmar o aceptar el DPA de OpenAI y revisar el del proveedor SMTP y el de Cloudinary.
 - Revisión legal de los textos. Audio pregrabado del aviso en el hub, para no depender del modelo (follow-up).
+- Anexo del dataset de entrenamiento (finalidad, plazo, custodia y anonimización para la tesis) y autorización escrita de la administración para el relay (7.1).
+- Borrar los clips y la verdad terreno de la evaluación del LPR del 2026-10-20 al cerrar la calibración (7.2).
 
 ## Fuentes (consultadas el 2026-10-09)
 
