@@ -7,18 +7,25 @@ correction of the Chilean format). Everything after that (tracking + voting,
 dedupe, emission) stays in `LprWorker`; `lpr/tools/replay_eval.py` runs these
 same two functions so the regression harness cannot drift from production.
 
+With a direction line configured, `process_frame` also runs the vehicle tracker
+(ByteTrack) on the same zone crop, binds every plate read to the vehicle whose
+box contains it and hands the vehicle trajectories to the plate tracker, which
+decides the direction (see `utils/direction.py`).
+
 `iter_plate_reads` is a generator: the OCR of box N+1 only runs when the caller
 asks for it. `process_frame` consumes all the boxes of a frame (the tracker
 needs every one to associate them).
 """
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 from PIL import Image
 
 from lpr.processor.plate_tracker import PlateEmission, PlateTracker, TrackObservation
 from lpr.processor.rules import normalize_plate, resolve_plate
+from lpr.settings import settings
+from lpr.utils.direction import DIRECTION_ENTRY, DIRECTION_EXIT, DirectionLine
 from lpr.utils.images import frame_to_pil
 from lpr.utils.zones import bounding_rect, point_in_any, polygons_to_pixels
 
@@ -69,6 +76,17 @@ def scaled_imgsz(imgsz: int, frame_side: int, crop_side: int) -> int:
     return max(32, int(-(-target // 32)) * 32)
 
 
+def zone_crop(cfg: Any, frame: np.ndarray) -> Tuple[List[np.ndarray], Optional[Tuple[int, int, int, int]]]:
+    """Zone polygons in pixels and the envelope rectangle (x1, y1, x2, y2) the
+    detectors look at; `(polygons, None)` when there is no zone (whole frame).
+    Shared by the plate detector and the vehicle tracker so both see the same crop."""
+    zone = getattr(cfg, 'zone', None)
+    h, w = frame.shape[:2]
+    polygons = polygons_to_pixels(zone, w, h) if zone else []
+    rect = bounding_rect(polygons, w, h, ZONE_MARGIN) if polygons else None
+    return polygons, rect
+
+
 def detect_plates(detector: Callable[..., Iterable[Any]], frame: np.ndarray,
                   cfg: Any) -> List[Any]:
     """Run `detector(frame, min_conf)`, restricted to `cfg.zone` when set.
@@ -83,10 +101,8 @@ def detect_plates(detector: Callable[..., Iterable[Any]], frame: np.ndarray,
     if getattr(cfg, 'detection_blocked', False):
         return []  # fail-closed: zone configured but invalid, nothing to look at
     min_conf = cfg.min_det_conf
-    zone = getattr(cfg, 'zone', None)
     h, w = frame.shape[:2]
-    polygons = polygons_to_pixels(zone, w, h) if zone else []
-    rect = bounding_rect(polygons, w, h, ZONE_MARGIN) if polygons else None
+    polygons, rect = zone_crop(cfg, frame)
     if rect is None:
         return list(detector(frame, min_conf) or [])
 
@@ -168,7 +184,7 @@ def iter_plate_reads(
         yield read
 
 
-def read_to_observation(read: PlateRead) -> TrackObservation:
+def read_to_observation(read: PlateRead, vehicle_id: Optional[int] = None) -> TrackObservation:
     """A box that did not produce a valid plate still feeds the tracker (it
     keeps the track alive and contributes to the direction trend) but votes
     nothing. Shape-rejected boxes are not fed: they are not plates."""
@@ -176,8 +192,40 @@ def read_to_observation(read: PlateRead) -> TrackObservation:
     return TrackObservation(
         box=tuple(float(v) for v in read.box),  # type: ignore[arg-type]
         text=read.plate if valid else None,
-        ocr_conf=read.ocr_conf, det_conf=read.det_conf, ref=read,
+        ocr_conf=read.ocr_conf, det_conf=read.det_conf, ref=read, vehicle_id=vehicle_id,
     )
+
+
+def direction_line_of(cfg: Any) -> Optional[DirectionLine]:
+    """The camera's validated `DirectionLine` (cfg stores the contract dict)."""
+    return DirectionLine.from_settings(getattr(cfg, 'direction_line', None))
+
+
+def wants_vehicle_tracking(cfg: Any) -> bool:
+    """Vehicle tracking costs a second model per frame: only when a direction
+    line is configured and the camera does not fix the direction itself."""
+    return (direction_line_of(cfg) is not None
+            and getattr(cfg, 'direction', 'unknown') not in (DIRECTION_ENTRY, DIRECTION_EXIT)
+            and not getattr(cfg, 'detection_blocked', False))
+
+
+def assign_vehicle(plate_box: Tuple[float, float, float, float],
+                   vehicles: Sequence[Tuple[int, Tuple[float, float, float, float]]]) -> Optional[int]:
+    """Id of the vehicle whose box contains the CENTER of the plate. With several
+    candidates (overlapping cars) the one containing the most of the plate wins;
+    a tie goes to the smaller (more specific) box."""
+    cx, cy = (plate_box[0] + plate_box[2]) / 2.0, (plate_box[1] + plate_box[3]) / 2.0
+    plate_area = max(1.0, (plate_box[2] - plate_box[0]) * (plate_box[3] - plate_box[1]))
+    best: Optional[Tuple[float, float, int]] = None
+    for vid, (x1, y1, x2, y2) in vehicles:
+        if not (x1 <= cx <= x2 and y1 <= cy <= y2):
+            continue
+        ix = max(0.0, min(plate_box[2], x2) - max(plate_box[0], x1))
+        iy = max(0.0, min(plate_box[3], y2) - max(plate_box[1], y1))
+        key = (-(ix * iy) / plate_area, (x2 - x1) * (y2 - y1), vid)
+        if best is None or key < best:
+            best = key
+    return best[2] if best else None
 
 
 def make_tracker(cfg: Any, clock: Optional[Callable[[], float]] = None) -> PlateTracker:
@@ -188,6 +236,8 @@ def make_tracker(cfg: Any, clock: Optional[Callable[[], float]] = None) -> Plate
         max_gap_seconds=getattr(cfg, 'track_max_gap_seconds', 1.5),
         direction=getattr(cfg, 'direction', 'unknown'),
         min_winner_share=getattr(cfg, 'min_winner_share', 0.0),
+        direction_wait_seconds=float(settings.LPR_DIRECTION_WAIT_SECONDS),
+        direction_line=direction_line_of(cfg),
         **kwargs,
     )
 
@@ -201,11 +251,38 @@ def process_frame(
     now: Optional[float] = None,
     *,
     save_only_on_plate: bool = False,
+    vehicle_tracker: Optional[Any] = None,
 ) -> Tuple[List[PlateRead], List[PlateEmission]]:
     """Full per-frame decision path shared by the worker and the replay harness:
-    detect (zone aware) -> read (shape filter, OCR, plate format) -> tracker.
-    Returns every read of the frame and the emissions the tracker triggered."""
+    detect (zone aware) -> read (shape filter, OCR, plate format) -> vehicle
+    association -> tracker. Returns every read of the frame and the emissions the
+    tracker triggered.
+
+    `vehicle_tracker` (optional, `VehicleTracker`) only runs when
+    `wants_vehicle_tracking(cfg)`; without it (or if it failed to load) the
+    direction falls back to the plate width trend / unknown."""
+    h, w = frame.shape[:2]
+    line = direction_line_of(cfg)
+    tracker.set_direction_line(line)
     boxes = detect_plates(detector, frame, cfg)
     reads = list(iter_plate_reads(frame, boxes, fast_ocr, cfg, save_only_on_plate=save_only_on_plate))
-    observations = [read_to_observation(r) for r in reads if r.status != STATUS_SHAPE_REJECTED]
-    return reads, tracker.update(observations, now)
+
+    vehicles: List[Tuple[int, Tuple[float, float, float, float]]] = []
+    paths = None
+    if vehicle_tracker is not None:
+        vehicle_tracker.sync_line(line)
+        if wants_vehicle_tracking(cfg) and vehicle_tracker.available:
+            _polygons, rect = zone_crop(cfg, frame)
+            if rect is None:
+                vehicles = vehicle_tracker.update(frame, (0, 0), now)
+            else:
+                rx1, ry1, rx2, ry2 = rect
+                vehicles = vehicle_tracker.update(np.ascontiguousarray(frame[ry1:ry2, rx1:rx2]),
+                                                  (rx1, ry1), now)
+            paths = vehicle_tracker.paths()
+
+    observations = [
+        read_to_observation(r, assign_vehicle(tuple(float(v) for v in r.box), vehicles))  # type: ignore[arg-type]
+        for r in reads if r.status != STATUS_SHAPE_REJECTED
+    ]
+    return reads, tracker.update(observations, now, paths=paths, frame_size=(w, h))

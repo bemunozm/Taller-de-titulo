@@ -181,10 +181,12 @@ def post_event(backend_url: str, payload: dict, dry_run: bool = True) -> int:
 
     # Meta de patente
     meta = {}
-    # `direction` ('entry'|'exit'|'unknown') y `track` ({id, reads, votes,
-    # winner_share}) son el contrato de la ingesta con el seguimiento + voto.
+    # `direction` ('entry'|'exit'|'unknown'), `direction_source`
+    # ('camera'|'line'|'motion'|'width'|'none') y `track` ({id, reads, votes,
+    # winner_share, vehicle_id?}) son el contrato de la ingesta con el
+    # seguimiento + voto.
     allowed_meta = ['bbox', 'snapshot_jpeg_b64', 'char_confidences', 'char_conf_min', 'char_conf_mean',
-                    'confirmed_by', 'direction', 'track']
+                    'confirmed_by', 'direction', 'direction_source', 'track']
     for k in allowed_meta:
         if k in payload: meta[k] = payload.get(k)
     

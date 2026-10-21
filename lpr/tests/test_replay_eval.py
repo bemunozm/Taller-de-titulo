@@ -90,3 +90,30 @@ def test_extras_tambien_van_enmascarados_por_defecto():
 
 def test_salida_por_defecto_dentro_de_eval_data():
     assert ev.DEFAULT_DATA_DIR.name == 'eval-data' and ev.DEFAULT_DATA_DIR.parent.name == 'lpr'
+
+
+def test_parse_direction_line():
+    assert ev.parse_direction_line(None) is None
+    assert ev.parse_direction_line('0.45,0.6;0.85,0.6;left') == {
+        'from': {'x': 0.45, 'y': 0.6}, 'to': {'x': 0.85, 'y': 0.6}, 'exitSide': 'left'}
+    for bad in ('0.4,0.6;0.8,0.6', '0.4,0.6;0.8,0.6;up', '0.4,0.6;0.41,0.6;left', '1.4,0.6;0.8,0.6;left'):
+        with pytest.raises(ValueError):
+            ev.parse_direction_line(bad)
+
+
+def test_direccion_se_desglosa_por_fuente_y_distingue_equivocada_de_unknown():
+    gt = [ev.GtRow('c1', 10, 16, 'BBCD12', 'alta', 'entry'),
+          ev.GtRow('c1', 20, 26, 'BKZT21', 'alta', 'exit'),
+          ev.GtRow('c1', 30, 36, 'PGHZ30', 'alta', 'exit'),
+          ev.GtRow('c1', 40, 46, 'KRZT45', 'alta', 'entry')]
+    ems = [
+        ev.Emission('c1', 12, 'BBCD12', 'entry', direction_source='line'),
+        ev.Emission('c1', 22, 'BKZT21', 'entry', direction_source='width'),     # equivocada
+        ev.Emission('c1', 32, 'PGHZ30', 'unknown', direction_source='none'),    # unknown
+        ev.Emission('c1', 42, 'KRZT45', 'entry', direction_source='motion'),
+    ]
+    sc = ev.score(ems, gt)
+    assert (sc.direction_ok, sc.direction_wrong, sc.direction_unknown, sc.direction_total) == (2, 1, 1, 4)
+    assert sc.direction_by_source == {
+        'line': {'ok': 1, 'wrong': 0, 'unknown': 0}, 'width': {'ok': 0, 'wrong': 1, 'unknown': 0},
+        'none': {'ok': 0, 'wrong': 0, 'unknown': 1}, 'motion': {'ok': 1, 'wrong': 0, 'unknown': 0}}

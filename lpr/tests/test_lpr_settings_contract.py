@@ -31,6 +31,8 @@ def _expected_fields(settings):
             expected['direction'] = value
         elif key == 'zone':
             expected['zone'] = value
+        elif key == 'directionLine':
+            expected['direction_line'] = value
         elif key == 'detectorImgsz':
             expected['detector_imgsz'] = value
         elif key == 'sampleFps':
@@ -49,7 +51,7 @@ def _fields_of(key):
     if key == 'crop' or key.startswith('crop.'):
         return ['min_crop_w', 'max_crop_w', 'min_crop_ratio', 'max_crop_ratio']
     return {'detectorImgsz': ['detector_imgsz'], 'sampleFps': ['sample_fps', 'poll_interval'],
-            'confirmReads': ['confirm_reads']}.get(key, [key])
+            'confirmReads': ['confirm_reads'], 'directionLine': ['direction_line']}.get(key, [key])
 
 
 def test_el_contrato_existe_y_tiene_casos():
@@ -113,3 +115,37 @@ def test_limites_del_recorte_del_contrato(base):
     assert over.min_crop_ratio == base.min_crop_ratio
     over = apply_camera_settings(base, {'crop': {'minRatio': 1, 'maxRatio': crop['maxRatio']['max'] + 1}})
     assert over.max_crop_ratio == base.max_crop_ratio
+
+
+def test_reglas_de_la_linea_de_direccion_del_contrato(base):
+    rules = CASES['rules']['directionLine']
+    assert rules['exitSide'] == ['left', 'right'] and rules['minLength'] == 0.05
+
+    def line(length, side='left'):
+        return {'from': {'x': 0.1, 'y': 0.5}, 'to': {'x': 0.1 + length, 'y': 0.5}, 'exitSide': side}
+
+    just_ok = apply_camera_settings(base, {'directionLine': line(rules['minLength'] + 0.001)})
+    assert just_ok.direction_line is not None
+    too_short = apply_camera_settings(base, {'directionLine': line(rules['minLength'] - 0.001)})
+    assert too_short.direction_line is None
+    for side in rules['exitSide']:
+        assert apply_camera_settings(base, {'directionLine': line(0.5, side)}).direction_line['exitSide'] == side
+
+
+def test_linea_invalida_conserva_la_previa_como_la_zona(base):
+    good = {'from': {'x': 0.2, 'y': 0.7}, 'to': {'x': 0.85, 'y': 0.75}, 'exitSide': 'left'}
+    current = apply_camera_settings(base, {'directionLine': good})
+    broken = {**good, 'exitSide': 'up'}
+    kept = apply_camera_settings(base, {'directionLine': broken}, previous=current)
+    assert kept.direction_line == good
+    # sin previa no hay fail-closed: simplemente no hay linea (la direccion cae a los respaldos)
+    first = apply_camera_settings(base, {'directionLine': broken}, previous=base)
+    assert first.direction_line is None and first.detection_blocked is False
+
+
+def test_linea_ausente_o_nula_quita_la_linea(base):
+    good = {'from': {'x': 0.2, 'y': 0.7}, 'to': {'x': 0.85, 'y': 0.75}, 'exitSide': 'left'}
+    current = apply_camera_settings(base, {'directionLine': good})
+    assert current.direction_line == good
+    assert apply_camera_settings(base, {}, previous=current).direction_line is None
+    assert apply_camera_settings(base, {'directionLine': None}, previous=current).direction_line is None

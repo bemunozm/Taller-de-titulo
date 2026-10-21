@@ -17,6 +17,10 @@ Usage (from the repo root):
     # with a detection zone (normalized x,y points; ';' between points, '|' between polygons)
     python -m lpr.tools.replay_eval ... --zone "0.36,0.33;0.90,0.33;0.90,0.98;0.36,0.98"
 
+    # with a direction line (from;to;exitSide): the vehicle tracker (ByteTrack) runs and the
+    # report splits the direction score by source (line / motion / width / none)
+    python -m lpr.tools.replay_eval ... --direction-line "0.45,0.60;0.85,0.60;left"
+
 Ground truth CSV (UTF-8, header required; extra columns are ignored):
 
     clip,t_inicio_s,t_fin_s,patente_real,certeza[,entra_sale]
@@ -97,6 +101,8 @@ class Emission:
     direction: str = 'unknown'
     reads: int = 0
     votes: int = 0
+    direction_source: str = 'none'
+    vehicle_id: Optional[int] = None
 
 
 @dataclass
@@ -109,6 +115,10 @@ class Score:
     latencies: List[float] = field(default_factory=list)
     direction_ok: int = 0
     direction_total: int = 0
+    direction_wrong: int = 0      # called the OPPOSITE way (the serious one)
+    direction_unknown: int = 0    # said 'unknown'
+    # source -> {'ok': n, 'wrong': n, 'unknown': n}
+    direction_by_source: Dict[str, Dict[str, int]] = field(default_factory=dict)
     wrong_detail: List[str] = field(default_factory=list)
     extra_detail: List[str] = field(default_factory=list)
 
@@ -151,7 +161,17 @@ def score(emissions: Sequence[Emission], gt: Sequence[GtRow], margin: float = 1.
             result.latencies.append(first.t - r.t0)
             if r.direction:
                 result.direction_total += 1
-                result.direction_ok += int(first.direction == r.direction)
+                bucket = result.direction_by_source.setdefault(
+                    first.direction_source, {'ok': 0, 'wrong': 0, 'unknown': 0})
+                if first.direction == r.direction:
+                    result.direction_ok += 1
+                    bucket['ok'] += 1
+                elif first.direction in ('entry', 'exit'):
+                    result.direction_wrong += 1
+                    bucket['wrong'] += 1
+                else:
+                    result.direction_unknown += 1
+                    bucket['unknown'] += 1
         elif id(r) not in wrong_rows:
             result.missed += 1
     return result
@@ -174,6 +194,22 @@ def parse_zone(text: Optional[str]) -> Optional[List[List[Dict[str, float]]]]:
             raise ValueError('a zone polygon needs at least 3 points')
         polygons.append(points)
     return polygons
+
+
+def parse_direction_line(text: Optional[str]) -> Optional[Dict[str, Any]]:
+    """'fx,fy;tx,ty;left|right' -> `lprSettings.directionLine` (normalized 0-1)."""
+    if not text:
+        return None
+    parts = [p.strip() for p in text.split(';')]
+    if len(parts) != 3:
+        raise ValueError('--direction-line expects "fx,fy;tx,ty;left|right"')
+    fx, fy = (float(v) for v in parts[0].split(','))
+    tx, ty = (float(v) for v in parts[1].split(','))
+    line = {'from': {'x': fx, 'y': fy}, 'to': {'x': tx, 'y': ty}, 'exitSide': parts[2]}
+    from lpr.utils.direction import DirectionLine
+    if DirectionLine.from_settings(line) is None:
+        raise ValueError('--direction-line is not a valid directionLine (0-1 coords, length >= 0.05, left|right)')
+    return line
 
 
 def parse_crop(text: Optional[str]) -> Dict[str, Any]:
@@ -223,20 +259,33 @@ def iter_sampled_frames(path: Path, fps: float) -> Iterator[Tuple[float, np.ndar
         cap.release()
 
 
-def replay_clip(path: Path, cfg: Any, detector: Any, ocr: Any) -> Tuple[List[Emission], List[float]]:
-    """Run one clip through `pipeline.process_frame`; returns emissions and ms per frame."""
+def replay_clip(path: Path, cfg: Any, detector: Any, ocr: Any,
+                vehicle_tracker: Any = None) -> Tuple[List[Emission], List[float]]:
+    """Run one clip through `pipeline.process_frame`; returns emissions and ms per frame.
+
+    `vehicle_tracker` must be FRESH per clip (ByteTrack keeps ids between calls).
+    Confirmed plates still waiting for their direction when the clip ends are
+    flushed (a live track would close on its own)."""
     from lpr.processor.pipeline import make_tracker, process_frame
 
     tracker = make_tracker(cfg)
     emissions: List[Emission] = []
     timings: List[float] = []
-    for t, frame in iter_sampled_frames(path, cfg.sample_fps):
-        started = time.perf_counter()
-        _reads, found = process_frame(frame, detector, ocr, cfg, tracker, t)
-        timings.append((time.perf_counter() - started) * 1000.0)
+    last_t = 0.0
+
+    def _collect(t: float, found: Sequence[Any]) -> None:
         for em in found:
             emissions.append(Emission(clip=path.stem, t=t, text=em.text, direction=em.direction,
-                                      reads=em.reads, votes=em.votes))
+                                      reads=em.reads, votes=em.votes,
+                                      direction_source=em.direction_source, vehicle_id=em.vehicle_id))
+
+    for t, frame in iter_sampled_frames(path, cfg.sample_fps):
+        last_t = t
+        started = time.perf_counter()
+        _reads, found = process_frame(frame, detector, ocr, cfg, tracker, t, vehicle_tracker=vehicle_tracker)
+        timings.append((time.perf_counter() - started) * 1000.0)
+        _collect(t, found)
+    _collect(last_t, tracker.flush())
     return emissions, timings
 
 
@@ -249,6 +298,7 @@ def build_cfg(args: argparse.Namespace) -> Any:
         'sample_fps': args.fps, 'poll_interval': 1.0 / args.fps,
         'detector_imgsz': args.imgsz, 'confirm_reads': args.confirm,
         'direction': args.direction, 'zone': parse_zone(args.zone),
+        'direction_line': parse_direction_line(args.direction_line),
         'min_det_conf': args.det_conf,
     }
     if args.zone_file:
@@ -266,7 +316,8 @@ def format_report(label: str, cfg: Any, sc: Score, ms_frame: float, n_frames: in
     lines = [
         f'== {label}: imgsz={cfg.detector_imgsz} fps={cfg.sample_fps:g} N={cfg.confirm_reads} '
         f'crop=[{cfg.min_crop_w},{cfg.max_crop_w},{cfg.min_crop_ratio:g},{cfg.max_crop_ratio:g}] '
-        f'zona={"si" if cfg.zone else "no"} direccion={cfg.direction}',
+        f'zona={"si" if cfg.zone else "no"} direccion={cfg.direction} '
+        f'linea={"si" if getattr(cfg, "direction_line", None) else "no"}',
         f'   reales={sc.n_real}  correctas={sc.correct}  INCORRECTAS={sc.wrong}  sin_lectura={sc.missed}  '
         f'emisiones_extra={sc.extra}  (emisiones totales={n_emissions})',
         f'   latencia (s desde inicio de la pasada): '
@@ -274,7 +325,11 @@ def format_report(label: str, cfg: Any, sc: Score, ms_frame: float, n_frames: in
         f'   ms/frame={ms_frame:.1f} sobre {n_frames} frames muestreados',
     ]
     if sc.direction_total:
-        lines.append(f'   direccion correcta: {sc.direction_ok}/{sc.direction_total}')
+        lines.append(f'   direccion correcta: {sc.direction_ok}/{sc.direction_total}  '
+                     f'EQUIVOCADA={sc.direction_wrong}  unknown={sc.direction_unknown}')
+        for source in sorted(sc.direction_by_source):
+            b = sc.direction_by_source[source]
+            lines.append(f'     fuente {source}: correcta={b["ok"]} equivocada={b["wrong"]} unknown={b["unknown"]}')
     lines += [f'   INCORRECTA: {d}' for d in sc.wrong_detail]
     lines += [f'   extra: {d}' for d in sc.extra_detail]
     return '\n'.join(lines)
@@ -291,6 +346,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--zone', help='normalized polygons: "x,y;x,y;x,y|x,y;..."')
     ap.add_argument('--zone-file', help='JSON file with the zone (same shape as lprSettings.zone)')
     ap.add_argument('--direction', default='both', choices=['entry', 'exit', 'both', 'unknown'])
+    ap.add_argument('--direction-line', help='"fx,fy;tx,ty;left|right" (normalized): runs the vehicle tracker; '
+                    'exitSide = side the vehicle moves to when EXITING, looking from "from" to "to"')
     ap.add_argument('--device', help='detector device (cuda:0, cpu); default: ultralytics auto')
     ap.add_argument('--ocr-device', default=None, help='OCR device (default: LPR_OCR_DEVICE)')
     ap.add_argument('--det-conf', type=float, default=0.3, help='min detector confidence (default 0.3)')
@@ -306,6 +363,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=logging.WARNING)
     from lpr.detector.yolo_detector import detect, load_detector
     from lpr.ocr.fast_ocr_adapter import FastPlateOCR
+    from lpr.settings import settings
 
     cfg = build_cfg(args)
     gt = load_gt(Path(args.gt))
@@ -320,15 +378,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     detector = lambda frame, min_conf=cfg.min_det_conf, imgsz=None: detect(  # noqa: E731
         model, frame, min_conf, imgsz=imgsz or cfg.detector_imgsz, device=cfg.device)
 
+    from lpr.processor.pipeline import make_tracker, process_frame, wants_vehicle_tracking
+    from lpr.processor.vehicle_tracker import VehicleTracker
+    use_vehicles = wants_vehicle_tracking(cfg)
+
+    def new_vehicle_tracker() -> Any:
+        return VehicleTracker(model_ref=settings.LPR_VEHICLE_MODEL or None, device=cfg.device) if use_vehicles else None
+
     # Warm-up (CUDA context, model load) so it does not count as ms/frame.
     warm_t, warm_frame = next(iter_sampled_frames(clips[0], cfg.sample_fps))
-    from lpr.processor.pipeline import make_tracker, process_frame
-    process_frame(warm_frame, detector, ocr, cfg, make_tracker(cfg), warm_t)
+    process_frame(warm_frame, detector, ocr, cfg, make_tracker(cfg), warm_t, vehicle_tracker=new_vehicle_tracker())
 
     emissions: List[Emission] = []
     timings: List[float] = []
     for clip in clips:
-        found, ms = replay_clip(clip, cfg, detector, ocr)
+        found, ms = replay_clip(clip, cfg, detector, ocr, vehicle_tracker=new_vehicle_tracker())
         emissions += found
         timings += ms
     clip_gt = [r for r in gt if any(clip_matches(r.clip, c) for c in clips)]
