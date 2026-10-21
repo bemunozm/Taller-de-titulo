@@ -48,6 +48,7 @@ function fakeRepository() {
       Promise<{ detections: number; accessAttempts: number }>,
       [readonly string[], readonly string[]]
     >((ids) => Promise.resolve({ detections: ids.length, accessAttempts: 0 })),
+    anonymizeStalePassages: jest.fn(() => Promise.resolve(0)),
     countDisabledUsersToAnonymize: jest.fn(() => Promise.resolve(0)),
     findDisabledUsersToAnonymize: jest.fn<
       Promise<Array<{ id: string }>>,
@@ -418,6 +419,18 @@ describe('RetentionService (Fase 4 · P7.R)', () => {
         rows: 2,
         accessAttempts: 3,
       });
+    });
+
+    it('al final barre las pasadas fuera de ventana con detecciones ya anonimizadas', async () => {
+      await build().run();
+
+      expect(repository.anonymizeStalePassages).toHaveBeenCalledTimes(1);
+    });
+
+    it('en dry-run no enmascara pasadas', async () => {
+      await build({ RETENTION_DRY_RUN: 'true' }).run();
+
+      expect(repository.anonymizeStalePassages).not.toHaveBeenCalled();
     });
 
     it('sin avance en un lote lleno (carrera) corta en vez de repetirlo', async () => {

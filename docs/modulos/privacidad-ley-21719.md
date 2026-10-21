@@ -34,6 +34,7 @@ La ley no fija plazos: son **criterio propio** justificado por la proporcionalid
 | Visita terminal: nombre, RUT, teléfono, patente solicitada, motivo y QR del visitante | Anonimizar (`visitorName` = "[anonimizado]", el resto a null) | **90 días** desde el cierre | `RETENTION_VISITS_DAYS` |
 | Sesión del conserje terminal: datos del visitante, nombres en `residentsNotified` (se conservan los ids), `transcript` y `functionCalls` | Anonimizar | **90 días** | `RETENTION_VISITS_DAYS` |
 | Detecciones e intentos: patente (`plate`/`plate_raw`), vínculo al residente, texto de `reason` | Anonimizar (las métricas del dashboard siguen) | **90 días** | `RETENTION_ACCESS_LOG_DAYS` |
+| Pasadas de vehículos (`vehicle_passages.plate`, D8) | Anonimizar junto con sus detecciones (`anonymizedAt`) | **90 días** | `RETENTION_ACCESS_LOG_DAYS` |
 | Anomalías (fila con `aiReasoning`) | Borrar | **90 días** | `RETENTION_ANOMALIES_DAYS` |
 | Notificaciones (copian los datos del visitante) | Borrar | **90 días** | `RETENTION_NOTIFICATIONS_DAYS` |
 | Acciones pendientes terminales (`input`, `contextSnapshot`, `result`) | Borrar | **90 días** | `RETENTION_PENDING_ACTIONS_DAYS` |
@@ -43,6 +44,10 @@ La ley no fija plazos: son **criterio propio** justificado por la proporcionalid
 | better-auth: `session` y `verification` vencidas; `rateLimit` antiguo | Borrar | al vencer / 1 día | — |
 | Disco del LPR (frames) | Ya existe | 7 días | `LPR_RETENTION_DAYS` |
 
+- **Pasadas multicámara (2026-10-21, D8).** Una pasada agrupa las lecturas de una misma patente vistas por varias cámaras, y copia la patente en `vehicle_passages.plate`. La retención y la supresión por patente la enmascaran en la misma operación que anonimiza sus detecciones (`anonymizeDetectionsWith`). Dos registros vigentes **no** se tocan antes de tiempo:
+  - **Pasadas abiertas.** Una pasada que sigue dentro de su ventana (`LPR_PASSAGE_WINDOW_SECONDS`, 60 s) todavía puede recibir lecturas, así que no se enmascara.
+  - **Evidencia de una pasada pendiente.** Una detección no se anonimiza mientras su intento, **o el intento de su pasada**, espera la decisión del conserje (`Pendiente`). Así las lecturas de las otras cámaras siguen disponibles como evidencia de esa decisión.
+  - **Caso borde pendiente:** si una supresión inmediata alcanza a una pasada todavía abierta, sus detecciones se anonimizan pero la patente de la pasada no, y ninguna corrida posterior vuelve a ella. Falta un barrido propio de `vehicle_passages` (deuda de D8).
 - **Audio crudo:** Vigilia **no lo guarda**: ni el backend ni el hub lo persisten (se verifica en P7). La transcripción solo se usa en vivo, porque `ConciergeSession.transcript` nunca se escribe.
 - **Retención del encargado:** OpenAI retiene sus logs de monitoreo de abuso hasta **30 días**, y Realtime **no es elegible** para Zero Data Retention. Debe informarse en la política.
 

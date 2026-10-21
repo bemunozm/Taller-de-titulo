@@ -159,8 +159,36 @@ export const MAX_VISIT_ACTIVE_GRACE_HOURS = 168;
 export const DEFAULT_VISIT_EXIT_COOLDOWN_MINUTES = 5;
 export const MAX_VISIT_EXIT_COOLDOWN_MINUTES = 120;
 
+/**
+ * LPR_PASSAGE_WINDOW_SECONDS (dirección + pasadas multicámara): segundos
+ * durante los que las lecturas de una misma patente (de cualquier cámara del
+ * condominio) se agrupan en UNA pasada: un solo intento de acceso y una sola
+ * apertura. La ventana es deslizante (cada lectura la renueva). Opcional;
+ * default 60, entre 1 y 600.
+ */
+export const DEFAULT_LPR_PASSAGE_WINDOW_SECONDS = 60;
+export const MAX_LPR_PASSAGE_WINDOW_SECONDS = 600;
+
+/**
+ * LPR_PASSAGE_REVERSE_MIN_SECONDS: segundos mínimos desde el inicio de una
+ * pasada para que una lectura con la dirección contraria (ambas medidas por
+ * cruce de línea) abra una pasada NUEVA (el auto que entra y sale enseguida).
+ * Antes de eso es evidencia: un cruce espurio no abre el portón dos veces.
+ * Opcional; default 15, entre 1 y 600.
+ */
+export const DEFAULT_LPR_PASSAGE_REVERSE_MIN_SECONDS = 15;
+export const MAX_LPR_PASSAGE_REVERSE_MIN_SECONDS = 600;
+
+/**
+ * LPR_PASSAGE_ORPHAN_SECONDS: segundos tras los que una pasada SIN intento
+ * (el líder murió o se colgó antes de decidir) deja de absorber lecturas: la
+ * siguiente toma el liderazgo. Opcional; default 30, entre 1 y 600.
+ */
+export const DEFAULT_LPR_PASSAGE_ORPHAN_SECONDS = 30;
+export const MAX_LPR_PASSAGE_ORPHAN_SECONDS = 600;
+
 /** Unidad de una variable de duración entera (aparece en el mensaje de error). */
-type DurationUnit = 'minutos' | 'horas' | 'días';
+type DurationUnit = 'segundos' | 'minutos' | 'horas' | 'días';
 
 /**
  * Motivo por el que `value` (ya recortado y no vacío) no es un entero de
@@ -577,6 +605,22 @@ const envFieldsSchema = z.object({
     integerDuration(MAX_VISIT_EXIT_COOLDOWN_MINUTES, 'minutos'),
   ),
 
+  // Segundos que las lecturas de una misma patente se agrupan en una pasada.
+  LPR_PASSAGE_WINDOW_SECONDS: optionalNonBlank(
+    integerDuration(MAX_LPR_PASSAGE_WINDOW_SECONDS, 'segundos'),
+  ),
+
+  // Segundos mínimos desde el inicio de una pasada para que una dirección
+  // contraria (por línea) abra otra pasada.
+  LPR_PASSAGE_REVERSE_MIN_SECONDS: optionalNonBlank(
+    integerDuration(MAX_LPR_PASSAGE_REVERSE_MIN_SECONDS, 'segundos'),
+  ),
+
+  // Segundos tras los que una pasada sin intento cede el liderazgo.
+  LPR_PASSAGE_ORPHAN_SECONDS: optionalNonBlank(
+    integerDuration(MAX_LPR_PASSAGE_ORPHAN_SECONDS, 'segundos'),
+  ),
+
   // Horas de validez de la visita que crea el conserje digital.
   VISIT_CONCIERGE_VALIDITY_HOURS: optionalNonBlank(
     integerDuration(MAX_VISIT_CONCIERGE_VALIDITY_HOURS, 'horas'),
@@ -795,6 +839,45 @@ export function parseVisitExitCooldownMinutes(raw: string | undefined): number {
     DEFAULT_VISIT_EXIT_COOLDOWN_MINUTES,
     MAX_VISIT_EXIT_COOLDOWN_MINUTES,
     'minutos',
+  );
+}
+
+/**
+ * Interpreta LPR_PASSAGE_WINDOW_SECONDS. Ausente o vacío -> default (60).
+ * Un valor inválido lanza (fail-closed), aunque `validateEnv` ya lo haya
+ * rechazado al arrancar.
+ */
+export function parseLprPassageWindowSeconds(raw: string | undefined): number {
+  return parseIntegerDuration(
+    'LPR_PASSAGE_WINDOW_SECONDS',
+    raw,
+    DEFAULT_LPR_PASSAGE_WINDOW_SECONDS,
+    MAX_LPR_PASSAGE_WINDOW_SECONDS,
+    'segundos',
+  );
+}
+
+/** Interpreta LPR_PASSAGE_REVERSE_MIN_SECONDS (default 15). Inválido lanza. */
+export function parseLprPassageReverseMinSeconds(
+  raw: string | undefined,
+): number {
+  return parseIntegerDuration(
+    'LPR_PASSAGE_REVERSE_MIN_SECONDS',
+    raw,
+    DEFAULT_LPR_PASSAGE_REVERSE_MIN_SECONDS,
+    MAX_LPR_PASSAGE_REVERSE_MIN_SECONDS,
+    'segundos',
+  );
+}
+
+/** Interpreta LPR_PASSAGE_ORPHAN_SECONDS (default 30). Inválido lanza. */
+export function parseLprPassageOrphanSeconds(raw: string | undefined): number {
+  return parseIntegerDuration(
+    'LPR_PASSAGE_ORPHAN_SECONDS',
+    raw,
+    DEFAULT_LPR_PASSAGE_ORPHAN_SECONDS,
+    MAX_LPR_PASSAGE_ORPHAN_SECONDS,
+    'segundos',
   );
 }
 

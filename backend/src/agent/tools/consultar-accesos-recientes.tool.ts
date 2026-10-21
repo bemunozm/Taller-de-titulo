@@ -78,10 +78,17 @@ export class ConsultarAccesosRecientesTool
   ): Promise<ConsultarAccesosRecientesOutput> {
     const limite = input.limite ?? DEFAULT_LIMIT;
 
-    const attempts = await this.detectionsService.listAttempts(limite, {
-      organizationId: ctx.tenantId,
-      isSuperAdmin: ctx.isSuperAdmin,
-    });
+    // Solo lee la decisión: sin las dos consultas de pasadas (lecturas con
+    // imágenes) que la trazabilidad sí necesita.
+    const attempts = await this.detectionsService.listAttempts(
+      limite,
+      {
+        organizationId: ctx.tenantId,
+        isSuperAdmin: ctx.isSuperAdmin,
+      },
+      null,
+      { withPassages: false },
+    );
 
     return {
       cantidad: attempts.length,

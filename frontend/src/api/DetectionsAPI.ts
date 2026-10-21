@@ -1,6 +1,10 @@
 import api from '@/lib/axios'
 import { isAxiosError } from 'axios'
 import { ApiError, toApiError } from '@/helpers/httpErrors'
+import { parseAttemptPassage, type AttemptPassage } from '@/types/passage'
+
+export { parseAttemptPassage, PASSAGE_DIRECTIONS, PASSAGE_DIRECTION_SOURCES } from '@/types/passage'
+export type { AttemptPassage, PassageSighting } from '@/types/passage'
 
 /** Metadatos libres del worker LPR; solo se lee el snapshot. */
 export type PlateDetectionMeta = {
@@ -45,6 +49,8 @@ export type AccessAttempt = {
   createdAt: string
   residente?: User | null
   detection: PlateDetection
+  /** Pasada a la que pertenece el intento; `null` o ausente en datos antiguos. */
+  passage?: AttemptPassage | null
 }
 
 // Entidad `AnomalyEvent` del backend: las columnas nullable llegan como `null`.
@@ -76,7 +82,7 @@ export async function listPlateDetections(): Promise<PlateDetection[]> {
 export async function listAccessAttempts(): Promise<AccessAttempt[]> {
   try {
     const { data } = await api.get<AccessAttempt[]>('/detections/plates/attempts')
-    return data || []
+    return (data || []).map((attempt) => ({ ...attempt, passage: parseAttemptPassage(attempt.passage) }))
   } catch (error) {
     if (isAxiosError(error) && error.response) {
       throw new Error(error.response.data.message)

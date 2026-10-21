@@ -1,0 +1,19 @@
+{
+  "description": "Contrato compartido de la convención de la línea de dirección (lprSettings.directionLine). Lo consumen lpr/utils/direction.py (cruce del vehículo) y frontend/src/helpers/directionLine.ts (lado/flecha del editor). Coordenadas normalizadas 0..1 de imagen: x hacia la derecha, y hacia ABAJO. Con d = to - from y v = p - from: cross = d.x*v.y - d.y*v.x; cross < 0 => lado 'left', cross > 0 => lado 'right' (lado visual de quien avanza de from a to). Un vehículo que cruza el segmento hacia exitSide => 'exit'; hacia el lado opuesto => 'entry'; si su trayectoria no cruza el segmento => null. Los casos usan un frame cuadrado (frameSize) para que la convención no dependa del aspecto.",
+  "frameSize": { "width": 1000, "height": 1000 },
+  "sideCases": [
+    { "name": "horizontal: arriba es left", "line": { "from": { "x": 0.2, "y": 0.5 }, "to": { "x": 0.8, "y": 0.5 } }, "point": { "x": 0.5, "y": 0.3 }, "side": "left" },
+    { "name": "horizontal: abajo es right", "line": { "from": { "x": 0.2, "y": 0.5 }, "to": { "x": 0.8, "y": 0.5 } }, "point": { "x": 0.5, "y": 0.7 }, "side": "right" },
+    { "name": "vertical bajando: derecha es left", "line": { "from": { "x": 0.5, "y": 0.2 }, "to": { "x": 0.5, "y": 0.8 } }, "point": { "x": 0.7, "y": 0.5 }, "side": "left" },
+    { "name": "vertical bajando: izquierda es right", "line": { "from": { "x": 0.5, "y": 0.2 }, "to": { "x": 0.5, "y": 0.8 } }, "point": { "x": 0.3, "y": 0.5 }, "side": "right" },
+    { "name": "horizontal invertida: abajo es left", "line": { "from": { "x": 0.8, "y": 0.5 }, "to": { "x": 0.2, "y": 0.5 } }, "point": { "x": 0.5, "y": 0.7 }, "side": "left" }
+  ],
+  "crossingCases": [
+    { "name": "sube cruzando, salida arriba", "line": { "from": { "x": 0.2, "y": 0.5 }, "to": { "x": 0.8, "y": 0.5 }, "exitSide": "left" }, "path": [ { "x": 0.5, "y": 0.8 }, { "x": 0.5, "y": 0.6 }, { "x": 0.5, "y": 0.4 }, { "x": 0.5, "y": 0.2 } ], "expected": "exit" },
+    { "name": "baja cruzando, salida arriba", "line": { "from": { "x": 0.2, "y": 0.5 }, "to": { "x": 0.8, "y": 0.5 }, "exitSide": "left" }, "path": [ { "x": 0.5, "y": 0.2 }, { "x": 0.5, "y": 0.4 }, { "x": 0.5, "y": 0.6 }, { "x": 0.5, "y": 0.8 } ], "expected": "entry" },
+    { "name": "sube cruzando, salida abajo", "line": { "from": { "x": 0.2, "y": 0.5 }, "to": { "x": 0.8, "y": 0.5 }, "exitSide": "right" }, "path": [ { "x": 0.5, "y": 0.8 }, { "x": 0.5, "y": 0.6 }, { "x": 0.5, "y": 0.4 }, { "x": 0.5, "y": 0.2 } ], "expected": "entry" },
+    { "name": "vertical: va a la derecha, salida left", "line": { "from": { "x": 0.5, "y": 0.2 }, "to": { "x": 0.5, "y": 0.8 }, "exitSide": "left" }, "path": [ { "x": 0.2, "y": 0.5 }, { "x": 0.4, "y": 0.5 }, { "x": 0.6, "y": 0.5 }, { "x": 0.8, "y": 0.5 } ], "expected": "exit" },
+    { "name": "pasa fuera del segmento", "line": { "from": { "x": 0.2, "y": 0.5 }, "to": { "x": 0.4, "y": 0.5 }, "exitSide": "left" }, "path": [ { "x": 0.8, "y": 0.8 }, { "x": 0.8, "y": 0.6 }, { "x": 0.8, "y": 0.4 }, { "x": 0.8, "y": 0.2 } ], "expected": null },
+    { "name": "no llega a cruzar", "line": { "from": { "x": 0.2, "y": 0.5 }, "to": { "x": 0.8, "y": 0.5 }, "exitSide": "left" }, "path": [ { "x": 0.5, "y": 0.9 }, { "x": 0.5, "y": 0.8 }, { "x": 0.5, "y": 0.7 } ], "expected": null }
+  ]
+}

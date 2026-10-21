@@ -4,9 +4,11 @@ import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
+  IsDefined,
   IsIn,
   IsInt,
   IsNumber,
+  IsObject,
   Max,
   Min,
   ValidateIf,
@@ -24,11 +26,16 @@ import {
   LPR_ACTIONS,
   LPR_DETECTOR_IMGSZ_VALUES,
   LPR_DIRECTIONS,
+  LPR_EXIT_SIDES,
+  MIN_DIRECTION_LINE_LENGTH,
 } from '../lpr-settings';
 import type {
   LprAction,
   LprCropSettings,
   LprDirection,
+  LprDirectionLine,
+  LprExitSide,
+  LprPoint,
   LprSettings,
 } from '../lpr-settings';
 
@@ -142,6 +149,84 @@ function IsMinReadsForAccess(): PropertyDecorator {
       },
     });
   };
+}
+
+/**
+ * Punto de la línea de dirección: coordenadas 0..1 ESTRICTAS (a diferencia de
+ * las zonas, no se recortan: una línea mal dibujada se rechaza, no se
+ * deforma en silencio).
+ */
+export class DirectionPointDto implements LprPoint {
+  @ApiPropertyOptional({ minimum: 0, maximum: 1, example: 0.2 })
+  @IsNumber(FINITE, { message: 'x debe ser un número' })
+  @Min(0)
+  @Max(1)
+  x: number;
+
+  @ApiPropertyOptional({ minimum: 0, maximum: 1, example: 0.7 })
+  @IsNumber(FINITE, { message: 'y debe ser un número' })
+  @Min(0)
+  @Max(1)
+  y: number;
+}
+
+/** El extremo `to` debe distar al menos MIN_DIRECTION_LINE_LENGTH de `from`. */
+function IsFarFromSibling(sibling: string, message: string): PropertyDecorator {
+  return (target: object, propertyKey: string | symbol): void => {
+    registerDecorator({
+      name: 'isFarFromSibling',
+      target: target.constructor,
+      propertyName: String(propertyKey),
+      constraints: [sibling],
+      options: { message },
+      validator: {
+        validate(value: unknown, args: ValidationArguments): boolean {
+          const [siblingName] = args.constraints as [string];
+          const other = (args.object as Record<string, unknown>)[siblingName];
+          if (!isPoint(value) || !isPoint(other)) return true;
+          return (
+            Math.hypot(value.x - other.x, value.y - other.y) >=
+            MIN_DIRECTION_LINE_LENGTH
+          );
+        },
+      },
+    });
+  };
+}
+
+function isPoint(value: unknown): value is LprPoint {
+  if (typeof value !== 'object' || value === null) return false;
+  const { x, y } = value as { x?: unknown; y?: unknown };
+  return typeof x === 'number' && typeof y === 'number';
+}
+
+export class LprDirectionLineDto implements LprDirectionLine {
+  @ApiPropertyOptional({ type: () => DirectionPointDto })
+  @IsDefined({ message: 'directionLine.from es obligatorio' })
+  @IsObject()
+  @ValidateNested()
+  @Type(() => DirectionPointDto)
+  from: DirectionPointDto;
+
+  @ApiPropertyOptional({ type: () => DirectionPointDto })
+  @IsDefined({ message: 'directionLine.to es obligatorio' })
+  @IsObject()
+  @ValidateNested()
+  @Type(() => DirectionPointDto)
+  @IsFarFromSibling(
+    'from',
+    `directionLine debe medir al menos ${MIN_DIRECTION_LINE_LENGTH} (coordenadas normalizadas)`,
+  )
+  to: DirectionPointDto;
+
+  @ApiPropertyOptional({
+    enum: LPR_EXIT_SIDES,
+    description:
+      'Lado hacia el que se mueve el vehículo al SALIR, mirando de from a to',
+  })
+  @IsDefined({ message: 'directionLine.exitSide es obligatorio' })
+  @IsIn(LPR_EXIT_SIDES)
+  exitSide: LprExitSide;
 }
 
 export class LprCropDto implements LprCropSettings {
@@ -303,6 +388,17 @@ export class LprSettingsDto {
   @Max(10)
   @IsMinReadsForAccess()
   confirmReads?: number;
+
+  @ApiPropertyOptional({
+    type: () => LprDirectionLineDto,
+    description:
+      'Línea de cruce (coordenadas 0..1, longitud >= 0.05) que decide entrada/salida',
+  })
+  @IfDefined()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => LprDirectionLineDto)
+  directionLine?: LprDirectionLineDto;
 }
 
 /** Body de `PATCH /cameras/:id/lpr-settings`. */
@@ -331,5 +427,13 @@ export function toStoredLprSettings(dto: LprSettingsDto): LprSettings | null {
     if (Object.keys(crop).length > 0) out.crop = crop;
   }
   if (dto.confirmReads !== undefined) out.confirmReads = dto.confirmReads;
+  if (dto.directionLine !== undefined) {
+    const { from, to, exitSide } = dto.directionLine;
+    out.directionLine = {
+      from: { x: from.x, y: from.y },
+      to: { x: to.x, y: to.y },
+      exitSide,
+    };
+  }
   return Object.keys(out).length > 0 ? out : null;
 }

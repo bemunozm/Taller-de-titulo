@@ -89,15 +89,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Dirección de un intento de acceso. Se prefiere `detection.meta.direction`
- * (la reporta el worker LPR) y, si falta, se deduce del sufijo de `method`
- * (`Patente - Entrada|Salida`; `Patente - Registro` no trae dirección).
+ * Dirección de un intento de acceso. Se prefiere la de la pasada
+ * (`passage.direction`, ya resuelta por prioridad entre cámaras); si es
+ * `unknown` o no hay pasada, `detection.meta.direction` (la reporta el worker
+ * LPR) y, por último, el sufijo de `method` (`Patente - Entrada|Salida`;
+ * `Patente - Registro` no trae dirección).
  * Devuelve la etiqueta para mostrar, o `null` si no hay dirección conocida.
  */
 export function getAttemptDirectionLabel(attempt: {
   method?: string | null
   detection?: { meta?: unknown } | null
+  passage?: { direction?: string | null } | null
 }): string | null {
+  const fromPassage = attempt.passage?.direction
+  if (fromPassage === 'entry' || fromPassage === 'exit') {
+    return DIRECTION_LABELS[fromPassage]
+  }
+
   const meta = attempt.detection?.meta
   const fromMeta = isRecord(meta) ? meta.direction : undefined
   if (fromMeta === 'entry' || fromMeta === 'exit' || fromMeta === 'both') {

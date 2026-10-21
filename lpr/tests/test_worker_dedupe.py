@@ -217,3 +217,126 @@ def test_los_logs_no_llevan_la_patente_real_pero_el_payload_si(worker, clock, ba
     assert backend.payloads[0]['plate'] == PLATE and backend.payloads[0]['plate_raw'] == PLATE
     assert PLATE not in caplog.text
     assert 'BB**12' in caplog.text
+
+
+# --------------------------------------------------------------------------
+# Direccion por linea + seguimiento de vehiculos (G1)
+# --------------------------------------------------------------------------
+LINE = {'from': {'x': 0.2, 'y': 0.5}, 'to': {'x': 0.8, 'y': 0.5}, 'exitSide': 'right'}  # bajar = salir
+
+
+class _FakeVehicles:
+    """Doble de `VehicleTracker`: un auto cuyo borde inferior sigue `bottoms`."""
+
+    def __init__(self, bottoms, available=True):
+        self.bottoms = list(bottoms)
+        self.available = available
+        self._paths = {}
+
+    def sync_line(self, _line):
+        pass
+
+    def update(self, _image, offset=(0, 0), now=None):
+        y2 = self.bottoms.pop(0) if self.bottoms else self.bottoms_last
+        self.bottoms_last = y2
+        self._paths.setdefault(7, []).append((now, 200.0, float(y2)))
+        return [(7, (80.0, 60.0, 320.0, float(y2)))]
+
+    def paths(self):
+        return self._paths
+
+
+def _with_line(worker, vehicles):
+    from lpr.processor.pipeline import make_tracker
+
+    worker.cfg = SimpleNamespace(**{**vars(worker.cfg), 'direction_line': LINE})
+    worker.tracker = make_tracker(worker.cfg)
+    worker.vehicle_tracker = vehicles
+    return worker
+
+
+def test_payload_lleva_direction_source(worker, clock, backend):
+    _pass_at(worker, clock, 0)
+    meta = backend.payloads[0]['meta']
+    # camara 'both', sin linea y con la patente del mismo ancho en los 3 cuadros:
+    # el ancho no muestra tendencia => ni direccion ni fuente.
+    assert (meta['direction'], meta['direction_source']) == ('unknown', 'none')
+
+
+def test_con_linea_la_emision_espera_el_cruce_y_lleva_vehicle_id(worker, clock, backend):
+    _with_line(worker, _FakeVehicles([180, 200, 220, 300]))   # la linea esta en y=240 (cuadro de 480)
+    _pass_at(worker, clock, 0, frames=3)
+    assert backend.payloads == []                             # patente confirmada, sin direccion aun
+    _frame_at(worker, clock, 3 * FRAME_STEP)                  # el auto cruza la linea
+    (payload,) = backend.payloads
+    meta = payload['meta']
+    assert (meta['direction'], meta['direction_source']) == ('exit', 'line')
+    assert meta['track']['vehicle_id'] == 7
+
+
+def test_con_linea_sin_cruce_emite_al_vencer_la_espera(worker, clock, backend):
+    _with_line(worker, _FakeVehicles([200]))                  # el auto no se mueve ni cruza (la caja contiene la patente)
+    end = _pass_at(worker, clock, 0, frames=3)
+    assert backend.payloads == []
+    for step in range(1, 5):                                  # sigue a la vista 4 s mas
+        _frame_at(worker, clock, end + step)
+    (payload,) = backend.payloads
+    assert payload['plate'] == PLATE
+    # el auto no se movio (sin motion) y el ancho de la patente no cambio (sin width)
+    assert (payload['meta']['direction'], payload['meta']['direction_source']) == ('unknown', 'none')
+
+
+def test_si_el_modelo_de_vehiculos_no_carga_el_worker_sigue_emitiendo(worker, worker_module, clock, backend,
+                                                                    monkeypatch):
+    from lpr.processor.pipeline import make_tracker
+    from lpr.processor.vehicle_tracker import VehicleTracker
+
+    def boom(_ref):
+        raise OSError('sin pesos')
+
+    monkeypatch.setattr(worker_module, 'VehicleTracker',
+                        lambda **kw: VehicleTracker(model_loader=boom, **kw))
+    worker.cfg = SimpleNamespace(**{**vars(worker.cfg), 'direction_line': LINE})
+    worker.tracker = make_tracker(worker.cfg)
+    _pass_at(worker, clock, 0)
+    assert worker.vehicle_tracker is not None and worker.vehicle_tracker.available is False
+    (payload,) = backend.payloads
+    assert (payload['meta']['direction'], payload['meta']['direction_source']) == ('unknown', 'none')
+
+
+def test_sin_linea_no_se_crea_el_seguimiento_de_vehiculos(worker, clock, backend):
+    _pass_at(worker, clock, 0)
+    assert worker.vehicle_tracker is None
+
+
+def test_flush_al_detener_emite_la_patente_confirmada_que_esperaba_direccion(worker, clock, backend):
+    _with_line(worker, _FakeVehicles([200]))                  # nunca cruza
+    _pass_at(worker, clock, 0, frames=3)
+    assert backend.payloads == []                             # esperando la direccion
+    assert worker.flush_pending() == 1                        # el worker se detiene
+    (payload,) = backend.payloads
+    assert payload['plate'] == PLATE and payload['meta']['direction_source'] == 'none'
+    assert payload['meta']['track']['vehicle_id'] == 7
+    assert worker.flush_pending() == 0                        # no se emite dos veces
+    assert len(backend.payloads) == 1
+
+
+def test_flush_al_detener_sin_pendientes_no_hace_nada(worker, clock, backend):
+    _pass_at(worker, clock, 0, frames=2)                      # ni siquiera confirmada
+    assert worker.flush_pending() == 0 and backend.payloads == []
+
+
+def test_el_bucle_de_captura_libera_los_pendientes_al_terminar(worker, clock, backend, monkeypatch):
+    import signal
+    monkeypatch.setattr(signal, "signal", lambda *a, **k: None)  # no tocar los handlers del proceso de pytest
+    _with_line(worker, _FakeVehicles([200]))
+    _pass_at(worker, clock, 0, frames=3)
+
+    class _Cap:
+        def read(self):
+            raise KeyboardInterrupt                           # el proceso se detiene
+
+    worker.start_settings_sync = lambda *a, **k: None
+    with pytest.raises(KeyboardInterrupt):
+        worker.start_capture_loop(_Cap())
+    assert [p['plate'] for p in backend.payloads] == [PLATE]

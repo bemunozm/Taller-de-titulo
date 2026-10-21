@@ -1,9 +1,12 @@
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 from types import SimpleNamespace
 from pydantic import BaseModel, Field, field_validator
+
+from lpr.utils.direction import DirectionLine
 try:
     # pydantic v2+: BaseSettings moved to pydantic-settings package
     from pydantic import BaseSettings  # type: ignore
@@ -108,6 +111,13 @@ class Settings(BaseSettings):
     LPR_TRACK_MAX_GAP_SECONDS: float = Field(1.5, gt=0)
     # Participación mínima del texto ganador (ponderada por confianza OCR) para emitir.
     LPR_MIN_WINNER_SHARE: float = Field(0.6, ge=0, le=1)
+    # Direccion por linea de cruce: tras confirmar la patente, la emision espera
+    # hasta este tiempo a que el VEHICULO cruce la linea configurada; vencido,
+    # emite con el mejor respaldo (motion > width > unknown). 0 = no esperar.
+    # Solo por entorno (no por camara): el backend no lo gobierna.
+    LPR_DIRECTION_WAIT_SECONDS: float = Field(4.0, ge=0, le=30)
+    # Modelo COCO para seguir vehiculos (ByteTrack). Vacio = el `yolo11n.pt` de lpr/.
+    LPR_VEHICLE_MODEL: str = ''
     LPR_DRY_RUN: bool = False
     LPR_DETECTOR_MODEL: str = 'morsetechlab/yolov11-license-plate-detection'
     LPR_OCR_MODEL: str = 'cct-s-v1-global-model'
@@ -201,7 +211,10 @@ class Settings(BaseSettings):
     CLOUDINARY_RETRY_BACKOFF: float = 1.0
 
     class Config:
-        env_file = str(Path(__file__).parent / '.env')
+        # `LPR_ENV_FILE` permite apuntar a otro archivo (los tests lo fijan a uno
+        # inexistente para no leer el `.env` local con credenciales reales). Sin
+        # definir, es `lpr/.env`: el comportamiento de producción no cambia.
+        env_file = os.environ.get('LPR_ENV_FILE') or str(Path(__file__).parent / '.env')
         env_file_encoding = 'utf-8'
         # Los errores de validación no repiten el valor recibido: un secreto
         # inválido no debe terminar en logs.
@@ -316,6 +329,9 @@ class WorkerConfig(BaseModel):
     # Participación mínima (ponderada por confianza OCR) del texto ganador para
     # emitir: un track con lecturas muy divididas no se emite aunque llegue a N.
     min_winner_share: float = Field(0.6, ge=0, le=1)
+    # Linea de direccion normalizada 0-1 (contrato `lprSettings.directionLine`):
+    # {'from': {'x','y'}, 'to': {'x','y'}, 'exitSide': 'left'|'right'}. None = sin linea.
+    direction_line: Optional[Dict[str, Any]] = None
     # Fail-closed: zona de detección inválida y sin una válida previa. La cámara
     # no detecta nada (ver `apply_camera_settings`).
     detection_blocked: bool = False
@@ -417,6 +433,8 @@ MAX_ZONE_POLYGONS = 20
 MAX_ZONE_POINTS = 100
 # Clave interna que `camera_settings_updates` agrega cuando la zona vino rota.
 ZONE_INVALID_KEY = '_zone_invalid'
+# Idem para `directionLine` (se conserva la previa, como con la zona).
+DIRECTION_LINE_INVALID_KEY = '_direction_line_invalid'
 
 
 def _as_int(value: Any) -> Optional[int]:
@@ -530,6 +548,15 @@ def camera_settings_updates(settings_dict: Optional[Mapping[str, Any]]) -> Dict[
             else:
                 updates['zone'] = zone
 
+    raw_line = settings_dict.get('directionLine')
+    if raw_line is not None:
+        line = DirectionLine.from_settings(raw_line)
+        if line is None:
+            warn('directionLine', raw_line)
+            updates[DIRECTION_LINE_INVALID_KEY] = True
+        else:
+            updates['direction_line'] = line.to_settings()
+
     imgsz = settings_dict.get('detectorImgsz')
     if imgsz is not None:
         if _as_int(imgsz) in ALLOWED_DETECTOR_IMGSZ:
@@ -599,6 +626,15 @@ def apply_camera_settings(
             updates['detection_blocked'] = True
             logging.error('lprSettings.zone inválida y sin zona válida previa: la cámara %s NO detectará '
                           'patentes hasta recibir una zona válida (fail-closed)', cfg.camera_id)
+    line_invalid = bool(updates.pop(DIRECTION_LINE_INVALID_KEY, False))
+    if line_invalid:
+        # A diferencia de la zona, sin linea previa NO hay fail-closed: sin linea
+        # la direccion cae a los respaldos (ancho / unknown), no se pierde nada.
+        if previous is not None and previous.direction_line:
+            updates['direction_line'] = previous.direction_line
+            logging.warning('lprSettings.directionLine inválida: se conserva la última línea válida')
+        else:
+            logging.warning('lprSettings.directionLine inválida y sin línea previa: se ignora')
     if not updates:
         return cfg
     merged = cfg

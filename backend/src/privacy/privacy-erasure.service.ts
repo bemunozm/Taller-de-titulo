@@ -222,6 +222,8 @@ export class PrivacyErasureService {
       idsOf(detections.rows),
       clearedFrameIds,
     );
+    // Las pasadas de esa patente (vehicle_passages) también, siempre.
+    await tx.anonymizePassages(request);
     result.anonymized.detections = anonymizedDetections.detections;
     result.anonymized.accessAttempts = anonymizedDetections.accessAttempts;
     result.skipped.detections = keptDetections.length;

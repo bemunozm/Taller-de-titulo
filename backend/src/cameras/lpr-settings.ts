@@ -14,6 +14,10 @@ export const LPR_DIRECTIONS: readonly LprDirection[] = [
   'exit',
   'both',
 ];
+export type LprExitSide = 'left' | 'right';
+export const LPR_EXIT_SIDES: readonly LprExitSide[] = ['left', 'right'];
+/** Longitud mínima (normalizada) de la línea de dirección. */
+export const MIN_DIRECTION_LINE_LENGTH = 0.05;
 export const LPR_DETECTOR_IMGSZ_VALUES = [640, 960, 1280, 1920] as const;
 
 export interface LprCropSettings {
@@ -22,6 +26,23 @@ export interface LprCropSettings {
   maxWidth?: number | null;
   minRatio?: number;
   maxRatio?: number;
+}
+
+/** Punto normalizado (0 a 1) del cuadro. */
+export interface LprPoint {
+  x: number;
+  y: number;
+}
+
+/**
+ * Línea de cruce que decide la dirección del vehículo (plan G1/G2).
+ * `exitSide` = lado hacia el que se mueve el vehículo al SALIR, mirando de
+ * `from` a `to`.
+ */
+export interface LprDirectionLine {
+  from: LprPoint;
+  to: LprPoint;
+  exitSide: LprExitSide;
 }
 
 export interface LprSettings {
@@ -33,6 +54,8 @@ export interface LprSettings {
   sampleFps?: number;
   crop?: LprCropSettings;
   confirmReads?: number;
+  /** Línea de cruce para medir la dirección (entrada/salida). */
+  directionLine?: LprDirectionLine;
 }
 
 /** Respuesta de `GET /workers/cameras/:id/lpr-settings` (contrato con el worker). */

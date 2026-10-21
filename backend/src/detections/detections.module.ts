@@ -2,6 +2,8 @@ import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PlateDetection } from './entities/plate-detection.entity';
 import { AccessAttempt } from './entities/access-attempt.entity';
+import { VehiclePassage } from './entities/vehicle-passage.entity';
+import { VehiclePassagesService } from './vehicle-passages.service';
 import { Camera } from '../cameras/entities/camera.entity';
 import { DetectionsService } from './detections.service';
 import { DetectionsController } from './detections.controller';
@@ -18,16 +20,19 @@ import { HubModule } from '../hub/hub.module';
     // (resource-derived — el worker LPR no manda sesión de usuario). Solo se
     // usa read-only vía repository, no se importa CamerasModule completo para
     // evitar acoplar módulos.
-    TypeOrmModule.forFeature([PlateDetection, AccessAttempt, Camera]),
+    TypeOrmModule.forFeature([
+      PlateDetection,
+      AccessAttempt,
+      VehiclePassage,
+      Camera,
+    ]),
     VehiclesModule,
     NotificationsModule,
     UsersModule,
     HubModule,
     forwardRef(() => VisitsModule),
   ],
-  providers: [
-    DetectionsService,
-  ],
+  providers: [DetectionsService, VehiclePassagesService],
   controllers: [DetectionsController],
   exports: [DetectionsService],
 })

@@ -1,4 +1,5 @@
 import logging
+import signal
 import time
 import os
 import re
@@ -15,8 +16,9 @@ from lpr.detector.yolo_detector import Detection
 from lpr.utils.images import frame_to_pil, pil_to_base64
 from lpr.utils.capture import reconnect_capture
 from lpr.ocr.fast_ocr_adapter import FastPlateOCR
-from lpr.processor.pipeline import STATUS_SHAPE_REJECTED, make_tracker, process_frame
+from lpr.processor.pipeline import STATUS_SHAPE_REJECTED, make_tracker, process_frame, wants_vehicle_tracking
 from lpr.processor.plate_tracker import PlateEmission
+from lpr.processor.vehicle_tracker import VehicleTracker
 from lpr.storage.fs_storage import save_image_pil
 from lpr.api.client import consumes_dedupe, fetch_camera_json, is_success, post_event
 from lpr.processor.rules import analyze_char_confidences
@@ -29,9 +31,11 @@ from lpr.utils.pii import mask_plate
 _LOGGED_CONFIG_FIELDS = (
     'action', 'direction', 'detector_imgsz', 'sample_fps', 'confirm_reads',
     'track_max_gap_seconds', 'min_crop_w', 'max_crop_w', 'min_crop_ratio', 'max_crop_ratio',
-    'detection_blocked',
+    'detection_blocked', 'direction_line',
 )
 # Cambios que obligan a rehacer el tracker (el resto de la config se lee por frame).
+# `direction_line` NO está: el voto no depende de la línea; `process_frame` se la pasa
+# al tracker por frame y este (y el VehicleTracker) descartan solo las trayectorias.
 _TRACKER_FIELDS = ('confirm_reads', 'direction', 'track_max_gap_seconds')
 
 
@@ -46,6 +50,14 @@ class LprWorker:
         self.fast_ocr = fast_ocr
         # seguimiento + voto por vehículo (reemplaza a `plate_sightings`)
         self.tracker = make_tracker(cfg)
+        # Seguimiento de vehículos (ByteTrack) para la dirección por línea: UNA
+        # instancia por worker (el estado `persist` vive en el modelo), creada
+        # perezosamente solo si la cámara tiene línea. Si el modelo no carga queda
+        # `available=False` y la dirección cae a los respaldos.
+        self.vehicle_tracker: Optional[VehicleTracker] = None
+        # Ultimo cuadro procesado: la imagen de evidencia de una emision que se
+        # libera al detener el worker (`flush_pending`).
+        self._last_frame: Optional[np.ndarray] = None
         # `cfg` y `tracker` se publican juntos bajo este lock: el frame en curso
         # toma una foto consistente de ambos y el refetch nunca deja a medias.
         self._runtime_lock = threading.Lock()
@@ -151,7 +163,37 @@ class LprWorker:
         self._settings_thread = threading.Thread(target=_loop, name='lpr-settings-sync', daemon=True)
         self._settings_thread.start()
 
+    def flush_pending(self) -> int:
+        """Emite las patentes ya CONFIRMADAS que esperaban su direccion. Al detener
+        el worker no hay mas cuadros que las cierren: sin esto se perderian.
+        Devuelve cuantas emitio."""
+        future = self.processing_future
+        if future is not None:
+            try:
+                future.result(timeout=10)  # que termine el cuadro en curso
+            except Exception:
+                logging.exception('El cuadro en curso fallo antes de liberar los pendientes')
+        with self._runtime_lock:
+            tracker = self.tracker
+        pending = tracker.flush()
+        frame = self._last_frame
+        if pending and frame is None:
+            logging.warning('Hay %d patentes pendientes pero ningun cuadro de evidencia', len(pending))
+            return 0
+        for emission in pending:
+            try:
+                self._handle_emission(frame, emission, time.time())
+            except Exception:
+                logging.exception('No se pudo emitir una patente pendiente al detener')
+        return len(pending)
+
     def start_capture_loop(self, cap):
+        # SIGTERM (supervisor/manager) normalmente mata el proceso sin ejecutar
+        # `finally`; se convierte en SystemExit para poder liberar los pendientes.
+        try:
+            signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+        except (ValueError, OSError):  # fuera del hilo principal
+            pass
         self.start_settings_sync()
         last_frame_ts = 0
         # Trackea la última lectura EXITOSA del stream (independiente del
@@ -215,6 +257,10 @@ class LprWorker:
         finally:
             self._settings_stop.set()
             try:
+                self.flush_pending()
+            except Exception:
+                logging.exception('Error liberando las patentes pendientes')
+            try:
                 self.executor.shutdown(wait=False)
             except Exception:
                 pass
@@ -249,6 +295,19 @@ class LprWorker:
                       if now_ts - float(ts) > dedup]:
             self.emitted_cache.pop(plate, None)
 
+    def _ensure_vehicle_tracker(self, cfg) -> Optional[VehicleTracker]:
+        """Crea el VehicleTracker la primera vez que la cámara lo necesita (carga
+        del modelo ~1 s; nunca se reintenta si falló: queda no disponible)."""
+        if self.vehicle_tracker is None and wants_vehicle_tracking(cfg):
+            self.vehicle_tracker = VehicleTracker(
+                model_ref=settings.LPR_VEHICLE_MODEL or None,
+                device=getattr(cfg, 'device', None),
+            )
+            logging.info('Seguimiento de vehículos %s para %s',
+                         'activo' if self.vehicle_tracker.available else 'NO disponible (direccion por ancho)',
+                         getattr(cfg, 'camera_id', '?'))
+        return self.vehicle_tracker
+
     def _process_frame(self, frame: np.ndarray):
         """Detecta (con zona) -> lee -> formato -> seguimiento + voto -> emite.
 
@@ -257,6 +316,7 @@ class LprWorker:
         dedupe, guardado de la imagen y el POST al backend.
         """
         now_ts = time.time()
+        self._last_frame = frame
         self._prune_state(now_ts)
         # Foto consistente de (cfg, tracker): un refetch a mitad de frame no
         # mezcla la config nueva con el tracker viejo.
@@ -265,6 +325,7 @@ class LprWorker:
         reads, emissions = process_frame(
             frame, self.detector, self.fast_ocr, cfg, tracker, now_ts,
             save_only_on_plate=bool(settings.LPR_SAVE_ONLY_ON_PLATE),
+            vehicle_tracker=self._ensure_vehicle_tracker(cfg),
         )
         for read in reads:
             if read.status == STATUS_SHAPE_REJECTED:
@@ -307,6 +368,7 @@ class LprWorker:
         meta['char_conf_min'] = char_stats['min']
         meta['char_conf_mean'] = char_stats['mean']
         meta['direction'] = emission.direction
+        meta['direction_source'] = emission.direction_source
         meta['track'] = emission.track_meta()
         meta['confirmed_by'] = 'track-vote'
 
@@ -379,8 +441,8 @@ class LprWorker:
             logging.exception('Error guardando la detección')
 
         # Solo logs enmascarados: el payload enviado lleva la patente real, el log no.
-        logging.info('Evento: placa=%s cámara=%s dirección=%s track=%s', mask_plate(plate_clean),
-                     payload['cameraId'], emission.direction, meta['track'])
+        logging.info('Evento: placa=%s cámara=%s dirección=%s (%s) track=%s', mask_plate(plate_clean),
+                     payload['cameraId'], emission.direction, emission.direction_source, meta['track'])
         status = post_event(self.cfg.backend_url, payload, dry_run=self.cfg.dry_run)
         if consumes_dedupe(status):
             # Se consume el dedupe si el backend aceptó el evento, o si pudo haberlo

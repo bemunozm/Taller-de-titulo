@@ -13,6 +13,10 @@ import {
   type Repository,
 } from 'typeorm';
 import { DetectionsService } from './detections.service';
+import {
+  asPassagesService,
+  createPassagesDouble,
+} from '../test-utils/passages.double';
 import { DetectionsController } from './detections.controller';
 import type { PlateDetection } from './entities/plate-detection.entity';
 import { AccessAttempt } from './entities/access-attempt.entity';
@@ -130,6 +134,7 @@ describe('DetectionsService — aislamiento por condominio (P5.B)', () => {
       {} as HubGateway,
       {} as VisitsService,
       noConfig,
+      asPassagesService(createPassagesDouble()),
     );
   });
 
@@ -584,6 +589,7 @@ describe('DetectionsService — SQL del claim de respond (P5.C)', () => {
       {} as HubGateway,
       {} as VisitsService,
       noConfig,
+      asPassagesService(createPassagesDouble()),
     );
 
     await service.respondToPendingDetection(

@@ -1,28 +1,44 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import type { ReactNode } from 'react'
-import { ZONE_LIMITS, type Camera, type ZonePoint } from '@/types/index'
+import { DIRECTION_LINE_MIN_LENGTH, ZONE_LIMITS, type Camera, type DirectionLine, type ZonePoint } from '@/types/index'
 import { getUserFacingErrorMessage } from '@/helpers/httpErrors'
 import { toast } from 'react-toastify'
-import { 
-  TrashIcon, 
-  CheckCircleIcon, 
+import {
+  TrashIcon,
+  CheckCircleIcon,
   ArrowPathIcon,
   XMarkIcon,
   ArrowsPointingOutIcon,
   CursorArrowRaysIcon,
   InformationCircleIcon,
-  ArrowUturnLeftIcon
+  ArrowUturnLeftIcon,
+  ArrowsRightLeftIcon
 } from '@heroicons/react/24/outline'
 import CameraPlayer from '../CameraPlayer'
-import { 
-  Dialog, 
-  DialogTitle, 
+import {
+  Dialog,
+  DialogTitle,
   DialogDescription
 } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
+import { Description, Field } from '@/components/ui/Fieldset'
 import { motion, AnimatePresence } from 'motion/react'
+import {
+  DEFAULT_VIDEO_ASPECT,
+  EXIT_SIDE_LABELS,
+  directionLineLength,
+  flipExitSide,
+  getExitArrow,
+} from '@/helpers/directionLine'
 
 type Point = ZonePoint
+
+/** Herramienta activa del lienzo: dibujar zonas o la línea de dirección (solo LPR). */
+export type ZoneEditorTool = 'zone' | 'line'
+
+// Índices reservados de `zoneIndex` para los puntos en edición.
+const CURRENT_ZONE_INDEX = -1
+const DIRECTION_LINE_INDEX = -2
 
 /** Paleta del lienzo: `guardian` (rojo, zonas de alarma) o `lpr` (verde, zona de detección). */
 export type ZoneEditorTone = 'guardian' | 'lpr'
@@ -63,10 +79,20 @@ export interface ZoneEditorProps {
   successMessage?: string
   tone?: ZoneEditorTone
   /**
-   * Persiste (o encola) las zonas. Si rechaza, el editor sigue abierto y avisa
+   * Habilita la herramienta "Línea de dirección" (solo LPR). Sin ella `onSave`
+   * recibe únicamente las zonas, como siempre.
+   */
+  enableDirectionLine?: boolean
+  /** Línea con la que arranca el lienzo (solo con `enableDirectionLine`). */
+  initialDirectionLine?: DirectionLine | null
+  /** Herramienta activa al abrir (solo con `enableDirectionLine`). */
+  initialTool?: ZoneEditorTool
+  /**
+   * Persiste (o encola) las zonas. Con `enableDirectionLine` recibe además la
+   * línea (`null` = sin línea). Si rechaza, el editor sigue abierto y avisa
    * con un toast; si resuelve, avisa y se cierra con `onClose`.
    */
-  onSave: (zones: Point[][]) => Promise<void>
+  onSave: (zones: Point[][], directionLine?: DirectionLine | null) => Promise<void>
   onClose: () => void
 }
 
@@ -82,12 +108,21 @@ export function ZoneEditor({
   saveLabel = 'Fijar Precisión',
   successMessage = 'Cambios sincronizados correctamente',
   tone = 'guardian',
+  enableDirectionLine = false,
+  initialDirectionLine = null,
+  initialTool = 'zone',
   onSave,
   onClose,
 }: ZoneEditorProps) {
   const toneClasses = TONES[tone]
   const [zones, setZones] = useState<Point[][]>(initialZones)
   const [currentZone, setCurrentZone] = useState<Point[]>([])
+  const [tool, setTool] = useState<ZoneEditorTool>(enableDirectionLine ? initialTool : 'zone')
+  const [directionLine, setDirectionLine] = useState<DirectionLine | null>(
+    enableDirectionLine ? initialDirectionLine : null,
+  )
+  // Primer clic de la línea, a la espera del segundo.
+  const [lineStart, setLineStart] = useState<Point | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const [hoveredPoint, setHoveredPoint] = useState<{ zoneIndex: number, pointIndex: number } | null>(null)
   const [draggingPoint, setDraggingPoint] = useState<{ zoneIndex: number, pointIndex: number } | null>(null)
@@ -205,8 +240,11 @@ export function ZoneEditor({
       saveToHistory()
       didDragRef.current = true // Suppress follow-up click
       lastInteractionTimeRef.current = Date.now()
-      
-      if (zoneIndex === -1) {
+
+      if (zoneIndex === DIRECTION_LINE_INDEX) {
+        // Quitar un extremo equivale a borrar la línea entera.
+        setDirectionLine(null)
+      } else if (zoneIndex === CURRENT_ZONE_INDEX) {
         setCurrentZone(prev => prev.filter((_, i) => i !== pointIndex))
       } else {
         setZones(prev => {
@@ -238,7 +276,15 @@ export function ZoneEditor({
     const pt = getRelativeCoords(e)
     if (!pt) return
 
-    if (draggingPoint.zoneIndex === -1) {
+    if (draggingPoint.zoneIndex === DIRECTION_LINE_INDEX) {
+      setDirectionLine(prev => {
+        if (!prev) return prev
+        return draggingPoint.pointIndex === 0 ? { ...prev, from: pt } : { ...prev, to: pt }
+      })
+      return
+    }
+
+    if (draggingPoint.zoneIndex === CURRENT_ZONE_INDEX) {
       setCurrentZone(prev => {
         const next = [...prev]
         next[draggingPoint.pointIndex] = pt
@@ -285,6 +331,10 @@ export function ZoneEditor({
 
     const pt = getRelativeCoords(e)
     if (!pt) return
+    if (tool === 'line') {
+      handleLineClick(pt)
+      return
+    }
     if (currentZone.length >= ZONE_LIMITS.maxPoints) {
       toast.warning(`Una zona admite como máximo ${ZONE_LIMITS.maxPoints} puntos`)
       return
@@ -292,8 +342,37 @@ export function ZoneEditor({
     setCurrentZone(prev => [...prev, pt])
   }
 
+  // Dos clics definen la línea (`from` y luego `to`).
+  const handleLineClick = (pt: Point) => {
+    if (directionLine) {
+      toast.info('Ya hay una línea: arrastra sus extremos o bórrala para dibujar otra')
+      return
+    }
+    if (!lineStart) {
+      setLineStart(pt)
+      return
+    }
+    if (Math.hypot(pt.x - lineStart.x, pt.y - lineStart.y) < DIRECTION_LINE_MIN_LENGTH) {
+      toast.warning('La línea es demasiado corta: marca el segundo punto más lejos del primero')
+      return
+    }
+    setDirectionLine({ from: lineStart, to: pt, exitSide: 'left' })
+    setLineStart(null)
+    setTool('zone')
+  }
+
+  const selectTool = (next: ZoneEditorTool) => {
+    setTool(next)
+    setLineStart(null)
+  }
+
   const handleSvgContextMenu = (e: React.MouseEvent<SVGSVGElement>) => {
     e.preventDefault()
+    if (tool === 'line') {
+      // Clic derecho cancela un primer punto ya marcado.
+      setLineStart(null)
+      return
+    }
     if (currentZone.length >= ZONE_LIMITS.minPoints) {
       if (zones.length >= ZONE_LIMITS.maxZones) {
         toast.warning(`Se admiten como máximo ${ZONE_LIMITS.maxZones} zonas`)
@@ -313,9 +392,14 @@ export function ZoneEditor({
   }
 
   const handleSave = async () => {
+    if (enableDirectionLine && directionLine && directionLineLength(directionLine) < DIRECTION_LINE_MIN_LENGTH) {
+      toast.error('La línea de dirección es demasiado corta: alárgala o bórrala')
+      return
+    }
     setIsSaving(true)
     try {
-      await onSave(zones)
+      if (enableDirectionLine) await onSave(zones, directionLine)
+      else await onSave(zones)
       toast.success(successMessage)
       onClose()
     } catch (err) {
@@ -327,6 +411,12 @@ export function ZoneEditor({
 
   const vw = 1000
   const vh = vw
+
+  // Relación ancho/alto del video en pantalla (para que la flecha sea perpendicular a la vista).
+  const aspect = videoRect && videoRect.width > 0 && videoRect.height > 0
+    ? videoRect.width / videoRect.height
+    : DEFAULT_VIDEO_ASPECT
+  const arrow = directionLine ? getExitArrow(directionLine, aspect) : null
 
   return (
     <Dialog open={true} onClose={onClose} size="5xl" className="!p-0 overflow-hidden bg-black/40 backdrop-blur-xl border border-white/10 shadow-2xl">
@@ -467,7 +557,87 @@ export function ZoneEditor({
                     })}
                   </g>
                 )}
+
+                {/* Direction line (solo LPR) */}
+                {enableDirectionLine && lineStart && (
+                  <circle
+                    data-testid="direction-line-start"
+                    cx={lineStart.x * vw}
+                    cy={lineStart.y * vh}
+                    r="9"
+                    className="fill-amber-400 stroke-white stroke-[3] animate-pulse"
+                  />
+                )}
+                {enableDirectionLine && directionLine && arrow && (
+                  <g data-testid="direction-line" data-exit-side={directionLine.exitSide}>
+                    <line
+                      x1={directionLine.from.x * vw}
+                      y1={directionLine.from.y * vh}
+                      x2={directionLine.to.x * vw}
+                      y2={directionLine.to.y * vh}
+                      className="stroke-amber-400"
+                      strokeWidth="4"
+                      strokeLinecap="round"
+                    />
+                    <line
+                      data-testid="direction-arrow"
+                      x1={arrow.base.x * vw}
+                      y1={arrow.base.y * vh}
+                      x2={arrow.tip.x * vw}
+                      y2={arrow.tip.y * vh}
+                      className="stroke-amber-300"
+                      strokeWidth="5"
+                      strokeLinecap="round"
+                    />
+                    <polygon
+                      points={[arrow.tip, ...arrow.barbs].map(p => `${p.x * vw},${p.y * vh}`).join(' ')}
+                      className="fill-amber-300 stroke-amber-300"
+                      strokeWidth="3"
+                      strokeLinejoin="round"
+                    />
+                    {[directionLine.from, directionLine.to].map((p, pIdx) => {
+                      const isHovered = hoveredPoint?.zoneIndex === DIRECTION_LINE_INDEX && hoveredPoint?.pointIndex === pIdx
+                      const isDragging = draggingPoint?.zoneIndex === DIRECTION_LINE_INDEX && draggingPoint?.pointIndex === pIdx
+                      return (
+                        <g
+                          key={`dl-pt-${pIdx}`}
+                          onMouseEnter={() => setHoveredPoint({ zoneIndex: DIRECTION_LINE_INDEX, pointIndex: pIdx })}
+                          onMouseLeave={() => setHoveredPoint(null)}
+                          onMouseDown={(e) => handleMouseDown(e, DIRECTION_LINE_INDEX, pIdx)}
+                          className="cursor-move"
+                        >
+                          <circle cx={p.x * vw} cy={p.y * vh} r="25" fill="transparent" />
+                          <circle
+                            cx={p.x * vw}
+                            cy={p.y * vh}
+                            r={isDragging ? '10' : isHovered ? '9' : '7'}
+                            className="fill-white stroke-amber-500 stroke-[3] transition-all"
+                          />
+                        </g>
+                      )
+                    })}
+                  </g>
+                )}
               </svg>
+            )}
+
+            {/* Etiqueta de la flecha: HTML sobre el video para que el texto no se estire con el lienzo */}
+            {videoRect && enableDirectionLine && directionLine && arrow && (
+              <div
+                className="pointer-events-none absolute z-20"
+                style={{ left: videoRect.left, top: videoRect.top, width: videoRect.width, height: videoRect.height }}
+              >
+                <span
+                  data-testid="direction-arrow-label"
+                  className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-md bg-amber-400 px-2 py-0.5 text-[11px] font-bold text-zinc-950 shadow-lg"
+                  style={{
+                    left: `${clamp01(arrow.tip.x + (arrow.tip.x - arrow.base.x) * 0.5) * 100}%`,
+                    top: `${clamp01(arrow.tip.y + (arrow.tip.y - arrow.base.y) * 0.5) * 100}%`,
+                  }}
+                >
+                  Salida →
+                </span>
+              </div>
             )}
 
             {/* Float HUD */}
@@ -522,6 +692,70 @@ export function ZoneEditor({
                 </div>
               </div>
             </div>
+
+            {enableDirectionLine && (
+              <section aria-labelledby="direction-line-heading" className="p-6 border-b border-white/5 space-y-4">
+                <h3 id="direction-line-heading" className="text-[10px] font-black uppercase tracking-[0.3em] text-zinc-500">
+                  Línea de dirección
+                </h3>
+                <div role="group" aria-label="Herramienta del lienzo" className="grid grid-cols-2 gap-2">
+                  {([['zone', 'Zona'], ['line', 'Línea de dirección']] as const).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={tool === value}
+                      onClick={() => selectTool(value)}
+                      className={`rounded-xl border px-2 py-2 text-[10px] font-black uppercase tracking-wider transition-all ${
+                        tool === value
+                          ? 'border-amber-400/60 bg-amber-400/15 text-amber-300'
+                          : 'border-white/10 bg-white/5 text-zinc-400 hover:bg-white/10'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <Field>
+                  <Description className="!text-xs !text-zinc-400">
+                    Cuando un vehículo cruza esta línea, el sistema decide si entra o sale. Dibújala atravesando el
+                    carril (dos clics) y deja la flecha apuntando hacia donde va el auto cuando sale; si apunta al
+                    revés, usa "Invertir sentido".
+                  </Description>
+                </Field>
+                <p role="status" className="text-xs font-semibold text-amber-300">
+                  {directionLine
+                    ? `Línea definida: salida hacia ${EXIT_SIDE_LABELS[directionLine.exitSide]}.`
+                    : lineStart
+                      ? 'Marca el segundo punto de la línea (clic derecho cancela).'
+                      : 'Sin línea: la dirección se infiere por el tamaño de la patente.'}
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <Button
+                    outline
+                    type="button"
+                    disabled={!directionLine}
+                    onClick={() =>
+                      setDirectionLine(prev => (prev ? { ...prev, exitSide: flipExitSide(prev.exitSide) } : prev))
+                    }
+                  >
+                    <ArrowsRightLeftIcon className="h-4 w-4" />
+                    Invertir sentido
+                  </Button>
+                  <Button
+                    outline
+                    type="button"
+                    disabled={!directionLine && !lineStart}
+                    onClick={() => {
+                      setDirectionLine(null)
+                      setLineStart(null)
+                    }}
+                  >
+                    <TrashIcon className="h-4 w-4" />
+                    Borrar línea
+                  </Button>
+                </div>
+              </section>
+            )}
 
             <div className="p-8 flex-1 flex flex-col">
               <h3 className="text-[10px] font-black uppercase tracking-[0.4em] text-zinc-600 mb-6 text-center">Configuraciones Guardadas</h3>
@@ -592,13 +826,13 @@ export function ZoneEditor({
                 <Button 
                   outline 
                   className="w-full !border-zinc-900 text-zinc-700 hover:text-white rounded-[20px] py-4 text-[10px] font-black uppercase tracking-widest transition-all"
-                  onClick={() => { saveToHistory(); setZones([]); setCurrentZone([]) }}
+                  onClick={() => { saveToHistory(); setZones([]); setCurrentZone([]); setDirectionLine(null); setLineStart(null) }}
                 >
                   Reiniciar Todo
                 </Button>
                 <Button 
                   onClick={handleSave}
-                  disabled={isSaving || currentZone.length > 0}
+                  disabled={isSaving || currentZone.length > 0 || lineStart !== null}
                   className="w-full bg-indigo-600 hover:bg-indigo-500 shadow-[0_20px_40px_-10px_rgba(79,70,229,0.3)] rounded-[20px] py-4 transition-all active:scale-95"
                 >
                   {isSaving ? <ArrowPathIcon className="h-6 w-6 animate-spin text-white" /> : <CheckCircleIcon className="h-6 w-6 text-white" />}

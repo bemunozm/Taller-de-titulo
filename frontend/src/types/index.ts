@@ -244,6 +244,39 @@ export const zonePolygonsSchema = z
 
 export type ZonePoint = z.infer<typeof zonePointSchema>
 
+// Línea de dirección del LPR (backend/src/cameras/lpr-settings.ts): coordenadas
+// normalizadas 0-1. `exitSide` es el lado hacia el que se mueve el vehículo al
+// SALIR, mirando de `from` a `to` tal como se ve en pantalla (eje y hacia abajo).
+export const LPR_EXIT_SIDES = ['left', 'right'] as const
+/** Longitud mínima (en coordenadas normalizadas) para que la línea sea útil. */
+export const DIRECTION_LINE_MIN_LENGTH = 0.05
+
+function directionLineLength(line: { from: { x: number; y: number }; to: { x: number; y: number } }): number {
+    return Math.hypot(line.to.x - line.from.x, line.to.y - line.from.y)
+}
+
+/** Lectura (respuestas del backend): tolerante con claves extra. */
+const directionLineReadSchema = z.object({
+    from: zonePointSchema,
+    to: zonePointSchema,
+    exitSide: z.enum(LPR_EXIT_SIDES),
+})
+
+/** Escritura: sin propiedades extra y con largo mínimo (contrato compartido). */
+export const directionLineSchema = z
+    .object({
+        from: zonePointSchema.strict(),
+        to: zonePointSchema.strict(),
+        exitSide: z.enum(LPR_EXIT_SIDES),
+    })
+    .strict()
+    .refine((line) => directionLineLength(line) >= DIRECTION_LINE_MIN_LENGTH, {
+        message: 'La línea de dirección es demasiado corta',
+    })
+
+export type DirectionLine = z.infer<typeof directionLineReadSchema>
+export type LprExitSide = (typeof LPR_EXIT_SIDES)[number]
+
 // Configuración de visión LPR por cámara (backend/src/cameras/lpr-settings.ts).
 // Todos los campos son opcionales: el worker mezcla lo presente sobre sus defaults.
 export const LPR_ACTIONS = ['register', 'access'] as const
@@ -262,6 +295,7 @@ const lprSettingsShape = {
     action: z.enum(LPR_ACTIONS).optional(),
     direction: z.enum(LPR_DIRECTIONS).optional(),
     zone: zonePolygonsSchema.optional(),
+    directionLine: directionLineReadSchema.optional(),
     detectorImgsz: z
         .union([z.literal(640), z.literal(960), z.literal(1280), z.literal(1920)])
         .optional(),
@@ -282,7 +316,11 @@ export const LPR_MIN_CONFIRM_READS_ACCESS = 3
  * pares de recorte y N >= 3 en control de acceso.
  */
 export const lprSettingsRequestSchema = z
-    .object({ ...lprSettingsShape, crop: lprCropSettingsSchema.strict().optional() })
+    .object({
+        ...lprSettingsShape,
+        crop: lprCropSettingsSchema.strict().optional(),
+        directionLine: directionLineSchema.optional(),
+    })
     .strict()
     .superRefine((value, ctx) => {
         const crop = value.crop

@@ -2,6 +2,10 @@ import type { Repository } from 'typeorm';
 import type { ConfigService } from '@nestjs/config';
 import type { PersistenceRepositoryMock } from '../test-utils/mock-repository';
 import { DetectionsService } from './detections.service';
+import {
+  asPassagesService,
+  createPassagesDouble,
+} from '../test-utils/passages.double';
 import { PlateDetection } from './entities/plate-detection.entity';
 import { AccessAttempt } from './entities/access-attempt.entity';
 import { Camera } from '../cameras/entities/camera.entity';
@@ -142,6 +146,12 @@ describe('DetectionsService — notificación de detección pendiente scopeada p
       hubGateway as unknown as HubGateway,
       visitsService as VisitsService,
       noConfig,
+      asPassagesService(
+        createPassagesDouble({
+          saveDetection: (detection) => detectionsRepo.save(detection),
+          saveAttempt: (attempt) => attemptsRepo.save(attempt),
+        }),
+      ),
     );
   });
 
@@ -247,6 +257,12 @@ describe('DetectionsService — notificación de detección pendiente scopeada p
             .mockResolvedValue({ valid: false, message: 'no' }),
         } as unknown as VisitsService,
         noConfig,
+        asPassagesService(
+          createPassagesDouble({
+            saveDetection: (detection) => detectionsRepo.save(detection),
+            saveAttempt: (attempt) => attemptsRepo.save(attempt),
+          }),
+        ),
       );
 
       await localService.createDetection(baseDto, CAMERA_ORG_ID);
@@ -269,6 +285,12 @@ describe('DetectionsService — notificación de detección pendiente scopeada p
           hubGateway as unknown as HubGateway,
           visitsService as VisitsService,
           noConfig,
+          asPassagesService(
+            createPassagesDouble({
+              saveDetection: (detection) => detectionsRepo.save(detection),
+              saveAttempt: (attempt) => attemptsRepo.save(attempt),
+            }),
+          ),
         );
 
         await expect(
@@ -302,6 +324,12 @@ describe('DetectionsService — notificación de detección pendiente scopeada p
           hubGateway as unknown as HubGateway,
           visitsService as VisitsService,
           noConfig,
+          asPassagesService(
+            createPassagesDouble({
+              saveDetection: (detection) => detectionsRepo.save(detection),
+              saveAttempt: (attempt) => attemptsRepo.save(attempt),
+            }),
+          ),
         );
 
         await attemptService.createAttempt(
@@ -367,6 +395,12 @@ describe('DetectionsService — notificación de detección pendiente scopeada p
         hubGateway as unknown as HubGateway,
         localVisitsService as unknown as VisitsService,
         noConfig,
+        asPassagesService(
+          createPassagesDouble({
+            saveDetection: (detection) => detectionsRepo.save(detection),
+            saveAttempt: (attempt) => attemptsRepo.save(attempt),
+          }),
+        ),
       );
     });
 
@@ -733,6 +767,12 @@ describe('DetectionsService — LPR fail-closed (Fase 4 · P3, D4)', () => {
       hubGateway as unknown as HubGateway,
       visitsService as VisitsService,
       config,
+      asPassagesService(
+        createPassagesDouble({
+          saveDetection: (detection) => detectionsRepo.save(detection),
+          saveAttempt: (attempt) => attemptsRepo.save(attempt),
+        }),
+      ),
     );
   }
 

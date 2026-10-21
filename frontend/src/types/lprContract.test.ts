@@ -27,6 +27,20 @@ describe('contrato lprSettings (zod del frontend)', () => {
     expect(contract.invalid.length).toBeGreaterThan(0)
   })
 
+  it('el contrato cubre directionLine (válidos e inválidos) y se evalúa contra el mismo esquema', () => {
+    const mentionsLine = (c: ContractCase) => JSON.stringify(c.settings).includes('directionLine')
+    expect(contract.valid.filter(mentionsLine).length).toBeGreaterThanOrEqual(2)
+    expect(contract.invalid.filter(mentionsLine).length).toBeGreaterThanOrEqual(5)
+  })
+
+  it('exitSide solo acepta left y right, y la línea no admite coordenadas fuera de [0, 1]', () => {
+    const line = { from: { x: 0.2, y: 0.5 }, to: { x: 0.8, y: 0.5 }, exitSide: 'right' }
+    expect(lprSettingsRequestSchema.safeParse({ directionLine: line }).success).toBe(true)
+    expect(lprSettingsRequestSchema.safeParse({ directionLine: { ...line, exitSide: 'up' } }).success).toBe(false)
+    expect(lprSettingsRequestSchema.safeParse({ directionLine: { ...line, to: { x: 1.2, y: 0.5 } } }).success).toBe(false)
+    expect(lprSettingsRequestSchema.safeParse({ directionLine: null }).success).toBe(false)
+  })
+
   it.each(contract.valid.map((c) => [c.name, c.settings] as const))('acepta: %s', (_name, settings) => {
     expect(lprSettingsRequestSchema.safeParse(settings).success).toBe(true)
   })

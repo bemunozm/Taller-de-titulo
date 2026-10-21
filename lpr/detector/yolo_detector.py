@@ -1,4 +1,10 @@
-from ultralytics import YOLO
+import os
+
+# Sin auto-instalacion de paquetes con pip en runtime (se lee al importar ultralytics);
+# las dependencias, `lapx` incluido, se declaran en requirements.txt.
+os.environ.setdefault('YOLO_AUTOINSTALL', 'False')
+
+from ultralytics import YOLO  # noqa: E402
 from huggingface_hub import hf_hub_download
 from typing import List, Optional, Tuple
 import numpy as np

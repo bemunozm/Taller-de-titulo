@@ -44,6 +44,11 @@ torchvision==0.23.0
 # Resolverlo exige subir ultralytics (y con eso torch >= 2.9.1) y revalidar el
 # detector; queda como decisión pendiente, no se cambia a ciegas.
 ultralytics==8.3.0
+# ByteTrack (`model.track(tracker='bytetrack.yaml')`) necesita `lap`; sin él
+# ultralytics lo auto-instala en RUNTIME (pip dentro del worker: frágil y sin
+# versión fija). Lo usan el Guardián y el seguimiento de vehículos del LPR
+# (dirección por línea). Versión validada en el venv de GPU (Windows, py3.12).
+lapx==0.10.0
 # OpenCV headless (sin GUI) — el requerido en edge/servidor.
 opencv-python-headless==4.11.0.86
 # OCR de patentes sobre onnxruntime (modelo cct-s-v1 → requiere fast-plate-ocr >= 1.0).

@@ -337,8 +337,22 @@ export class RetentionService {
     return result(true);
   }
 
-  /** Detecciones e intentos: patente, residente, motivo e imágenes. */
+  /**
+   * Detecciones e intentos: patente, residente, motivo e imágenes. Al final
+   * barre las pasadas (`vehicle_passages`) fuera de ventana con todas sus
+   * detecciones ya anonimizadas.
+   */
   private async sweepDetections(
+    context: RunContext,
+  ): Promise<RetentionCategoryResult> {
+    const result = await this.sweepDetectionBatches(context);
+    if (!context.dryRun) {
+      await this.repository.anonymizeStalePassages();
+    }
+    return result;
+  }
+
+  private async sweepDetectionBatches(
     context: RunContext,
   ): Promise<RetentionCategoryResult> {
     const days = this.config.periods.RETENTION_ACCESS_LOG_DAYS;

@@ -13,7 +13,7 @@
 # Reglas:
 # - Mismas versiones que `requirements.txt` para lo que se comparte: si subes
 #   algo allí, súbelo aquí también (y al revés).
-# - NO agregar torch, torchvision, ultralytics, onnxruntime, fast-plate-ocr ni
+# - NO agregar torch, torchvision, ultralytics, lapx (ByteTrack), onnxruntime, fast-plate-ocr ni
 #   huggingface-hub: si un test nuevo los necesita, que use un stub.
 # - Verificado con Python 3.12 (el de CI) en un venv limpio.
 #
