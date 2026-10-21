@@ -1,4 +1,4 @@
-import type { DirectionLine, LprExitSide, ZonePoint } from '@/types/index'
+import type { DirectionLine, LprDirection, LprExitSide, ZonePoint } from '@/types/index'
 
 /** Relación de aspecto por defecto del video (16:9) cuando aún no se mide el lienzo. */
 export const DEFAULT_VIDEO_ASPECT = 16 / 9
@@ -42,7 +42,7 @@ const ARROW_LENGTH = 0.11
 const BARB_LENGTH = 0.035
 
 /**
- * Flecha perpendicular a la línea que apunta hacia `exitSide`, en coordenadas
+ * Flecha perpendicular a la línea que apunta hacia `exitSide` (ver `getArrowTowards`), en coordenadas
  * normalizadas. La perpendicularidad se calcula en el espacio de pantalla
  * (corrigiendo por `aspect` = ancho/alto del video), porque el lienzo escala x e
  * y por separado. "Izquierda" es la izquierda de quien avanza de `from` a `to`
@@ -50,6 +50,18 @@ const BARB_LENGTH = 0.035
  * derecha, izquierda = arriba.
  */
 export function getExitArrow(line: DirectionLine, aspect: number = DEFAULT_VIDEO_ASPECT): ExitArrow {
+  return getArrowTowards(line, line.exitSide, aspect)
+}
+
+/**
+ * Igual que `getExitArrow` pero hacia un lado cualquiera: es la flecha del
+ * editor, que marca el sentido de avance de los autos, no necesariamente el de salida.
+ */
+export function getArrowTowards(
+  line: Pick<DirectionLine, 'from' | 'to'>,
+  side: LprExitSide,
+  aspect: number = DEFAULT_VIDEO_ASPECT,
+): ExitArrow {
   const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : DEFAULT_VIDEO_ASPECT
   // Espacio de pantalla: x se multiplica por el aspecto, y queda igual.
   const dx = (line.to.x - line.from.x) * safeAspect
@@ -59,7 +71,7 @@ export function getExitArrow(line: DirectionLine, aspect: number = DEFAULT_VIDEO
   const uy = dy / length
   // Normal candidata (uy, -ux); si cae del lado equivocado según pointSide, se invierte.
   const baseNormal = { x: ((line.from.x + line.to.x) / 2) + (uy / safeAspect) * 0.01, y: (line.from.y + line.to.y) / 2 - ux * 0.01 }
-  const sign = pointSide(line, baseNormal) === line.exitSide ? 1 : -1
+  const sign = pointSide(line, baseNormal) === side ? 1 : -1
   const nx = uy * sign
   const ny = -ux * sign
 
@@ -83,8 +95,58 @@ export function getExitArrow(line: DirectionLine, aspect: number = DEFAULT_VIDEO
   }
 }
 
-/** Resumen de la línea para el formulario LPR. */
-export function describeDirectionLine(line: DirectionLine | null | undefined): string {
+/** Qué representa la flecha: un auto entrando o saliendo. */
+export type TravelMeaning = 'entering' | 'exiting'
+
+/** Etiqueta de la flecha en el lienzo y en el resumen. */
+export const TRAVEL_MEANING_LABELS: Record<TravelMeaning, string> = {
+  entering: 'Entrando',
+  exiting: 'Saliendo',
+}
+
+/** Opciones del selector que se muestra cuando el rol de la cámara es "Ambas". */
+export const TRAVEL_MEANING_CHOICE_LABELS: Record<TravelMeaning, string> = {
+  entering: 'Entrada',
+  exiting: 'Salida',
+}
+
+/** Rol de la cámara (`direction`); `''` = sin definir. */
+export type CameraRole = LprDirection | ''
+
+/**
+ * Significado fijo de la flecha según el rol de la cámara: en una cámara de
+ * entrada la flecha es un auto entrando; en una de salida, un auto saliendo.
+ * Con "Ambas" (o sin definir) no hay uno fijo: lo elige la persona.
+ */
+export function meaningForRole(role: CameraRole | undefined): TravelMeaning | null {
+  if (role === 'entry') return 'entering'
+  if (role === 'exit') return 'exiting'
+  return null
+}
+
+/** `exitSide` que se guarda: el lado de la flecha si es "Saliendo", el opuesto si es "Entrando". */
+export function exitSideFor(arrowSide: LprExitSide, meaning: TravelMeaning): LprExitSide {
+  return meaning === 'exiting' ? arrowSide : flipExitSide(arrowSide)
+}
+
+/** Inversa de `exitSideFor`: hacia dónde apunta la flecha dibujada para un `exitSide` guardado. */
+export function arrowSideFor(exitSide: LprExitSide, meaning: TravelMeaning): LprExitSide {
+  return meaning === 'exiting' ? exitSide : flipExitSide(exitSide)
+}
+
+/** Ayuda del editor y del diálogo. */
+export const DIRECTION_ARROW_HELP =
+  'La flecha indica hacia dónde se mueve el auto cuando ocurre el evento de esta cámara (entrada o salida, según su rol). Los autos que se mueven al revés se registran igual, con su sentido real.'
+
+/**
+ * Resumen de la línea para el formulario LPR. `meaning` es lo que representa
+ * la flecha; sin él (rol "Ambas" o sin definir) se muestra "Saliendo", que es
+ * como el editor reabre una línea guardada.
+ */
+export function describeDirectionLine(
+  line: DirectionLine | null | undefined,
+  meaning: TravelMeaning = 'exiting',
+): string {
   if (!line) return 'Sin línea: se usa la dirección fija de la cámara y, si no tiene, se infiere por el tamaño de la patente.'
-  return `Línea de dirección definida — salida hacia ${EXIT_SIDE_LABELS[line.exitSide]}.`
+  return `Línea definida — sentido de la flecha: ${TRAVEL_MEANING_LABELS[meaning]}.`
 }

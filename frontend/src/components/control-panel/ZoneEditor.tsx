@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import type { ReactNode } from 'react'
-import { DIRECTION_LINE_MIN_LENGTH, ZONE_LIMITS, type Camera, type DirectionLine, type ZonePoint } from '@/types/index'
+import { DIRECTION_LINE_MIN_LENGTH, ZONE_LIMITS, type Camera, type DirectionLine, type LprExitSide, type ZonePoint } from '@/types/index'
 import { getUserFacingErrorMessage } from '@/helpers/httpErrors'
 import { toast } from 'react-toastify'
 import {
@@ -21,15 +21,23 @@ import {
   DialogDescription
 } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
-import { Description, Field } from '@/components/ui/Fieldset'
+import { Description, Field, Label } from '@/components/ui/Fieldset'
+import { Radio, RadioField, RadioGroup } from '@/components/ui/Radio'
 import { motion, AnimatePresence } from 'motion/react'
 import {
   DEFAULT_VIDEO_ASPECT,
-  EXIT_SIDE_LABELS,
+  DIRECTION_ARROW_HELP,
+  TRAVEL_MEANING_CHOICE_LABELS,
+  TRAVEL_MEANING_LABELS,
+  arrowSideFor,
   describeDirectionLine,
   directionLineLength,
+  exitSideFor,
   flipExitSide,
-  getExitArrow,
+  getArrowTowards,
+  meaningForRole,
+  type CameraRole,
+  type TravelMeaning,
 } from '@/helpers/directionLine'
 
 type Point = ZonePoint
@@ -94,6 +102,8 @@ export interface ZoneEditorProps {
    * con un toast; si resuelve, avisa y se cierra con `onClose`.
    */
   onSave: (zones: Point[][], directionLine?: DirectionLine | null) => Promise<void>
+  /** Rol de la cámara ("Dirección" del diálogo LPR): fija qué representa la flecha. Con "Ambas" o sin definir se elige en el editor. */
+  cameraRole?: CameraRole
   onClose: () => void
 }
 
@@ -111,6 +121,7 @@ export function ZoneEditor({
   tone = 'guardian',
   enableDirectionLine = false,
   initialDirectionLine = null,
+  cameraRole,
   initialTool = 'zone',
   onSave,
   onClose,
@@ -121,6 +132,14 @@ export function ZoneEditor({
   const [tool, setTool] = useState<ZoneEditorTool>(enableDirectionLine ? initialTool : 'zone')
   const [directionLine, setDirectionLine] = useState<DirectionLine | null>(
     enableDirectionLine ? initialDirectionLine : null,
+  )
+  // La flecha muestra hacia dónde se mueve el auto en el evento del rol de la cámara
+  // (entrada o salida). Lo que se guarda sigue siendo `exitSide`, derivado del lado de
+  // la flecha y de ese significado. Con rol "Ambas" el significado lo elige la persona.
+  const [chosenMeaning, setChosenMeaning] = useState<TravelMeaning>('exiting')
+  const meaning: TravelMeaning = meaningForRole(cameraRole) ?? chosenMeaning
+  const [arrowSide, setArrowSide] = useState<LprExitSide>(
+    initialDirectionLine ? arrowSideFor(initialDirectionLine.exitSide, meaning) : 'left',
   )
   // Primer clic de la línea, a la espera del segundo.
   const [lineStart, setLineStart] = useState<Point | null>(null)
@@ -357,7 +376,8 @@ export function ZoneEditor({
       toast.warning('La línea es demasiado corta: marca el segundo punto más lejos del primero')
       return
     }
-    setDirectionLine({ from: lineStart, to: pt, exitSide: 'left' })
+    setArrowSide('left')
+    setDirectionLine({ from: lineStart, to: pt, exitSide: exitSideFor('left', meaning) })
     setLineStart(null)
     setTool('zone')
   }
@@ -417,7 +437,19 @@ export function ZoneEditor({
   const aspect = videoRect && videoRect.width > 0 && videoRect.height > 0
     ? videoRect.width / videoRect.height
     : DEFAULT_VIDEO_ASPECT
-  const arrow = directionLine ? getExitArrow(directionLine, aspect) : null
+  const arrow = directionLine ? getArrowTowards(directionLine, arrowSide, aspect) : null
+
+  // Elegir el significado (rol "Ambas") no mueve la flecha: solo recalcula `exitSide`.
+  const chooseMeaning = (next: TravelMeaning) => {
+    setChosenMeaning(next)
+    setDirectionLine(prev => (prev ? { ...prev, exitSide: exitSideFor(arrowSide, next) } : prev))
+  }
+  // Invertir mueve la flecha y conserva el significado elegido.
+  const flipArrow = () => {
+    const next = flipExitSide(arrowSide)
+    setArrowSide(next)
+    setDirectionLine(prev => (prev ? { ...prev, exitSide: exitSideFor(next, meaning) } : prev))
+  }
 
   return (
     <Dialog open={true} onClose={onClose} size="5xl" className="!p-0 overflow-hidden bg-black/40 backdrop-blur-xl border border-white/10 shadow-2xl">
@@ -570,7 +602,7 @@ export function ZoneEditor({
                   />
                 )}
                 {enableDirectionLine && directionLine && arrow && (
-                  <g data-testid="direction-line" data-exit-side={directionLine.exitSide}>
+                  <g data-testid="direction-line" data-exit-side={directionLine.exitSide} data-arrow-side={arrowSide}>
                     <line
                       x1={directionLine.from.x * vw}
                       y1={directionLine.from.y * vh}
@@ -636,7 +668,7 @@ export function ZoneEditor({
                     top: `${clamp01(arrow.tip.y + (arrow.tip.y - arrow.base.y) * 0.5) * 100}%`,
                   }}
                 >
-                  Salida →
+                  {TRAVEL_MEANING_LABELS[meaning]} →
                 </span>
               </div>
             )}
@@ -718,14 +750,12 @@ export function ZoneEditor({
                 </div>
                 <Field>
                   <Description className="!text-xs !text-zinc-400">
-                    Cuando un vehículo cruza esta línea, el sistema decide si entra o sale, y el cruce manda sobre la dirección fija de la cámara. Dibújala atravesando el
-                    carril (dos clics) y deja la flecha apuntando hacia donde va el auto cuando sale; si apunta al
-                    revés, usa "Invertir sentido".
+El cruce de la línea manda sobre la dirección fija de la cámara. {DIRECTION_ARROW_HELP}
                   </Description>
                 </Field>
                 <p role="status" className="text-xs font-semibold text-amber-300">
                   {directionLine
-                    ? `Línea definida: salida hacia ${EXIT_SIDE_LABELS[directionLine.exitSide]}.`
+                    ? describeDirectionLine(directionLine, meaning)
                     : lineStart
                       ? 'Marca el segundo punto de la línea (clic derecho cancela).'
                       : describeDirectionLine(null)}
@@ -735,9 +765,7 @@ export function ZoneEditor({
                     outline
                     type="button"
                     disabled={!directionLine}
-                    onClick={() =>
-                      setDirectionLine(prev => (prev ? { ...prev, exitSide: flipExitSide(prev.exitSide) } : prev))
-                    }
+                    onClick={flipArrow}
                   >
                     <ArrowsRightLeftIcon className="h-4 w-4" />
                     Invertir sentido
@@ -755,6 +783,22 @@ export function ZoneEditor({
                     Borrar línea
                   </Button>
                 </div>
+                {directionLine && meaningForRole(cameraRole) === null && (
+                  <RadioGroup
+                    aria-label="El sentido de la flecha es"
+                    value={meaning}
+                    onChange={(value: string) => chooseMeaning(value === 'entering' ? 'entering' : 'exiting')}
+                    className="!space-y-2"
+                  >
+                    <p className="text-xs font-semibold text-zinc-300">El sentido de la flecha es:</p>
+                    {(['entering', 'exiting'] as const).map(value => (
+                      <RadioField key={value}>
+                        <Radio value={value} />
+                        <Label className="!text-zinc-200">{TRAVEL_MEANING_CHOICE_LABELS[value]}</Label>
+                      </RadioField>
+                    ))}
+                  </RadioGroup>
+                )}
               </section>
             )}
 
