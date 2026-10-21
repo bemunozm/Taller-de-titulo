@@ -4,6 +4,7 @@ import {
   LPR_DETECTOR_IMGSZ_VALUES,
   LPR_DIRECTIONS,
   LPR_MIN_CONFIRM_READS_ACCESS,
+  directionLineSchema,
   zonePolygonsSchema,
   type LprAction,
   type LprCropSettings,
@@ -105,6 +106,7 @@ export const lprFormSchema = z
     maxRatio: optionalNumber({ label: 'Relación máxima', min: 0.1, max: 20 }),
     confirmReads: optionalNumber({ label: 'Lecturas para confirmar', min: 1, max: 10, integer: true }),
     zone: zonePolygonsSchema,
+    directionLine: directionLineSchema.nullable(),
   })
   .superRefine((value, ctx) => {
     // Pares de recorte obligatorios (contrato): uno sin el otro lo rechaza el backend.
@@ -188,6 +190,7 @@ export function toLprFormValues(settings: LprSettings | null): LprFormValues {
     maxRatio: numberToField(crop?.maxRatio),
     confirmReads: numberToField(settings?.confirmReads),
     zone: settings?.zone ?? [],
+    directionLine: settings?.directionLine ?? null,
   }
 }
 
@@ -203,6 +206,7 @@ export function toLprSettingsPayload(values: LprFormOutput): LprSettings {
   if (values.sampleFps !== undefined) payload.sampleFps = values.sampleFps
   if (values.confirmReads !== undefined) payload.confirmReads = values.confirmReads
   if (values.zone.length > 0) payload.zone = values.zone
+  if (values.directionLine) payload.directionLine = values.directionLine
 
   const crop: LprCropSettings = {}
   if (values.minWidth !== undefined) crop.minWidth = values.minWidth

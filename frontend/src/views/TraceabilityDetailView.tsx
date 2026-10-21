@@ -10,6 +10,8 @@ import { Dialog, DialogActions, DialogBody, DialogDescription, DialogTitle } fro
 import { Heading, Subheading } from '@/components/ui/Heading'
 import { AccessDecisionBadge } from '@/components/traceability/AccessDecisionBadge'
 import { DetectionImages } from '@/components/traceability/DetectionImages'
+import { PassageDirection, PassageSightings } from '@/components/traceability/PassageSightings'
+import { getAttemptDirectionLabel } from '@/helpers/accessDecision'
 import { hasDetectionImage, resolveDetectionImage } from '@/helpers/detectionImage'
 import { MISSING_VALUE, visibleUserEmail } from '@/helpers/userDisplay'
 import { useState, useMemo, type ComponentProps } from 'react'
@@ -532,6 +534,16 @@ export default function TraceabilityDetailView() {
                   <DescriptionTerm>Método de Acceso</DescriptionTerm>
                   <DescriptionDetails>{methodBadge}</DescriptionDetails>
 
+                  <DescriptionTerm>Dirección</DescriptionTerm>
+                  <DescriptionDetails>
+                    {attempt.passage ? (
+                      <PassageDirection passage={attempt.passage} />
+                    ) : (
+                      // Intentos anteriores a las pasadas: dirección del worker o del método.
+                      (getAttemptDirectionLabel(attempt) ?? <span className="text-zinc-400 dark:text-zinc-600">Sin determinar</span>)
+                    )}
+                  </DescriptionDetails>
+
                   <DescriptionTerm>Razón</DescriptionTerm>
                   <DescriptionDetails>
                     {attempt.reason ? (
@@ -748,6 +760,13 @@ export default function TraceabilityDetailView() {
               </div>
             )}
           </div>
+
+          {/* Passage Section: todas las cámaras que vieron este paso (E7) */}
+          {attempt.passage && (
+            <div className="bg-white dark:bg-zinc-900 rounded-lg shadow border border-zinc-200 dark:border-zinc-800 p-6">
+              <PassageSightings passage={attempt.passage} cameras={cameras} />
+            </div>
+          )}
         </div>
 
         {/* Sidebar - Right Side */}

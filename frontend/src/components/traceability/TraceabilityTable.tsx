@@ -29,6 +29,7 @@ import {
 import { Dropdown, DropdownButton, DropdownItem, DropdownMenu } from '@/components/ui/Dropdown'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table'
 import { ACCESS_DECISIONS, getAccessDecisionMeta } from '@/helpers/accessDecision'
+import { countPassageCameras } from '@/helpers/passage'
 import { AccessDecisionBadge } from './AccessDecisionBadge'
 
 type BadgeColor = NonNullable<ComponentProps<typeof Badge>['color']>
@@ -117,9 +118,18 @@ export default function TraceabilityTable() {
       header: 'Cámara',
       cell: (info) => {
         const cameraId = info.getValue()
+        const cameraCount = countPassageCameras(info.row.original.passage)
         return cameraId ? (
           <span className="text-sm text-zinc-700 dark:text-zinc-300">
             {cameraId}
+            {cameraCount > 1 && (
+              <span
+                className="ml-2 text-xs text-zinc-500 dark:text-zinc-400"
+                title="Varias cámaras vieron este mismo paso"
+              >
+                ×{cameraCount} cámaras
+              </span>
+            )}
           </span>
         ) : (
           <span className="text-zinc-400 dark:text-zinc-600">-</span>

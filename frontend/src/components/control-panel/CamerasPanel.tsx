@@ -31,6 +31,9 @@ import { LprSettingsDialog } from './LprSettingsDialog'
 
 type CameraFormValues = CreateCameraFormData & OrganizationScoped
 
+const SOURCE_MASK_CHAR = '•'
+const SOURCE_MASK = SOURCE_MASK_CHAR.repeat(8)
+
 interface CamerasPanelProps {
   triggerNew?: boolean
 }
@@ -117,7 +120,7 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
     onError: (err: Error) => toast.error(err.message || 'Error al cambiar estado de Guardián Visual'),
   })
 
-  const { register, handleSubmit, reset, setValue, control, setError, clearErrors, formState: { errors } } =
+  const { register, handleSubmit, reset, setValue, watch, control, setError, clearErrors, formState: { errors } } =
     useForm<CameraFormValues>({})
 
   // Super-admin creando una cámara: elige el condominio (obligatorio); nadie más
@@ -127,7 +130,12 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
 
   const [loadingSource, setLoadingSource] = useState(false)
   const [hasSource, setHasSource] = useState(false)
-  const [revealedSource, setRevealedSource] = useState<string | null>(null)
+  // URL original traída del servidor al revelar (para saber si el usuario la cambió).
+  const [originalSource, setOriginalSource] = useState<string | null>(null)
+  // El ojo: la URL guardada se ve en lugar de la máscara.
+  const [sourceVisible, setSourceVisible] = useState(false)
+  // El usuario escribió en el campo: lo tecleado manda sobre la máscara y la URL revelada.
+  const [sourceTouched, setSourceTouched] = useState(false)
 
 
 
@@ -138,7 +146,9 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
       setValue('location', selected.location || '')
       // do not auto-fetch sourceUrl for privacy; only mark masked if exists
       setValue('sourceUrl', '')
-      setRevealedSource(null)
+      setOriginalSource(null)
+      setSourceVisible(false)
+      setSourceTouched(false)
       ;(async () => {
         try {
           const r = await getCameraHasSource(selected.id)
@@ -157,16 +167,24 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
       setValue('active', selected.active === undefined ? true : !!selected.active)
     } else {
       reset()
+      // Una cámara nueva no tiene URL guardada: sin máscara ni estado de la edición anterior.
+      setHasSource(false)
+      setOriginalSource(null)
+      setSourceVisible(false)
+      setSourceTouched(false)
     }
   }, [selected, setValue, reset])
 
   const handleShowSource = async () => {
     if (!selected || !canRevealSource) return
-    // toggle reveal/hide
-    if (revealedSource) {
-      // hide: clear visible value but keep hasSource true (masked)
-      setRevealedSource(null)
-      setValue('sourceUrl', '')
+    // Ocultar: vuelve la máscara (si no se editó) sin perder lo que haya en el formulario.
+    if (sourceVisible) {
+      setSourceVisible(false)
+      return
+    }
+    // Ya revelada antes: no se pide de nuevo ni se pisa lo editado.
+    if (originalSource !== null) {
+      setSourceVisible(true)
       return
     }
 
@@ -174,9 +192,11 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
     try {
       const res = await getCameraSourceUrl(selected.id)
       if (res && typeof res.sourceUrl === 'string' && res.sourceUrl) {
-        setRevealedSource(res.sourceUrl)
-        setValue('sourceUrl', res.sourceUrl)
+        setOriginalSource(res.sourceUrl)
+        setSourceVisible(true)
         setHasSource(true)
+        // Si el usuario ya escribió una URL nueva mientras cargaba, no se la pisa.
+        if (!sourceTouched) setValue('sourceUrl', res.sourceUrl)
       } else {
         toast.info('No hay URL disponible para esta cámara')
         setHasSource(false)
@@ -195,11 +215,16 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
         // (`active` se envía explícito para que el backend guarde true/false)
         const payload: UpdateCameraFormData = withoutOrganizationId(data)
 
-        // If sourceUrl provided via revealedSource, prefer that; otherwise if empty remove
-        if (revealedSource) {
-          payload.sourceUrl = revealedSource
-        } else if (!payload.sourceUrl) {
+        // La URL solo viaja si la persona la cambió: la máscara y la URL sin tocar
+        // nunca se reenvían (el backend conserva la guardada si falta la clave).
+        const typedSource = (payload.sourceUrl ?? '').trim()
+        if (typedSource !== '' && typedSource !== originalSource) {
+          payload.sourceUrl = typedSource
+        } else {
           delete payload.sourceUrl
+          if (sourceTouched && typedSource === '' && hasSource) {
+            toast.warning('La URL quedó vacía: se conserva la actual (una cámara no puede quedar sin URL)')
+          }
         }
 
         // remove empty roleIds
@@ -214,7 +239,6 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
         }
         clearErrors('organizationId')
         const toCreate: CreateCameraPayload = scopeCreatePayload(data, chooseCondominium)
-        if (revealedSource) toCreate.sourceUrl = revealedSource
         // minimal validation
         if (!toCreate.name || typeof toCreate.name !== 'string' || !toCreate.name.trim()) {
           toast.error('El nombre es requerido')
@@ -235,6 +259,14 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
   }
 
   const isSubmitting = createMut.isPending || updateMut.isPending
+
+  // Máscara solo mientras la URL guardada no se revele ni se toque el campo. Tras
+  // tocarlo manda lo tecleado (incluso vacío = reemplazar), salvo que, ya revelada,
+  // vuelva a coincidir con la original.
+  const currentSource = watch('sourceUrl') ?? ''
+  const sourceEdited = sourceTouched && (originalSource === null || currentSource !== originalSource)
+  const sourceEmptied = sourceEdited && currentSource.trim() === ''
+  const showSourceMask = !!selected && hasSource && !sourceVisible && !sourceEdited
 
   const onDelete = async (id: string) => {
     try {
@@ -501,16 +533,31 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
                 render={({ field }) => (
                   <UrlRevealInput
                     name={field.name}
-                    value={revealedSource ?? (hasSource ? '••••••••' : (field.value || ''))}
-                    onChange={field.onChange}
+                    value={showSourceMask ? SOURCE_MASK : (field.value || '')}
+                    onChange={(next) => {
+                      // Escribir sobre la máscara la reemplaza: se descartan sus puntos.
+                      setSourceTouched(true)
+                      field.onChange(showSourceMask ? next.split(SOURCE_MASK_CHAR).join('') : next)
+                    }}
                     onBlur={field.onBlur}
                     onReveal={selected && canRevealSource ? handleShowSource : undefined}
                     loading={loadingSource}
-                    revealed={!!revealedSource}
+                    revealed={sourceVisible}
                   />
                 )}
               />
-              
+              {selected && hasSource && (
+                <p
+                  id="camera-source-help"
+                  role="status"
+                  className={sourceEmptied ? 'text-xs text-amber-600 dark:text-amber-400' : 'text-xs text-zinc-500 dark:text-zinc-400'}
+                >
+                  {sourceEmptied
+                    ? 'El campo está vacío: se conservará la URL actual. Una cámara no puede quedar sin URL.'
+                    : 'Deja el campo sin tocar para conservar la URL actual, o escribe una nueva para reemplazarla.'}
+                </p>
+              )}
+
               {/* Role selector */}
               <div>
                 <label className="block text-sm font-medium text-zinc-300 mb-1">Roles con acceso</label>

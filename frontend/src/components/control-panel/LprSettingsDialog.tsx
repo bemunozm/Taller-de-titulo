@@ -32,10 +32,12 @@ import {
   LPR_DETECTOR_IMGSZ_VALUES,
   LPR_DIRECTIONS,
   type Camera,
+  type DirectionLine,
   type LprSettings,
   type ZonePoint,
 } from '@/types/index'
-import { ZoneEditor } from './ZoneEditor'
+import { describeDirectionLine } from '@/helpers/directionLine'
+import { ZoneEditor, type ZoneEditorTool } from './ZoneEditor'
 
 function SectionTitle({ children }: { children: ReactNode }) {
   return <h3 className="text-base/6 font-semibold text-zinc-950 sm:text-sm/6 dark:text-white">{children}</h3>
@@ -104,7 +106,8 @@ interface LprSettingsFormProps {
 
 function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormProps) {
   const queryClient = useQueryClient()
-  const [showZoneEditor, setShowZoneEditor] = useState(false)
+  // Un solo lienzo edita la zona y la línea de dirección; guarda con qué herramienta abrir.
+  const [zoneEditorTool, setZoneEditorTool] = useState<ZoneEditorTool | null>(null)
   const [confirmingReset, setConfirmingReset] = useState(false)
 
   const {
@@ -121,6 +124,7 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
 
   const action = watch('action')
   const zone = watch('zone')
+  const directionLine = watch('directionLine')
   const unlimitedMaxWidth = watch('unlimitedMaxWidth')
   const confirmReads = watch('confirmReads')
   // En control de acceso es un error de validación; en solo registrar queda como aviso.
@@ -168,8 +172,10 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
 
   // La zona se aplica al formulario y se persiste junto con el resto al guardar:
   // el PATCH reemplaza toda la configuración, así no se pisan ajustes sin guardar.
-  const applyZone = async (zones: ZonePoint[][]) => {
+  const applyZone = async (zones: ZonePoint[][], line?: DirectionLine | null) => {
     setValue('zone', zones, { shouldDirty: true, shouldValidate: true })
+    // `undefined` = el editor no maneja la línea: se conserva la del formulario.
+    if (line !== undefined) setValue('directionLine', line, { shouldDirty: true, shouldValidate: true })
   }
 
   return (
@@ -369,7 +375,7 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
           )}
           {canEdit && (
             <div className="flex flex-wrap items-center gap-3">
-              <Button outline type="button" disabled={isBusy} onClick={() => setShowZoneEditor(true)}>
+              <Button outline type="button" disabled={isBusy} onClick={() => setZoneEditorTool('zone')}>
                 {zone.length > 0 ? 'Editar zona de detección' : 'Dibujar zona de detección'}
               </Button>
               <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -379,10 +385,37 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
           )}
         </section>
 
+        <section aria-labelledby="lpr-direction-line-heading" className="space-y-2">
+          <h3
+            id="lpr-direction-line-heading"
+            className="text-base/6 font-semibold text-zinc-950 sm:text-sm/6 dark:text-white"
+          >
+            Línea de dirección
+          </h3>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">
+            {describeDirectionLine(directionLine)} Si el vehículo cruza la línea, ese cruce define si entra o sale.
+          </p>
+          {errors.directionLine && (
+            <p role="alert" className="text-sm text-red-600 dark:text-red-500">
+              La línea de dirección no es válida: {errors.directionLine.message ?? 'vuelve a dibujarla (debe tener cierto largo y quedar dentro del cuadro).'}
+            </p>
+          )}
+          {canEdit && (
+            <div className="flex flex-wrap items-center gap-3">
+              <Button outline type="button" disabled={isBusy} onClick={() => setZoneEditorTool('line')}>
+                {directionLine ? 'Editar línea de dirección' : 'Dibujar línea de dirección'}
+              </Button>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Se edita junto con la zona y se guarda al pulsar "Guardar".
+              </p>
+            </div>
+          )}
+        </section>
+
         {confirmingReset ? (
           <div role="alertdialog" aria-label="Confirmar restablecimiento" className="space-y-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4">
             <p className="text-sm text-zinc-700 dark:text-zinc-200">
-              Se borrarán todos los ajustes de esta cámara, incluida la zona, y volverá a los valores por defecto del
+              Se borrarán todos los ajustes de esta cámara, incluidas la zona y la línea de dirección, y volverá a los valores por defecto del
               worker (control de acceso). ¿Continuar?
             </p>
             <div className="flex gap-3">
@@ -419,11 +452,14 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
         )}
       </form>
 
-      {showZoneEditor && (
+      {zoneEditorTool && (
         <ZoneEditor
           camera={camera}
           initialZones={zone}
           tone="lpr"
+          enableDirectionLine
+          initialDirectionLine={directionLine}
+          initialTool={zoneEditorTool}
           title={
             <>
               Zona de detección <span className="ml-2 font-black text-emerald-500">LPR</span>
@@ -431,13 +467,13 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
           }
           description={
             <>
-              Delimita dónde se leen patentes en <span className="font-bold text-emerald-400">{camera.name}</span>
+              Delimita dónde se leen patentes y por dónde cruzan los vehículos en <span className="font-bold text-emerald-400">{camera.name}</span>
             </>
           }
-          saveLabel="Aplicar zona"
-          successMessage='Zona aplicada. Pulsa "Guardar" para conservarla'
+          saveLabel="Aplicar"
+          successMessage='Cambios aplicados. Pulsa "Guardar" para conservarlos'
           onSave={applyZone}
-          onClose={() => setShowZoneEditor(false)}
+          onClose={() => setZoneEditorTool(null)}
         />
       )}
     </>
