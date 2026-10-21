@@ -4,6 +4,59 @@ Registro cronológico de conversaciones, decisiones y avances. Lo más reciente 
 
 ---
 
+## 2026-10-21 — Dirección por trayectoria del vehículo y pasadas multicámara
+
+**Stack local con cámaras reales**
+- Se levantó el stack completo en local (backend, frontend, manager y workers LPR) contra las cámaras del condominio, por el relay de la Pi (D6), con Cloudinary para los frames de evidencia.
+- **Imágenes de trazabilidad:** el detalle de un intento no mostraba la evidencia. Se corrigió para mostrar el frame de Cloudinary o, si no hay, el recorte de la patente (PR #60, mergeado).
+
+**Hallazgos**
+- **La dirección por ancho de la patente es débil:** 5/8 en el portón y el resto `unknown` (D7). Falla con autos que pasan de lado o se detienen.
+- **Doble apertura entre cámaras.** El dedupe vivía en la memoria de cada worker y el backend no tenía locks: dos cámaras que leían a un residente casi al mismo tiempo producían **dos `Permitido` y dos aperturas**.
+- **Bug de la URL de cámara.** El campo enmascarado no se podía editar y el submit reenviaba la URL vieja. Aunque se cambiara por API, el manager respondía `already_running` y el worker seguía con la URL anterior.
+
+**Decisiones de Benjamin**
+- **Dirección robusta con ByteTrack**, siguiendo el vehículo y no la patente, con una línea de cruce dibujada por cámara.
+- **Dedupe multicámara obligatorio**, para cualquier combinación de cámaras LPR presente o futura: cada auto es **una pasada**, con un intento y como máximo una apertura.
+- **Estacionamiento 03 como cámara de salida**, reapuntada a su stream HD: solo registra, ve ambos sentidos y tiene línea de dirección con la flecha de salida hacia el portón. Para eso hacía falta arreglar la edición de la URL.
+
+**Implementación** (plan E1–E10, decisión [D8](05-decisiones-tecnicas.md#d8--dirección-por-trayectoria-del-vehículo-y-pasadas-multicámara--implementado-2026-10-21-falta-gate-completo-y-pr))
+- **Worker:**
+  - `processor/vehicle_tracker.py` (ByteTrack con el `yolo11n.pt` local, sin descargas en runtime);
+  - `utils/direction.py`, puro: cruce del segmento con márgenes anti-ruido y respaldos `motion` > `width` > `none`;
+  - asociación patente → vehículo, espera de dirección de hasta 4 s, `meta.direction_source` y liberación de pendientes al detener;
+  - `lapx==0.10.0` declarado y `replay_eval --direction-line`.
+- **Backend:**
+  - entidad `VehiclePassage` y su migración: advisory lock por (condominio, patente), índice único "un intento por pasada", token de liderazgo, promoción registro → acceso y pasadas huérfanas;
+  - validación en el servidor de la fuente de la dirección;
+  - `passage` en `GET /detections/plates/attempts`;
+  - retención y supresión de pasadas;
+  - relanzamiento del worker al cambiar `sourceUrl`.
+- **Frontend:**
+  - herramienta "Línea de dirección" en el `ZoneEditor`, con la flecha de salida y "Invertir sentido";
+  - sección en "Configurar LPR";
+  - trazabilidad con dirección, fuente y "Cámaras que vieron este paso";
+  - fix de la URL en `CamerasPanel`.
+- **Contrato nuevo** `contracts/direction-line.cases.json`, que fija la convención de `exitSide` y se prueba en el worker y el frontend.
+
+**Resultados**
+- **Harness sobre los 9 clips del portón** (8 pasadas, RTX 5060 Ti, 1920 / 8 fps / N=3, con zona y línea): patentes 8/8 y 0 incorrectas (sin cambio); **dirección 8/8, 0 equivocadas y 0 `unknown`** (antes 5/8 y 3 `unknown`): 6 por línea y 2 por movimiento. Costo de ~33–48 ms por cuadro en GPU con el tracker de vehículos (antes ~13–21) y latencia mediana de ~4.6 s (máximo 6.5 s). Detalle en [modulos/vision.md](modulos/vision.md#dirección-por-trayectoria-bytetrack--línea).
+- **Concurrencia contra Postgres real:** 10 POST simultáneos de la misma patente → 1 pasada, 1 intento y 1 apertura. Una pasada huérfana con un líder lento → 1 apertura.
+
+**Revisiones**
+- **QA:** aprobado con observaciones, ya corregidas.
+- **Ciberseguridad:** 0 críticos.
+  - 1 ALTO: una cámara de solo registro absorbía la decisión del portón. Se corrigió con la **promoción** registro → acceso.
+  - 1 MEDIO: una dirección fija de cámara podía partir una pasada. Ahora **solo `line`** la parte.
+- **Nova** detectó una posible doble apertura en el guardado de la decisión, cuando un líder lento perdía la pasada. Se corrigió con el **token de liderazgo**.
+
+**Pendientes**
+- Gate completo con e2e, commits y PR (los dispara Benjamin).
+- Configurar la línea en `porton-hd` y en Estacionamiento 03 desde la UI, y verificar end-to-end que una pasada vista por las dos cámaras queda como una sola.
+- Deuda de D8: costo del tracker en CPU/RPi, transición de visitas ante un líder lento, reconciliación del manager, re-registro con `CAMERAS_STRICT_REGISTRATION` y supresión con la pasada abierta.
+
+---
+
 ## 2026-10-20 — LPR sobre la cámara real del portón: de 0/8 a 8/8
 
 **Prueba en terreno**

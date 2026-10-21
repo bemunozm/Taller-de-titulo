@@ -174,11 +174,84 @@ Benchmark previo con capturas del mismo portón. Los valores son medianas y no i
   - Son solo 8 pasadas, de día, con el mismo ángulo y de una sola tarde. Por la **regla del 3**, 0 incorrectas en 8 es compatible con una tasa real de error de hasta ~37 % (IC 95 %). La diferencia entre 7/8 y 8/8 no es estadísticamente significativa.
   - **Antes del piloto** falta muestra de noche, con lluvia, con motos (sin formato soportado todavía) y con vehículos detenidos frente a la cámara.
 
+## Dirección por trayectoria (ByteTrack + línea)
+
+> Fecha: 2026-10-21. Decisión [D8](../05-decisiones-tecnicas.md#d8--dirección-por-trayectoria-del-vehículo-y-pasadas-multicámara--implementado-2026-10-21-falta-gate-completo-y-pr). Mismos clips, verdad terreno y anonimización (P1…P8) que la evaluación de arriba.
+
+**Problema.** La dirección de D7 salía de la tendencia del ancho de la patente: crece si el auto se acerca y decrece si se aleja. En el portón acertó 5/8, con 3 `unknown` (P4, P7 y P8). Falla cuando la patente se lee pocas veces, el auto pasa de lado o se detiene.
+
+**Cómo funciona ahora:**
+1. **Seguimiento del vehículo.** Si la cámara tiene `directionLine` y no fija la dirección, el worker corre un segundo modelo, `yolo11n.pt` (COCO: auto, moto, bus y camión), con **ByteTrack** (`model.track(persist=True)`), a imgsz 640 sobre el mismo recorte de la zona que el detector de patentes. El vehículo es un objeto grande y estable: su trayectoria existe aunque la patente no se lea en todos los cuadros. Se sigue el **borde inferior central** de su caja, que es donde toca el piso y lo menos sensible a la altura del vehículo.
+2. **Asociación.** Cada lectura de patente se liga al vehículo cuya caja contiene el centro de la patente. El voto por texto (N=3) no cambia.
+3. **Cruce de la línea** (`lpr/utils/direction.py`, puro). Cruzar el **segmento** hacia `exitSide` es `exit` y hacia el otro lado, `entry`. Hay dos defensas contra el ruido: solo cuentan los puntos a ≥ 2 % de la diagonal del cuadro, para que un auto detenido sobre la línea no "cruce" por el jitter de su caja, y rodear un extremo del segmento no es cruzar.
+4. **Respaldos** si no hubo cruce: `motion` (desplazamiento neto hacia un lado de la línea, ≥ 15 % del ancho del cuadro), luego `width` (lo de D7, solo con `direction=both`) y por último `none`. Una dirección fija de la cámara (`camera`) manda siempre.
+5. **Espera.** Confirmada la patente, la emisión espera hasta que el vehículo cruce, o hasta `LPR_DIRECTION_WAIT_SECONDS` (4 s), y luego emite con el mejor respaldo. La fuente viaja en `meta.direction_source`, y el backend la valida contra la configuración de la cámara.
+
+**Metodología.** El mismo harness (`replay_eval`, mismo código del worker) con el tracker de vehículos activo, una instancia nueva por clip. Al final de cada clip se emiten las patentes confirmadas que seguían esperando, como hace el worker al detenerse. El reporte separa la dirección por fuente (`line`, `motion`, `width`, `none`) y distingue **equivocada** (sentido opuesto, la métrica grave) de `unknown`.
+
+```bash
+python -m lpr.tools.replay_eval --clips lpr/eval-data/clips --gt lpr/eval-data/gt.csv \
+    --imgsz 1920 --fps 8 --confirm 3 --crop 60,250,0.8,6 --device cuda:0 \
+    --zone-file zona-porton.json --direction-line "0.45,0.62;0.92,0.62;left"
+```
+
+Línea de la evaluación: horizontal, a través del carril del portón (de x=0.45 a x=0.92, a y=0.62), con `exitSide=left`, es decir, salida = el vehículo cruza hacia **arriba** en la imagen, alejándose de la cámara hacia el portón. Equipo: RTX 5060 Ti con 1920 / 8 fps / N=3 y la zona del portón.
+
+**Resultados (8 pasadas):**
+
+| | Antes (D7: ancho de la patente) | Ahora (D8: trayectoria + línea) |
+|---|---|---|
+| Patentes correctas / incorrectas | 8/8 / 0 | 8/8 / 0 |
+| Dirección correcta | 5/8 | **8/8** |
+| Dirección equivocada | 0 | **0** |
+| Dirección `unknown` | 3 (P4, P7, P8) | **0** |
+| Fuente de la dirección | `width` | `line` 6 · `motion` 2 |
+| Latencia mediana (máx.) | 4.2–4.3 s (6.2 s) | ~4.6 s (6.5 s) |
+| ms por cuadro (GPU) | ~13–21 | ~33–48 |
+
+- **Los respaldos importan.** En 2 de las 8 pasadas el vehículo no alcanzó a cruzar la línea dentro de lo que se vio, y la dirección salió de `motion`, sin errores. La línea debe atravesar un tramo que el auto recorra completo dentro de la zona.
+- **Costo.** El tracker de vehículos duplica o triplica el costo por cuadro en GPU. En CPU o en una RPi es un segundo modelo por cuadro, así que hay que medirlo en el benchmark de la Fase 5 (D5). Sin línea configurada no corre.
+- **Latencia.** La espera de dirección suma ~0.3 s a la mediana.
+- **Misma limitación que arriba:** 8 pasadas, de día, un ángulo (regla del 3).
+
+**Cómo configurar la línea:**
+1. En el panel de cámaras, menú de la cámara → **"Configurar LPR"** → sección **"Línea de dirección"** → **"Dibujar línea de dirección"** (o "Editar línea de dirección"). Se abre el lienzo sobre el video en vivo con la herramienta "Línea de dirección".
+2. Marca **dos puntos** atravesando el carril, de lado a lado; el clic derecho cancela el primero. La línea debe tener cierto largo (≥ 0.05 normalizado) y quedar dentro del cuadro.
+3. Revisa la **flecha "Salida →"**: debe apuntar hacia donde va el auto cuando **sale**. Si apunta al revés, usa **"Invertir sentido"**. Los extremos se pueden arrastrar.
+4. Guarda. El worker toma la línea por pull en ≤ 60 s, sin reiniciar.
+
+Sin línea, la dirección vuelve a inferirse por el tamaño de la patente.
+
+**Convención** (contrato [`contracts/direction-line.cases.json`](../../contracts/direction-line.cases.json), probado en el worker y en el frontend):
+- Coordenadas de imagen normalizadas 0–1, con x hacia la derecha e y hacia **abajo**.
+- Con `d = to − from` y `v = p − from`, `cross = d.x·v.y − d.y·v.x`: `cross < 0` es el lado `left` y `cross > 0` el lado `right`. Son los lados de quien avanza de `from` a `to`.
+- Ejemplos en pantalla: con una línea horizontal dibujada de izquierda a derecha, `left` es **arriba**; con una vertical dibujada hacia abajo, `left` es la **derecha** de la pantalla.
+- Cruzar hacia `exitSide` es `exit`, y hacia el lado opuesto, `entry`. La UI calcula la flecha con la misma fórmula, así que basta con mirarla.
+
+## Pasadas multicámara
+
+Una **pasada** (`vehicle_passages`, D8) agrupa todas las lecturas de **una patente** en **un condominio**, vistas por **cualquier cámara**, dentro de una ventana deslizante de `LPR_PASSAGE_WINDOW_SECONDS`.
+- **Una pasada tiene un solo intento de acceso.** Lo garantiza un índice único en la BD. Solo el líder de la pasada notifica, abre o escala al conserje. Las demás lecturas quedan como evidencia (`plate_detections.passageId`).
+- **Serialización.** El reclamo de la pasada corre bajo `pg_advisory_xact_lock` por (condominio, patente). Dos cámaras que leen la misma patente a la vez producen **una** apertura.
+- **Cámaras de registro y de acceso.** Si una cámara de acceso lee una pasada abierta por una de solo registro, la **promueve** y decide una sola vez, sobre el mismo intento.
+- **Dirección de la pasada.** Una lectura con mejor fuente la corrige (`camera` > `line` > `motion` > `width`). Solo una lectura por **línea**, con el sentido opuesto al de la pasada (también por línea) y pasados `LPR_PASSAGE_REVERSE_MIN_SECONDS`, abre una pasada nueva dentro de la ventana: es el auto que entra y sale enseguida.
+- **Trazabilidad.** El detalle del intento muestra la dirección, su fuente y **"Cámaras que vieron este paso"** (las últimas 10 lecturas, con imagen).
+
+**Variables de entorno:**
+
+| Variable | Dónde | Default | Qué hace |
+|---|---|---|---|
+| `LPR_PASSAGE_WINDOW_SECONDS` | backend | 60 (1–600) | Ventana deslizante en que las lecturas de una patente son la misma pasada |
+| `LPR_PASSAGE_REVERSE_MIN_SECONDS` | backend | 15 (1–600) | Edad mínima de la pasada para que una dirección opuesta por línea abra otra |
+| `LPR_PASSAGE_ORPHAN_SECONDS` | backend | 30 (1–600) | Una pasada sin intento cede el liderazgo tras este tiempo (el líder cayó o se colgó) |
+| `LPR_DIRECTION_WAIT_SECONDS` | worker | 4 (0–30) | Cuánto espera una patente confirmada a que el vehículo cruce la línea; 0 = no esperar |
+| `LPR_VEHICLE_MODEL` | worker | vacío = `lpr/yolo11n.pt` | Ruta **local** del modelo COCO para seguir vehículos. Nunca se descarga: si no existe, la dirección cae a los respaldos |
+
 ## Configuración LPR por cámara (`lprSettings`)
 
 Cada cámara guarda su configuración de visión en `Camera.lprSettings` (D7). Si queda en `null`, se usan los defaults del env del worker. Hay dos formas de editarla:
 
-- **UI:** en el panel de cámaras, abrir el menú de la cámara y elegir **"Configurar LPR"**. Requiere `cameras.enable-ia`; sin ese permiso aparece "Ver configuración LPR", solo de lectura. El diálogo tiene las secciones Política (modo y dirección), Detección (resolución y FPS), Recorte de la patente, Confirmación (lecturas) y **"Dibujar zona de detección"**, que abre el lienzo sobre el video en vivo. "Restablecer valores por defecto" deja la config en `null`.
+- **UI:** en el panel de cámaras, abrir el menú de la cámara y elegir **"Configurar LPR"**. Requiere `cameras.enable-ia`; sin ese permiso aparece "Ver configuración LPR", solo de lectura. El diálogo tiene las secciones Política (modo y dirección), Detección (resolución y FPS), Recorte de la patente, Confirmación (lecturas), **"Dibujar zona de detección"**, que abre el lienzo sobre el video en vivo, y **"Línea de dirección"** (ver [Dirección por trayectoria](#dirección-por-trayectoria-bytetrack--línea)). "Restablecer valores por defecto" deja la config en `null`.
 - **API:** `PATCH /api/v1/cameras/:id/lpr-settings`, con sesión y `cameras.enable-ia`. El body **reemplaza** la config completa, y `{}` la resetea. Las reglas de validación están en [`contracts/lpr-settings.cases.json`](../../contracts/lpr-settings.cases.json).
 
 El worker recoge los cambios por pull, **sin reiniciar**, en ≤ `LPR_ZONES_REFETCH_SECONDS` (60 s).
@@ -193,11 +266,13 @@ El worker recoge los cambios por pull, **sin reiniciar**, en ≤ `LPR_ZONES_REFE
   "detectorImgsz": 1920,
   "sampleFps": 8,
   "crop": { "minWidth": 60, "maxWidth": 250, "minRatio": 0.8, "maxRatio": 6 },
-  "confirmReads": 3
+  "confirmReads": 3,
+  "directionLine": { "from": { "x": 0.45, "y": 0.62 }, "to": { "x": 0.92, "y": 0.62 }, "exitSide": "left" }
 }
 ```
 
 - `zone` es un ejemplo: la zona real se **dibuja en el lienzo** y debe cubrir el portón y la entrada, no la calle.
+- `directionLine` es la línea de la evaluación de D8 (salida = cruce hacia arriba en la imagen). También se dibuja en el lienzo, atravesando el carril que cubre la zona.
 - **Host del worker:** `LPR_DEVICE=cuda:0`, porque 1920 a 8 fps necesita GPU. `LPR_OCR_DEVICE` queda en `cpu`.
 - **Fail-closed:**
   - una zona inválida conserva la última válida, o, si nunca hubo una, deja la cámara sin detectar;
