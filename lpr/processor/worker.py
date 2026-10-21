@@ -7,6 +7,7 @@ import json
 import cv2
 from typing import Optional
 import concurrent.futures
+import threading
 import numpy as np
 from pathlib import Path
 
@@ -14,24 +15,43 @@ from lpr.detector.yolo_detector import Detection
 from lpr.utils.images import frame_to_pil, pil_to_base64
 from lpr.utils.capture import reconnect_capture
 from lpr.ocr.fast_ocr_adapter import FastPlateOCR
-from lpr.storage.fs_storage import save_image_pil, save_json
-from lpr.api.client import post_event
-from lpr.processor.rules import (
-    normalize_plate,
-    plausible_plate,
-    analyze_char_confidences,
-    should_confirm,
-    should_save_or_emit,
+from lpr.processor.pipeline import STATUS_SHAPE_REJECTED, make_tracker, process_frame
+from lpr.processor.plate_tracker import PlateEmission
+from lpr.storage.fs_storage import save_image_pil
+from lpr.api.client import consumes_dedupe, fetch_camera_json, is_success, post_event
+from lpr.processor.rules import analyze_char_confidences
+from lpr.settings import apply_camera_settings, settings
+from lpr.utils.pii import mask_plate
+
+
+# Campos de la config por cámara que se resumen en el log cuando cambian
+# (nunca rtsp_url ni backend_url: llevan credenciales).
+_LOGGED_CONFIG_FIELDS = (
+    'action', 'direction', 'detector_imgsz', 'sample_fps', 'confirm_reads',
+    'track_max_gap_seconds', 'min_crop_w', 'max_crop_w', 'min_crop_ratio', 'max_crop_ratio',
+    'detection_blocked',
 )
-from lpr.settings import settings
+# Cambios que obligan a rehacer el tracker (el resto de la config se lee por frame).
+_TRACKER_FIELDS = ('confirm_reads', 'direction', 'track_max_gap_seconds')
 
 
 class LprWorker:
     def __init__(self, cfg, detector, fast_ocr: Optional[FastPlateOCR]):
+        # `base_cfg` es la config del env, INMUTABLE: `apply_camera_settings`
+        # siempre fusiona sobre ella (no sobre la ya fusionada) para que una
+        # clave que el backend deja de mandar vuelva al default del env.
+        self.base_cfg = cfg
         self.cfg = cfg
         self.detector = detector
         self.fast_ocr = fast_ocr
-        self.plate_sightings = {}
+        # seguimiento + voto por vehículo (reemplaza a `plate_sightings`)
+        self.tracker = make_tracker(cfg)
+        # `cfg` y `tracker` se publican juntos bajo este lock: el frame en curso
+        # toma una foto consistente de ambos y el refetch nunca deja a medias.
+        self._runtime_lock = threading.Lock()
+        self._enable_lpr: Optional[bool] = None
+        self._settings_stop = threading.Event()
+        self._settings_thread: Optional[threading.Thread] = None
         self.emitted_cache = {}
         # executor para procesar frames asincrónicamente y future de control
         max_workers = int(settings.LPR_MAX_WORKERS)
@@ -51,7 +71,88 @@ class LprWorker:
             logging.exception('No se pudo crear detections_dir %s', self.detections_dir)
         logging.info('LPR detections_dir set to %s', self.detections_dir)
 
+    # ------------------------------------------------------------------
+    # Config por cámara (lprSettings) con refetch en caliente
+    # ------------------------------------------------------------------
+    def _settings_path(self) -> str:
+        # El LPR usa el id REAL de la cámara (el Guardián usa `<id>_guardia`).
+        # `camera_id` pasó por el saneado de `build_worker_config`, que no altera
+        # un UUID legítimo; el manager ya valida el id con `_CAMERA_ID_RE`.
+        return f'/workers/cameras/{self.cfg.camera_id}/lpr-settings'
+
+    def refresh_camera_settings(self) -> bool:
+        """Un ciclo de pull: pide `lprSettings`, los fusiona sobre la base y
+        publica la config nueva. Devuelve True si hubo respuesta válida.
+
+        Ante cualquier fallo (red, 4xx/5xx, cuerpo inválido) CONSERVA la última
+        config válida: nunca se cae a "sin zona" por un error transitorio. Si
+        nunca hubo una, sigue vigente la base del env.
+        """
+        data = fetch_camera_json(self.base_cfg.backend_url, self._settings_path(), timeout=5)
+        if data is None:
+            logging.warning('No se pudo obtener lprSettings de %s: se conserva la config vigente',
+                            self.base_cfg.camera_id)
+            return False
+        enable_lpr = data.get('enableLpr')
+        if enable_lpr is False and self._enable_lpr is not False:
+            # El manager NO detiene workers por cambios de BD (solo reconcilia al
+            # arrancar); acá solo se deja constancia, no se auto-mata el proceso.
+            logging.warning('El backend marca enableLpr=false para %s; el worker sigue activo '
+                            'hasta que el manager lo detenga', self.base_cfg.camera_id)
+        self._enable_lpr = enable_lpr if isinstance(enable_lpr, bool) else self._enable_lpr
+        raw = data.get('lprSettings')
+        # `previous=self.cfg`: una zona rota conserva la última válida (o, si nunca
+        # hubo una, la cámara no detecta: fail-closed), nunca se ensancha al cuadro.
+        new_cfg = apply_camera_settings(self.base_cfg, raw if isinstance(raw, dict) else None,
+                                        previous=self.cfg)
+        self._publish_config(new_cfg)
+        return True
+
+    def _publish_config(self, new_cfg) -> None:
+        """Reemplazo atómico de `cfg` (y del tracker, solo si hace falta)."""
+        old_cfg = self.cfg
+        changed = [f for f in _LOGGED_CONFIG_FIELDS
+                   if getattr(old_cfg, f, None) != getattr(new_cfg, f, None)]
+        zone_changed = getattr(old_cfg, 'zone', None) != getattr(new_cfg, 'zone', None)
+        if not changed and not zone_changed:
+            return
+        rebuild_tracker = any(getattr(old_cfg, f, None) != getattr(new_cfg, f, None)
+                              for f in _TRACKER_FIELDS)
+        new_tracker = make_tracker(new_cfg) if rebuild_tracker else None
+        with self._runtime_lock:
+            self.cfg = new_cfg
+            if new_tracker is not None:
+                self.tracker = new_tracker
+        summary = {f: getattr(new_cfg, f, None) for f in changed}
+        if zone_changed:
+            summary['zone_polygons'] = len(new_cfg.zone or [])
+        logging.info('Config por cámara actualizada para %s: %s%s', new_cfg.camera_id, summary,
+                     ' (tracker reiniciado)' if rebuild_tracker else '')
+
+    def start_settings_sync(self, interval: Optional[float] = None) -> None:
+        """Pull inicial (síncrono, antes de abrir la captura) y refetch periódico
+        en un hilo demonio que no bloquea el bucle de captura. Reusa
+        `LPR_ZONES_REFETCH_SECONDS` como cadencia."""
+        if self._settings_thread is not None:
+            return
+        period = float(interval if interval is not None else settings.LPR_ZONES_REFETCH_SECONDS)
+        try:
+            self.refresh_camera_settings()
+        except Exception:
+            logging.exception('Error inesperado obteniendo lprSettings al arrancar')
+
+        def _loop():
+            while not self._settings_stop.wait(period):
+                try:
+                    self.refresh_camera_settings()
+                except Exception:
+                    logging.exception('Error inesperado refrescando lprSettings')
+
+        self._settings_thread = threading.Thread(target=_loop, name='lpr-settings-sync', daemon=True)
+        self._settings_thread.start()
+
     def start_capture_loop(self, cap):
+        self.start_settings_sync()
         last_frame_ts = 0
         # Trackea la última lectura EXITOSA del stream (independiente del
         # throttle de poll_interval de abajo) para poder detectar un stream
@@ -112,6 +213,7 @@ class LprWorker:
                 last_frame_ts = now
                 self.submit_frame(frame)
         finally:
+            self._settings_stop.set()
             try:
                 self.executor.shutdown(wait=False)
             except Exception:
@@ -138,234 +240,158 @@ class LprWorker:
         self.processing_future = fut
 
     def _prune_state(self, now_ts: float):
-        """Purga estado en memoria para que no crezca sin cota ni corrompa la
-        confirmación multi-frame.
-
-        `plate_sightings` se limpia por ventana de avistamiento (TTL): así el
-        `count` refleja el paso ACTUAL de un vehículo y no su historia completa
-        —sin esto, desde el 2º avistamiento histórico cualquier patente se
-        confirmaba en un solo frame—. `emitted_cache` se limpia pasada la
-        ventana de dedupe desde la última lectura (el dedupe es deslizante),
-        cuando ya no sirve.
-        """
-        ttl = float(settings.LPR_SIGHTING_TTL_SECONDS)
+        """Purga `emitted_cache` pasada la ventana de dedupe desde la última
+        lectura (el dedupe es deslizante), cuando ya no sirve. El estado de
+        confirmación vive en el `PlateTracker`, que cierra solo sus
+        seguimientos tras `track_max_gap_seconds` sin ver la patente."""
         dedup = float(settings.LPR_DEDUP_SECONDS)
-        for plate in [p for p, e in self.plate_sightings.items()
-                      if now_ts - float(e.get('last_seen', 0)) > ttl]:
-            self.plate_sightings.pop(plate, None)
         for plate in [p for p, ts in self.emitted_cache.items()
                       if now_ts - float(ts) > dedup]:
             self.emitted_cache.pop(plate, None)
 
     def _process_frame(self, frame: np.ndarray):
-        # Esta función implementa la lógica de detección/OCR/confirmación
-        self._prune_state(time.time())
-        plates = self.detector(frame, self.cfg.min_det_conf)
-        logging.debug('Frame procesado - Detecciones: %d', len(plates) if plates else 0)
-        if not plates:
+        """Detecta (con zona) -> lee -> formato -> seguimiento + voto -> emite.
+
+        La parte pura (hasta el tracker) es `pipeline.process_frame`, la misma
+        que corre `tools/replay_eval.py`; acá solo queda lo que tiene efectos:
+        dedupe, guardado de la imagen y el POST al backend.
+        """
+        now_ts = time.time()
+        self._prune_state(now_ts)
+        # Foto consistente de (cfg, tracker): un refetch a mitad de frame no
+        # mezcla la config nueva con el tracker viejo.
+        with self._runtime_lock:
+            cfg, tracker = self.cfg, self.tracker
+        reads, emissions = process_frame(
+            frame, self.detector, self.fast_ocr, cfg, tracker, now_ts,
+            save_only_on_plate=bool(settings.LPR_SAVE_ONLY_ON_PLATE),
+        )
+        for read in reads:
+            if read.status == STATUS_SHAPE_REJECTED:
+                logging.debug('Crop descartado por tamaño/forma (w=%d h=%d ratio=%.2f)',
+                              read.crop_w, read.crop_h, read.crop_ratio)
+            else:
+                logging.debug('Detección: conf=%.2f | OCR: "%s" conf=%.2f | patente=%s (%s)',
+                              read.det_conf, mask_plate(read.raw_text), read.ocr_conf,
+                              mask_plate(read.plate), read.status)
+        for emission in emissions:
+            self._handle_emission(frame, emission, now_ts)
+
+    def _handle_emission(self, frame: np.ndarray, emission: PlateEmission, now_ts: float):
+        """Una emisión por vehículo (seguimiento) ya votada: dedupe, guardado
+        best-effort y POST. El dedupe solo se consume si el backend aceptó."""
+        plate_clean = emission.text
+        # dedupe DESLIZANTE: una emisión descartada refresca la marca, así que
+        # la ventana corre desde la ÚLTIMA vez que se vio la patente y no desde
+        # la emisión. Un auto que se detiene y reanuda dentro de la ventana no
+        # genera un evento nuevo (el backend no sabe si es entrada o salida).
+        dedup_seconds = float(settings.LPR_DEDUP_SECONDS)
+        last_seen = self.emitted_cache.get(plate_clean)
+        if last_seen and (now_ts - last_seen) < dedup_seconds:
+            logging.info('Placa "%s" duplicada - vista hace %.1fs', mask_plate(plate_clean), now_ts - last_seen)
+            self.emitted_cache[plate_clean] = now_ts
             return
-        for det in plates:
-            x1, y1, x2, y2 = det.x1, det.y1, det.x2, det.y2
-            conf = det.confidence
-            h, w = frame.shape[:2]
-            x1c, y1c = max(0, x1), max(0, y1)
-            x2c, y2c = min(w - 1, x2), min(h - 1, y2)
-            if x2c <= x1c or y2c <= y1c:
-                continue
 
-            # Filtro de tamaño/forma del crop: un recorte diminuto o deforme no
-            # es legible y el OCR "alucina" con confianza engañosa sobre él.
-            # (Estos umbrales existían en la config pero nunca se cableaban.)
-            crop_w = x2c - x1c
-            crop_h = y2c - y1c
-            crop_area = crop_w * crop_h
-            crop_ratio = (crop_w / crop_h) if crop_h > 0 else 0.0
-            if (crop_w < self.cfg.min_crop_w or crop_h < self.cfg.min_crop_h
-                    or crop_area < self.cfg.min_crop_area
-                    or crop_ratio < self.cfg.min_crop_ratio
-                    or crop_ratio > self.cfg.max_crop_ratio):
-                logging.info('Crop descartado por tamaño/forma (w=%d h=%d area=%d ratio=%.2f)',
-                             crop_w, crop_h, crop_area, crop_ratio)
-                continue
+        best = emission.best_ref  # PlateRead de la mejor lectura ganadora
+        x1c, y1c, x2c, y2c = (int(v) for v in emission.box)
+        char_conf = list(best.char_conf) if best is not None else []
+        char_stats = analyze_char_confidences(char_conf)
 
-            crop = frame[y1c:y2c, x1c:x2c]
-            pil_crop = frame_to_pil(crop)
+        # construir payload en forma del DTO: campos principales + meta
+        meta: dict = {}
+        meta['bbox'] = [x1c, y1c, x2c, y2c]
+        # incluir snapshot en base64 solo si está habilitado por env
+        if bool(settings.LPR_INCLUDE_SNAPSHOT) and best is not None and best.pil_crop is not None:
+            meta['snapshot_jpeg_b64'] = pil_to_base64(best.pil_crop)
+        meta['char_confidences'] = char_conf
+        meta['char_conf_min'] = char_stats['min']
+        meta['char_conf_mean'] = char_stats['mean']
+        meta['direction'] = emission.direction
+        meta['track'] = emission.track_meta()
+        meta['confirmed_by'] = 'track-vote'
 
-            # OCR
-            ocr_res = self.fast_ocr.recognize(np.array(pil_crop)) if self.fast_ocr else None
-            plate_text = ocr_res.text if ocr_res else ''
-            ocr_conf = ocr_res.confidence if ocr_res else 0.0
-            char_conf = ocr_res.char_confidences if ocr_res else []
-            logging.info('Detección: conf=%.2f | OCR: "%s" conf=%.2f', conf, plate_text, ocr_conf)
+        payload = {
+            'cameraId': self.cfg.camera_id,
+            'plate': plate_clean,
+            'plate_raw': best.raw_text if best is not None else plate_clean,
+            'det_confidence': emission.det_conf,
+            'ocr_confidence': emission.ocr_conf,
+            'meta': meta,
+            # NO se envía la URL RTSP: contiene credenciales de la cámara y
+            # el backend identifica la cámara por `cameraId`, no por mountPath.
+            'detectionTimestamp': int(now_ts * 1000),  # Timestamp en milisegundos desde epoch
+        }
 
-            save_only_on_plate = bool(settings.LPR_SAVE_ONLY_ON_PLATE)
-            if save_only_on_plate and (not plate_text or plate_text.strip() == ''):
-                logging.info('OCR vacío — saltando detección')
-                continue
-
-            plate_clean = normalize_plate(plate_text)
-            if not plausible_plate(plate_clean):
-                logging.info('Placa "%s" no plausible, descartando', plate_text)
-                if self.cfg.save_crops_dir:
-                    try:
-                        save_image_pil(self.cfg.save_crops_dir, f'{self.cfg.camera_id}_crop_bad_{int(time.time())}.jpg', pil_crop)
-                    except Exception:
-                        logging.exception('No se pudo guardar crop malo')
-                continue
-
-            char_stats = analyze_char_confidences(char_conf)
-            min_char_ratio_required = float(settings.LPR_MIN_CHAR_CONF_RATIO)
-            if char_stats['num_chars'] > 0 and char_stats['ratio_above'] < min_char_ratio_required:
-                logging.info('Placa "%s" rechazada - calidad insuficiente (ratio: %.2f < %.2f)', 
-                           plate_clean, char_stats['ratio_above'], min_char_ratio_required)
-                if self.cfg.save_crops_dir:
-                    try:
-                        save_image_pil(self.cfg.save_crops_dir, f'{self.cfg.camera_id}_crop_lowq_{int(time.time())}.jpg', pil_crop)
-                    except Exception:
-                        logging.exception('No se pudo guardar crop lowq')
-                continue
-            # dedupe DESLIZANTE: una lectura descartada refresca la marca, así
-            # que la ventana corre desde la ÚLTIMA lectura y no desde la
-            # emisión. Un auto detenido frente a la cámara no vuelve a emitir
-            # cada LPR_DEDUP_SECONDS (cada re-emisión era un evento nuevo para
-            # el backend, que no sabe si es entrada o salida).
-            dedup_seconds = float(settings.LPR_DEDUP_SECONDS)
-            now_ts = time.time()
-            last_seen = self.emitted_cache.get(plate_clean)
-            if plate_clean and last_seen and (now_ts - last_seen) < dedup_seconds:
-                logging.info('Placa "%s" duplicada - vista hace %.1fs', plate_clean, now_ts - last_seen)
-                self.emitted_cache[plate_clean] = now_ts
-                continue
-
-            # sightings
-            entry = self.plate_sightings.get(plate_clean)
-            if entry is None:
-                entry = {'first_seen': now_ts, 'count': 0, 'last_seen': now_ts}
-            entry['count'] = entry.get('count', 0) + 1
-            entry['last_seen'] = now_ts
-            self.plate_sightings[plate_clean] = entry
-            confirmed, info = should_confirm(self.plate_sightings, plate_clean)
-            if not confirmed:
-                logging.info('Esperando confirmación %s (visto %d veces)', plate_clean, entry.get('count', 0))
-                logging.debug('Esperando confirmacion %s', plate_clean)
-                if self.cfg.save_crops_dir:
-                    try:
-                        save_image_pil(self.cfg.save_crops_dir, f'{self.cfg.camera_id}_crop_pending_{int(time.time())}.jpg', pil_crop)
-                    except Exception:
-                        logging.exception('No se pudo guardar crop pending')
-                continue
-
-            # construir payload en forma del DTO: campos principales + meta
-            meta: dict = {}
-            meta['bbox'] = [int(x1c), int(y1c), int(x2c), int(y2c)]
-            # incluir snapshot en base64 solo si está habilitado por env
-            include_snapshot = bool(settings.LPR_INCLUDE_SNAPSHOT)
-            if include_snapshot:
-                meta['snapshot_jpeg_b64'] = pil_to_base64(pil_crop)
-            meta['char_confidences'] = char_conf
-            meta['char_conf_min'] = char_stats['min']
-            meta['char_conf_mean'] = char_stats['mean']
-            meta['char_conf_ratio'] = char_stats['ratio_above']
-
-            payload = {
-                'cameraId': self.cfg.camera_id,
-                'plate': plate_clean,
-                'plate_raw': plate_text,
-                'det_confidence': conf,
-                'ocr_confidence': ocr_conf,
-                'meta': meta,
-                # NO se envía la URL RTSP: contiene credenciales de la cámara y
-                # el backend identifica la cámara por `cameraId`, no por mountPath.
-                'detectionTimestamp': int(now_ts * 1000),  # Timestamp en milisegundos desde epoch
-            }
-
-            # NOTE: saving full frames for debug was removed by request.
-            # Only crops and detections are saved. Frames saving/uploading were deprecated.
-
-            # Gate de confianza. ANTES este resultado solo decidía si se
-            # guardaba el JPG: `post_event` quedaba FUERA del `if`, así que se
-            # emitía —y potencialmente se abría el portón— con detecciones de
-            # baja confianza. Ahora el gate gobierna la EMISIÓN.
+        # El guardado de imagen/JSON/Cloudinary es best-effort: si falla,
+        # igual se emite (el registro no debe depender de escribir a disco).
+        try:
+            stamp = int(time.time())
+            det_fname = f'{self.cfg.camera_id}_det_{stamp}.jpg'
+            det_path = os.path.join(self.detections_dir, det_fname)
+            frame_det = frame.copy()
             try:
-                det_thresh = float(settings.LPR_DET_CONF_THRESHOLD or self.cfg.det_high_conf)
-                ocr_thresh = float(settings.LPR_OCR_CONF_THRESHOLD or self.cfg.ocr_high_conf)
-                save_high = should_save_or_emit(conf, ocr_conf, self.cfg.combined_threshold, det_thresh, ocr_thresh)
+                # La caja del cuadro ACTUAL (la de la mejor lectura puede ser de un cuadro anterior).
+                fx1, fy1, fx2, fy2 = (int(v) for v in emission.frame_box)
+                cv2.rectangle(frame_det, (fx1, fy1), (fx2, fy2), (0, 255, 255), 3)
+                label = f'{plate_clean} det:{emission.det_conf:.2f} ocr:{emission.ocr_conf:.2f}'
+                cv2.putText(frame_det, label, (fx1, max(20, fy1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
             except Exception:
-                logging.exception('Error evaluando el umbral de emisión')
-                save_high = False
-
-            if not save_high:
-                # Confianza insuficiente: NO se emite al backend (fail-closed).
-                logging.info('Detección de baja confianza NO emitida: %s (det=%.2f ocr=%.2f)',
-                             plate_clean, conf, ocr_conf)
-                continue
-
-            # A partir de aquí la detección supera el umbral y SÍ se emite.
-            # El guardado de imagen/JSON/Cloudinary es best-effort: si falla,
-            # igual se emite (la apertura no debe depender de escribir a disco).
+                logging.exception('Error anotando frame de detección')
+            cv2.imwrite(det_path, frame_det)
+            logging.info('Guardada detección en %s', det_path)
+            # publicar la ruta de la detección (esta es la imagen que debe enviarse al backend)
+            payload['detection_path'] = det_path
+            payload['full_frame_path'] = det_path
+            # subir la detección a Cloudinary si está configurado
+            if bool(settings.CLOUDINARY_UPLOAD):
+                try:
+                    from lpr.storage.fs_storage import (
+                        CLOUDINARY_FRAMES_FOLDER,
+                        upload_to_cloudinary,
+                    )
+                    public_id = f"{CLOUDINARY_FRAMES_FOLDER}/{self.cfg.camera_id}_det_{stamp}"
+                    try:
+                        remote_url = upload_to_cloudinary(det_path, public_id=public_id)
+                        # update payload to point to remote detection image
+                        payload['detection_path'] = remote_url
+                        payload['full_frame_path'] = remote_url
+                        logging.info('Uploaded det image to Cloudinary: %s', remote_url)
+                        if bool(settings.CLOUDINARY_DELETE_LOCAL):
+                            try:
+                                os.remove(det_path)
+                            except Exception:
+                                logging.exception('No se pudo eliminar archivo local %s', det_path)
+                    except Exception:
+                        logging.exception('Error subiendo det image a Cloudinary, manteniendo local path')
+                except Exception:
+                    logging.exception('Error manejando Cloudinary upload')
             try:
-                det_fname = f'{self.cfg.camera_id}_det_{int(time.time())}.jpg'
-                det_path = os.path.join(self.detections_dir, det_fname)
-                frame_det = frame.copy()
-                try:
-                    cv2.rectangle(frame_det, (int(x1c), int(y1c)), (int(x2c), int(y2c)), (0, 255, 255), 3)
-                    label = f'{plate_clean} det:{conf:.2f} ocr:{ocr_conf:.2f}'
-                    cv2.putText(frame_det, label, (int(x1c), max(20, int(y1c) - 10)), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
-                except Exception:
-                    logging.exception('Error anotando frame de detección')
-                cv2.imwrite(det_path, frame_det)
-                logging.info('Guardada detección de alta confianza en %s', det_path)
-                # publicar la ruta de la detección (esta es la imagen que debe enviarse al backend)
-                payload['detection_path'] = det_path
-                payload['full_frame_path'] = det_path
-                # subir la detección a Cloudinary si está configurado
-                if bool(settings.CLOUDINARY_UPLOAD):
-                    try:
-                        from lpr.storage.fs_storage import (
-                            CLOUDINARY_FRAMES_FOLDER,
-                            upload_to_cloudinary,
-                        )
-                        public_id = f"{CLOUDINARY_FRAMES_FOLDER}/{self.cfg.camera_id}_det_{int(time.time())}"
-                        try:
-                            remote_url = upload_to_cloudinary(det_path, public_id=public_id)
-                            # update payload to point to remote detection image
-                            payload['detection_path'] = remote_url
-                            payload['full_frame_path'] = remote_url
-                            logging.info('Uploaded det image to Cloudinary: %s', remote_url)
-                            if bool(settings.CLOUDINARY_DELETE_LOCAL):
-                                try:
-                                    os.remove(det_path)
-                                except Exception:
-                                    logging.exception('No se pudo eliminar archivo local %s', det_path)
-                        except Exception:
-                            logging.exception('Error subiendo det image a Cloudinary, manteniendo local path')
-                    except Exception:
-                        logging.exception('Error manejando Cloudinary upload')
-                try:
-                    if int(settings.LPR_CONFIRM_FRAMES) <= int(entry.get('count', 0)):
-                        confirmed_by = 'frames'
-                    else:
-                        confirmed_by = 'seconds'
-                    # guardar confirmed_by dentro de meta
-                    payload['meta']['confirmed_by'] = confirmed_by
-                    meta_to_save = payload.copy()
-                    meta_path = det_path + '.json'
-                    with open(meta_path, 'w', encoding='utf-8') as mf:
-                        json.dump(meta_to_save, mf, ensure_ascii=False, indent=2)
-                except Exception:
-                    logging.exception('No se pudo guardar metadata JSON')
-                if self.cfg.save_crops_dir:
-                    try:
-                        save_image_pil(self.cfg.save_crops_dir, f'{self.cfg.camera_id}_crop_high_{int(time.time())}.jpg', pil_crop)
-                    except Exception:
-                        logging.exception('No se pudo guardar crop high')
+                with open(det_path + '.json', 'w', encoding='utf-8') as mf:
+                    json.dump(payload.copy(), mf, ensure_ascii=False, indent=2)
             except Exception:
-                logging.exception('Error guardando detección de alta confianza')
+                logging.exception('No se pudo guardar metadata JSON')
+            if self.cfg.save_crops_dir and best is not None and best.pil_crop is not None:
+                try:
+                    save_image_pil(self.cfg.save_crops_dir, f'{self.cfg.camera_id}_crop_high_{stamp}.jpg', best.pil_crop)
+                except Exception:
+                    logging.exception('No se pudo guardar crop high')
+        except Exception:
+            logging.exception('Error guardando la detección')
 
-            # Marcar el dedupe SOLO al emitir (antes se marcaba dentro del save,
-            # así que las lecturas malas nunca entraban al dedupe y se
-            # re-emitían en cada frame) y recién entonces emitir.
+        # Solo logs enmascarados: el payload enviado lleva la patente real, el log no.
+        logging.info('Evento: placa=%s cámara=%s dirección=%s track=%s', mask_plate(plate_clean),
+                     payload['cameraId'], emission.direction, meta['track'])
+        status = post_event(self.cfg.backend_url, payload, dry_run=self.cfg.dry_run)
+        if consumes_dedupe(status):
+            # Se consume el dedupe si el backend aceptó el evento, o si pudo haberlo
+            # recibido (timeout leyendo la respuesta: pudo haber abierto el portón;
+            # reabrirlo sería peor que perder el evento). NO se consume solo cuando
+            # el request seguro no llegó: antes un fallo bloqueaba la patente 120 s
+            # sin que el backend la hubiera recibido nunca.
             self.emitted_cache[plate_clean] = time.time()
-            logging.info('Evento: %s ...', json.dumps(payload, ensure_ascii=False)[:200])
-            post_event(self.cfg.backend_url, payload, dry_run=self.cfg.dry_run)
-            time.sleep(self.cfg.min_event_interval)
+            if not is_success(status):
+                logging.warning('POST de la patente %s sin respuesta confirmada (estado %s): se consume el '
+                                'dedupe para no reabrir', mask_plate(plate_clean), status)
+        else:
+            logging.warning('POST de la patente %s falló (estado %s): no se consume el dedupe',
+                            mask_plate(plate_clean), status)

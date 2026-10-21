@@ -1,14 +1,13 @@
-"""Dedupe DESLIZANTE de `LprWorker._process_frame` (Fase 4 · P3).
+"""Emision por vehiculo y dedupe DESLIZANTE de `LprWorker` (seguimiento + voto).
 
-Una lectura descartada por dedupe refresca la marca de la patente: la ventana
-`LPR_DEDUP_SECONDS` corre desde la ÚLTIMA lectura, no desde la emisión. Así un
-auto detenido frente a la cámara no vuelve a emitir cada 120 s (el backend no
-sabe si una lectura es entrada o salida: cada re-emisión era un paso nuevo).
+El worker ya no cuenta textos: el `PlateTracker` asocia las lecturas de UN
+vehiculo entre frames y emite una vez cuando N lecturas concuerdan. Encima
+corre el dedupe de `LPR_DEDUP_SECONDS` por patente, que es deslizante (una
+emision descartada refresca la marca) y solo se consume si el POST fue aceptado.
 
 `processor/worker.py` importa `lpr.detector.yolo_detector`, que a su vez
-importa `ultralytics` y `huggingface_hub` (dependencias de visión que no están
-en esta máquina de desarrollo, ver conftest.py). Si faltan, se reemplazan por
-módulos vacíos: el test no usa YOLO, el detector es un doble.
+importa `ultralytics` y `huggingface_hub` (no estan en CI, ver conftest.py).
+Si faltan, se reemplazan por modulos vacios: el detector es un doble.
 """
 import importlib
 import sys
@@ -24,6 +23,7 @@ from lpr.settings import settings
 PLATE = 'BBCD12'
 DEDUP_SECONDS = 120.0
 T0 = 1_000_000.0
+FRAME_STEP = 0.125  # 8 fps
 
 
 def _stub_missing_module(monkeypatch, name, **attrs):
@@ -45,19 +45,23 @@ def worker_module(monkeypatch):
 
 @pytest.fixture
 def clock(monkeypatch):
-    """Reloj controlado: `time.time()` del worker y de `rules` (mismo módulo)."""
+    """Reloj controlado: `time.time()` del worker."""
     state = {'now': T0}
     monkeypatch.setattr(time, 'time', lambda: state['now'])
     return state
 
 
 @pytest.fixture
-def emitted(worker_module, monkeypatch):
-    """Patentes que el worker envió al backend (`post_event`)."""
-    events = []
-    monkeypatch.setattr(worker_module, 'post_event',
-                        lambda _url, payload, dry_run=False: events.append(payload['plate']))
-    return events
+def backend(worker_module, monkeypatch):
+    """Doble del backend: guarda cada payload y responde con `statuses` (200 por defecto)."""
+    state = SimpleNamespace(payloads=[], statuses=[])
+
+    def fake_post(_url, payload, dry_run=False):
+        state.payloads.append(payload)
+        return state.statuses.pop(0) if state.statuses else 200
+
+    monkeypatch.setattr(worker_module, 'post_event', fake_post)
+    return state
 
 
 @pytest.fixture
@@ -65,10 +69,7 @@ def worker(worker_module, tmp_path, monkeypatch):
     from lpr.detector.yolo_detector import Detection
     from lpr.ocr.fast_ocr_adapter import OCRResult
 
-    # Confirmación en un frame y lectura de alta confianza: el único filtro
-    # que decide si se emite es el dedupe.
     monkeypatch.setattr(settings, 'LPR_DEDUP_SECONDS', DEDUP_SECONDS)
-    monkeypatch.setattr(settings, 'LPR_CONFIRM_FRAMES', 1)
     monkeypatch.setattr(settings, 'LPR_PLATE_REGEX', None)
     monkeypatch.setattr(settings, 'LPR_INCLUDE_SNAPSHOT', False)
     monkeypatch.setattr(settings, 'CLOUDINARY_UPLOAD', False)
@@ -79,15 +80,17 @@ def worker(worker_module, tmp_path, monkeypatch):
         dry_run=True,
         min_det_conf=0.1,
         min_crop_w=1,
+        max_crop_w=None,
         min_crop_h=1,
         min_crop_area=1,
         min_crop_ratio=0.1,
         max_crop_ratio=20.0,
+        zone=None,
+        detector_imgsz=640,
+        confirm_reads=3,
+        track_max_gap_seconds=1.5,
+        direction='both',
         save_crops_dir=None,
-        det_high_conf=0.5,
-        ocr_high_conf=0.5,
-        combined_threshold=0.3,
-        min_event_interval=0,
         detections_dir=str(tmp_path),
     )
     detector = lambda _frame, _min_conf: [Detection(100, 100, 300, 160, 0.95)]
@@ -98,33 +101,119 @@ def worker(worker_module, tmp_path, monkeypatch):
     lpr_worker.executor.shutdown(wait=False)
 
 
-def _read_at(worker, clock, seconds_after_t0):
+def _frame_at(worker, clock, seconds_after_t0):
     clock['now'] = T0 + seconds_after_t0
     worker._process_frame(np.zeros((480, 640, 3), dtype=np.uint8))
 
 
-def test_lecturas_continuas_no_reemiten_justo_despues_de_la_ventana_original(worker, clock, emitted):
-    _read_at(worker, clock, 0)      # primera lectura: se emite
-    _read_at(worker, clock, 60)     # dentro de la ventana: descartada (refresca)
-    _read_at(worker, clock, 119)    # dentro de la ventana: descartada (refresca)
-    # Justo después de la ventana ORIGINAL (T0 + 120 s), pero a 2 s de la
-    # última lectura: el auto sigue ahí, no es un paso nuevo.
-    _read_at(worker, clock, DEDUP_SECONDS + 1)
-
-    assert emitted == [PLATE]
+def _pass_at(worker, clock, start, frames=3):
+    """Un vehiculo frente a la camara: `frames` lecturas seguidas a 8 fps."""
+    for i in range(frames):
+        _frame_at(worker, clock, start + i * FRAME_STEP)
+    return start + (frames - 1) * FRAME_STEP
 
 
-def test_control_sin_lecturas_intermedias_reemite_pasada_la_ventana(worker, clock, emitted):
-    _read_at(worker, clock, 0)
-    _read_at(worker, clock, DEDUP_SECONDS + 1)
-
-    assert emitted == [PLATE, PLATE]
+def _plates(backend):
+    return [p['plate'] for p in backend.payloads]
 
 
-def test_reemite_cuando_la_patente_deja_de_verse_una_ventana_completa(worker, clock, emitted):
-    _read_at(worker, clock, 0)      # emite
-    _read_at(worker, clock, 100)    # descartada: la ventana corre desde acá
-    _read_at(worker, clock, 100 + DEDUP_SECONDS - 1)  # todavía dentro: descartada
-    _read_at(worker, clock, 100 + DEDUP_SECONDS - 1 + DEDUP_SECONDS)  # una ventana sin verla: emite
+def test_no_emite_antes_de_n_lecturas(worker, clock, backend):
+    _pass_at(worker, clock, 0, frames=2)
+    assert backend.payloads == []
 
-    assert emitted == [PLATE, PLATE]
+
+def test_un_vehiculo_emite_una_sola_vez_aunque_siga_visible(worker, clock, backend):
+    _pass_at(worker, clock, 0, frames=3)
+    for i in range(3, 40):  # sigue frente a la camara
+        _frame_at(worker, clock, i * FRAME_STEP)
+    assert _plates(backend) == [PLATE]
+
+
+def test_payload_lleva_direccion_y_track(worker, clock, backend):
+    _pass_at(worker, clock, 0)
+    (payload,) = backend.payloads
+    meta = payload['meta']
+    assert meta['direction'] in ('entry', 'exit', 'unknown')
+    assert meta['track'] == {'id': 1, 'reads': 3, 'votes': 3, 'winner_share': 1.0}
+    assert meta['bbox'] == [100, 100, 300, 160]
+    assert payload['cameraId'] == 'cam-1' and payload['plate_raw'] == PLATE
+
+
+def test_pasadas_seguidas_no_reemiten_justo_despues_de_la_ventana_original(worker, clock, backend):
+    _pass_at(worker, clock, 0)        # primera pasada: se emite
+    _pass_at(worker, clock, 60)       # dentro de la ventana: descartada (refresca)
+    _pass_at(worker, clock, 119)      # dentro de la ventana: descartada (refresca)
+    # Justo despues de la ventana ORIGINAL (T0 + 120 s), pero a ~2 s de la
+    # ultima lectura: el auto sigue ahi, no es un paso nuevo.
+    _pass_at(worker, clock, DEDUP_SECONDS + 1)
+    assert _plates(backend) == [PLATE]
+
+
+def test_control_sin_pasadas_intermedias_reemite_pasada_la_ventana(worker, clock, backend):
+    _pass_at(worker, clock, 0)
+    _pass_at(worker, clock, DEDUP_SECONDS + 1)
+    assert _plates(backend) == [PLATE, PLATE]
+
+
+def test_reemite_cuando_la_patente_deja_de_verse_una_ventana_completa(worker, clock, backend):
+    _pass_at(worker, clock, 0)                                   # emite
+    end = _pass_at(worker, clock, 100)                           # descartada: la ventana corre desde aca
+    _pass_at(worker, clock, end + DEDUP_SECONDS - 5)             # todavia dentro: descartada
+    _pass_at(worker, clock, end + 2 * DEDUP_SECONDS)             # una ventana sin verla: emite
+    assert _plates(backend) == [PLATE, PLATE]
+
+
+def test_post_fallido_no_consume_el_dedupe(worker, clock, backend):
+    backend.statuses = [500, -1]
+    _pass_at(worker, clock, 0)        # POST 500
+    _pass_at(worker, clock, 10)       # POST sin respuesta (-1)
+    assert len(backend.payloads) == 2
+    _pass_at(worker, clock, 20)       # POST 200: se emite y ahora si consume el dedupe
+    assert len(backend.payloads) == 3
+    _pass_at(worker, clock, 30)       # ya consumido: descartada
+    assert len(backend.payloads) == 3
+
+
+def test_post_con_error_de_cliente_tampoco_consume_el_dedupe(worker, clock, backend):
+    backend.statuses = [422]
+    _pass_at(worker, clock, 0)
+    _pass_at(worker, clock, 10)
+    assert len(backend.payloads) == 2
+
+
+def test_dos_patentes_distintas_no_se_deduplican_entre_si(worker, clock, backend, monkeypatch):
+    from lpr.ocr.fast_ocr_adapter import OCRResult
+
+    _pass_at(worker, clock, 0)
+    worker.fast_ocr = SimpleNamespace(recognize=lambda _a: OCRResult('KRZT45', 0.99, [0.99] * 6))
+    _pass_at(worker, clock, 10)
+    assert _plates(backend) == [PLATE, 'KRZT45']
+
+
+def test_timeout_de_lectura_consume_el_dedupe_para_no_reabrir(worker, clock, backend):
+    from lpr.api.client import STATUS_MAYBE_SENT
+
+    backend.statuses = [STATUS_MAYBE_SENT]
+    _pass_at(worker, clock, 0)         # el backend pudo haberlo procesado
+    _pass_at(worker, clock, 10)        # misma patente: descartada, NO se vuelve a enviar
+    assert len(backend.payloads) == 1
+
+
+def test_request_que_no_llego_no_consume_el_dedupe(worker, clock, backend):
+    from lpr.api.client import STATUS_NOT_SENT
+
+    backend.statuses = [STATUS_NOT_SENT]
+    _pass_at(worker, clock, 0)
+    _pass_at(worker, clock, 10)
+    assert len(backend.payloads) == 2
+
+
+def test_los_logs_no_llevan_la_patente_real_pero_el_payload_si(worker, clock, backend, caplog):
+    import logging
+
+    with caplog.at_level(logging.DEBUG):
+        _pass_at(worker, clock, 0)
+        _pass_at(worker, clock, 10)    # duplicada: tambien se loguea
+    assert backend.payloads[0]['plate'] == PLATE and backend.payloads[0]['plate_raw'] == PLATE
+    assert PLATE not in caplog.text
+    assert 'BB**12' in caplog.text

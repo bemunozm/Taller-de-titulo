@@ -1,0 +1,57 @@
+{
+  "description": "Contrato compartido de Camera.lprSettings (PATCH /cameras/:id/lpr-settings y GET /workers/cameras/:id/lpr-settings). Lo consumen los tests del backend (DTO), del frontend (zod) y del worker LPR (apply_camera_settings). Si cambias una regla, cambia este archivo y las tres capas deben seguir en verde. 'valid' = lo acepta backend y frontend. 'offending' = clave (ruta con puntos) que el worker NO debe aplicar si llegara igual (defensa en profundidad).",
+  "rules": {
+    "action": ["register", "access"],
+    "direction": ["entry", "exit", "both"],
+    "detectorImgsz": [640, 960, 1280, 1920],
+    "sampleFps": { "min": 1, "max": 15, "decimals": true },
+    "confirmReads": { "min": 1, "max": 10, "integer": true, "minWhenAccess": 3, "note": "action ausente = access" },
+    "crop": {
+      "minWidth": { "min": 0, "max": 2000, "integer": true },
+      "maxWidth": { "min": 1, "max": 4000, "integer": true, "nullable": true, "note": "null = sin tope" },
+      "minRatio": { "min": 0.1, "max": 20 },
+      "maxRatio": { "min": 0.1, "max": 20 },
+      "pairs": "minWidth/maxWidth y minRatio/maxRatio van juntos: si viene uno, debe venir el otro; min <= max"
+    },
+    "zone": { "maxPolygons": 20, "minPoints": 3, "maxPoints": 100, "coords": "0..1" },
+    "unknownProperties": "rechazadas",
+    "explicitNull": "rechazado salvo crop.maxWidth"
+  },
+  "valid": [
+    { "name": "vacio resetea a defaults", "settings": {} },
+    { "name": "solo registrar", "settings": { "action": "register" } },
+    { "name": "acceso con N=3", "settings": { "action": "access", "confirmReads": 3 } },
+    { "name": "registrar permite N=1", "settings": { "action": "register", "confirmReads": 1 } },
+    { "name": "fps decimal", "settings": { "sampleFps": 2.5 } },
+    { "name": "ancho sin tope", "settings": { "crop": { "minWidth": 60, "maxWidth": null } } },
+    {
+      "name": "config completa porton",
+      "settings": {
+        "action": "register",
+        "direction": "both",
+        "zone": [[{ "x": 0.36, "y": 0.33 }, { "x": 0.9, "y": 0.33 }, { "x": 0.9, "y": 0.98 }, { "x": 0.36, "y": 0.98 }]],
+        "detectorImgsz": 1920,
+        "sampleFps": 8,
+        "crop": { "minWidth": 60, "maxWidth": 250, "minRatio": 0.8, "maxRatio": 6 },
+        "confirmReads": 3
+      }
+    }
+  ],
+  "invalid": [
+    { "name": "imgsz fuera de lista", "settings": { "detectorImgsz": 1000 }, "offending": "detectorImgsz" },
+    { "name": "fps cero", "settings": { "sampleFps": 0 }, "offending": "sampleFps" },
+    { "name": "fps sobre maximo", "settings": { "sampleFps": 16 }, "offending": "sampleFps" },
+    { "name": "N sobre maximo", "settings": { "action": "register", "confirmReads": 11 }, "offending": "confirmReads" },
+    { "name": "N bajo minimo en acceso implicito", "settings": { "confirmReads": 2 }, "offending": "confirmReads" },
+    { "name": "N bajo minimo en acceso explicito", "settings": { "action": "access", "confirmReads": 2 }, "offending": "confirmReads" },
+    { "name": "ancho min mayor que max", "settings": { "crop": { "minWidth": 300, "maxWidth": 250 } }, "offending": "crop" },
+    { "name": "ratio min mayor que max", "settings": { "crop": { "minRatio": 7, "maxRatio": 6 } }, "offending": "crop" },
+    { "name": "ratio sin par", "settings": { "crop": { "minRatio": 0.8 } }, "offending": "crop" },
+    { "name": "ancho sin par", "settings": { "crop": { "maxWidth": 250 } }, "offending": "crop" },
+    { "name": "direccion desconocida", "settings": { "direction": "sideways" }, "offending": "direction" },
+    { "name": "accion desconocida", "settings": { "action": "open" }, "offending": "action" },
+    { "name": "zona con 2 puntos", "settings": { "zone": [[{ "x": 0.1, "y": 0.1 }, { "x": 0.5, "y": 0.5 }]] }, "offending": "zone" },
+    { "name": "propiedad desconocida", "settings": { "foo": 1 }, "offending": "foo" },
+    { "name": "null explicito", "settings": { "sampleFps": null }, "offending": "sampleFps" }
+  ]
+}

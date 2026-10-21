@@ -13,6 +13,19 @@
 #       --index-url https://download.pytorch.org/whl/cpu
 # y luego `pip install -r requirements.txt` para el resto.
 #
+# --- GPU NVIDIA (receta validada 2026-10-20) ---------------------------------
+# La config recomendada de la cámara del portón (detector a 1920, 8 fps) no
+# alcanza el ritmo en CPU (~153 ms/cuadro contra 125 ms de presupuesto); en GPU
+# toma ~13-15 ms/cuadro con el pipeline completo. Probado en una RTX 5060 Ti
+# (Blackwell, sm_120), que necesita wheels CUDA 12.8:
+#   pip install torch==2.11.0 torchvision \
+#       --index-url https://download.pytorch.org/whl/cu128
+#   (verificar: python -c "import torch; print(torch.cuda.get_arch_list())" -> incluye sm_120)
+# con ultralytics==8.3.0 (el de abajo; funciona con torch 2.11). En ese venv pip
+# resolvió numpy 1.26.4 por el `numpy<2` de ultralytics (ver el CONFLICTO abajo).
+# En el host del worker: LPR_DEVICE=cuda:0 (el OCR sigue en CPU: LPR_OCR_DEVICE=cpu).
+# Esto NO cambia las versiones fijadas de este archivo: es una instalación aparte.
+#
 # --- Deuda técnica (Fase 5) --------------------------------------------------
 # La meta a futuro es SACAR torch/torchvision del runtime a favor de ONNX
 # (ultralytics exporta a .onnx y fast-plate-ocr ya corre sobre onnxruntime).

@@ -37,8 +37,8 @@ class FakeBackend:
         self.cameras = cameras or []
         self.sources = sources or {}
 
-    def get(self, url, timeout=None, headers=None):
-        self.calls.append({'url': url, 'headers': dict(headers or {})})
+    def get(self, url, timeout=None, headers=None, allow_redirects=True):
+        self.calls.append({'url': url, 'headers': dict(headers or {}), 'allow_redirects': allow_redirects})
         if url == f'{BACKEND}/workers/cameras':
             return FakeResponse(self.cameras_status, self.cameras)
         prefix = f'{BACKEND}/workers/cameras/'
@@ -180,7 +180,7 @@ def test_manager_secret_debil_impide_arrancar_sin_filtrar_el_valor(tmp_path, mon
 
 
 def test_reconcile_backend_caido_no_tumba_el_manager(monkeypatch, caplog):
-    def connection_refused(url, timeout=None, headers=None):
+    def connection_refused(url, timeout=None, headers=None, allow_redirects=True):
         raise requests.ConnectionError('connection refused')
 
     registered = _wire(monkeypatch, FakeBackend())
@@ -197,10 +197,10 @@ def test_reconcile_source_con_backend_caido_omite_la_camara(monkeypatch):
     backend = FakeBackend(cameras=[{'id': 'cam-1', 'enableLpr': True}])
     registered = _wire(monkeypatch, backend)
 
-    def flaky_get(url, timeout=None, headers=None):
+    def flaky_get(url, timeout=None, headers=None, allow_redirects=True):
         if url.endswith('/source'):
             raise requests.ConnectionError('connection reset')
-        return backend.get(url, timeout=timeout, headers=headers)
+        return backend.get(url, timeout=timeout, headers=headers, allow_redirects=allow_redirects)
 
     monkeypatch.setattr(mgr.requests, 'get', flaky_get)
 
@@ -212,7 +212,7 @@ def test_reconcile_source_con_backend_caido_omite_la_camara(monkeypatch):
 def test_cliente_de_ingesta_envia_solo_x_api_key(monkeypatch):
     sent = {}
 
-    def fake_post(url, json=None, headers=None, timeout=None):
+    def fake_post(url, json=None, headers=None, timeout=None, allow_redirects=True):
         sent['url'] = url
         sent['headers'] = dict(headers or {})
         return FakeResponse(201)
@@ -225,3 +225,15 @@ def test_cliente_de_ingesta_envia_solo_x_api_key(monkeypatch):
     assert status == 201
     assert sent['headers']['x-api-key'] == API_KEY
     assert 'Authorization' not in sent['headers']
+
+
+def test_reconcile_no_sigue_redirects_al_mandar_la_api_key(monkeypatch):
+    backend = FakeBackend(cameras=[{'id': 'cam-1', 'enableLpr': True}], sources={'cam-1': 'rtsp://src'})
+    _wire(monkeypatch, backend)
+
+    mgr.reconcile_with_backend()
+
+    urls = [c['url'] for c in backend.calls]
+    assert f'{BACKEND}/workers/cameras' in urls and f'{BACKEND}/workers/cameras/cam-1/source' in urls
+    assert all(c['allow_redirects'] is False for c in backend.calls)
+    assert all(c['headers'].get('x-api-key') == API_KEY for c in backend.calls)
