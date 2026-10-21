@@ -259,8 +259,24 @@ def iter_sampled_frames(path: Path, fps: float) -> Iterator[Tuple[float, np.ndar
         cap.release()
 
 
+def save_evidence(emission: Any, directory: Path, clip: str, t: float) -> Path:
+    """Evidence picture of an emission, as the worker saves it: the frame of the
+    best reading with the yellow box of THAT reading. Contains the real plate and
+    people: only to a local, git-ignored folder."""
+    import cv2
+
+    directory.mkdir(parents=True, exist_ok=True)
+    image = emission.evidence.copy()
+    x1, y1, x2, y2 = (int(v) for v in emission.box)
+    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 255), 3)
+    out = directory / f'{clip}-t{t:.1f}-{emission.direction}-{emission.direction_source}.jpg'
+    cv2.imwrite(str(out), image)
+    return out
+
+
 def replay_clip(path: Path, cfg: Any, detector: Any, ocr: Any,
-                vehicle_tracker: Any = None) -> Tuple[List[Emission], List[float]]:
+                vehicle_tracker: Any = None, evidence_dir: Optional[Path] = None
+                ) -> Tuple[List[Emission], List[float]]:
     """Run one clip through `pipeline.process_frame`; returns emissions and ms per frame.
 
     `vehicle_tracker` must be FRESH per clip (ByteTrack keeps ids between calls).
@@ -275,6 +291,8 @@ def replay_clip(path: Path, cfg: Any, detector: Any, ocr: Any,
 
     def _collect(t: float, found: Sequence[Any]) -> None:
         for em in found:
+            if evidence_dir is not None and getattr(em, 'evidence', None) is not None:
+                save_evidence(em, evidence_dir, path.stem.split('-')[3] if path.stem.count('-') >= 3 else path.stem, t)
             emissions.append(Emission(clip=path.stem, t=t, text=em.text, direction=em.direction,
                                       reads=em.reads, votes=em.votes,
                                       direction_source=em.direction_source, vehicle_id=em.vehicle_id))
@@ -356,6 +374,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--label', default='config')
     ap.add_argument('--out-json', help='write the emissions (real plates!) to this JSON file; default: '
                     'lpr/eval-data/replay-<label>.json, which is git-ignored')
+    ap.add_argument('--save-evidence', help='folder where to save the evidence picture of every emission '
+                    '(frame of the best reading + its box; contains real plates: keep it outside the repo)')
     ap.add_argument('--show-plates', action='store_true',
                     help='print real plates in the report (default: masked)')
     args = ap.parse_args(argv)
@@ -392,7 +412,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     emissions: List[Emission] = []
     timings: List[float] = []
     for clip in clips:
-        found, ms = replay_clip(clip, cfg, detector, ocr, vehicle_tracker=new_vehicle_tracker())
+        found, ms = replay_clip(clip, cfg, detector, ocr, vehicle_tracker=new_vehicle_tracker(),
+                                evidence_dir=Path(args.save_evidence) if args.save_evidence else None)
         emissions += found
         timings += ms
     clip_gt = [r for r in gt if any(clip_matches(r.clip, c) for c in clips)]

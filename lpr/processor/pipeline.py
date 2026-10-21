@@ -184,7 +184,8 @@ def iter_plate_reads(
         yield read
 
 
-def read_to_observation(read: PlateRead, vehicle_id: Optional[int] = None) -> TrackObservation:
+def read_to_observation(read: PlateRead, vehicle_id: Optional[int] = None,
+                        evidence: Any = None) -> TrackObservation:
     """A box that did not produce a valid plate still feeds the tracker (it
     keeps the track alive and contributes to the direction trend) but votes
     nothing. Shape-rejected boxes are not fed: they are not plates."""
@@ -193,6 +194,7 @@ def read_to_observation(read: PlateRead, vehicle_id: Optional[int] = None) -> Tr
         box=tuple(float(v) for v in read.box),  # type: ignore[arg-type]
         text=read.plate if valid else None,
         ocr_conf=read.ocr_conf, det_conf=read.det_conf, ref=read, vehicle_id=vehicle_id,
+        evidence=evidence,
     )
 
 
@@ -282,7 +284,8 @@ def process_frame(
             paths = vehicle_tracker.paths()
 
     observations = [
-        read_to_observation(r, assign_vehicle(tuple(float(v) for v in r.box), vehicles))  # type: ignore[arg-type]
+        read_to_observation(r, assign_vehicle(tuple(float(v) for v in r.box), vehicles),  # type: ignore[arg-type]
+                            evidence=frame)
         for r in reads if r.status != STATUS_SHAPE_REJECTED
     ]
     return reads, tracker.update(observations, now, paths=paths, frame_size=(w, h))

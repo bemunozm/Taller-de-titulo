@@ -354,6 +354,10 @@ class LprWorker:
             return
 
         best = emission.best_ref  # PlateRead de la mejor lectura ganadora
+        # Evidencia = el CUADRO de esa mejor lectura (con SU caja): con la espera de
+        # direccion o el flush el cuadro actual ya no tiene la patente donde estaba.
+        # Sin evidencia (no deberia pasar) se cae al cuadro actual.
+        frame = emission.evidence if emission.evidence is not None else frame
         x1c, y1c, x2c, y2c = (int(v) for v in emission.box)
         char_conf = list(best.char_conf) if best is not None else []
         char_stats = analyze_char_confidences(char_conf)
@@ -392,8 +396,8 @@ class LprWorker:
             det_path = os.path.join(self.detections_dir, det_fname)
             frame_det = frame.copy()
             try:
-                # La caja del cuadro ACTUAL (la de la mejor lectura puede ser de un cuadro anterior).
-                fx1, fy1, fx2, fy2 = (int(v) for v in emission.frame_box)
+                # La caja de la mejor lectura, sobre el cuadro en que se leyo.
+                fx1, fy1, fx2, fy2 = (int(v) for v in emission.box)
                 cv2.rectangle(frame_det, (fx1, fy1), (fx2, fy2), (0, 255, 255), 3)
                 label = f'{plate_clean} det:{emission.det_conf:.2f} ocr:{emission.ocr_conf:.2f}'
                 cv2.putText(frame_det, label, (fx1, max(20, fy1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
