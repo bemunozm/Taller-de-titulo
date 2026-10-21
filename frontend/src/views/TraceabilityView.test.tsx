@@ -50,3 +50,13 @@ describe('TraceabilityView: estadísticas', () => {
     expect(within(denied).getByText('25.0% del total')).toBeInTheDocument()
   })
 })
+
+describe('TraceabilityView: pestaña por URL', () => {
+  it('?tab=anomalies abre la pestaña de anomalías (vuelta desde el detalle)', async () => {
+    detectionsApi.listAccessAttempts.mockResolvedValue([])
+    detectionsApi.listAnomalies.mockResolvedValue([])
+    renderWithProviders(<TraceabilityView />, { route: '/traceability?tab=anomalies' })
+
+    expect(await screen.findByText('Historial de Anomalías IA')).toBeInTheDocument()
+  })
+})

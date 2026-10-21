@@ -50,6 +50,13 @@ function renderRoles() {
   return renderWithProviders(<RoleTable roles={[systemRole, customRole]} />)
 }
 
+// Consulta por texto: `getByRole('row', { name })` recalcula el nombre accesible de toda la tabla.
+function rowOf(text: string): HTMLElement {
+  const row = screen.getByText(text).closest('tr')
+  if (!row) throw new Error(`No hay fila para ${text}`)
+  return row
+}
+
 describe('RoleTable para el Administrador del condominio', () => {
   it('no muestra acciones: ni la columna ni los menús', () => {
     renderRoles()
@@ -57,14 +64,14 @@ describe('RoleTable para el Administrador del condominio', () => {
     expect(screen.queryByRole('columnheader', { name: 'Acciones' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Acciones del rol/ })).not.toBeInTheDocument()
     // Control positivo: la tabla sí se renderizó con ambos roles.
-    expect(screen.getByRole('row', { name: /Jardinero/ })).toBeInTheDocument()
+    expect(rowOf('Jardinero')).toBeInTheDocument()
   })
 
   it('marca los roles de sistema', () => {
     renderRoles()
 
-    expect(within(screen.getByRole('row', { name: /Administrador/ })).getByText('Sistema')).toBeInTheDocument()
-    expect(within(screen.getByRole('row', { name: /Jardinero/ })).queryByText('Sistema')).not.toBeInTheDocument()
+    expect(within(rowOf('Administrador')).getByText('Sistema')).toBeInTheDocument()
+    expect(within(rowOf('Jardinero')).queryByText('Sistema')).not.toBeInTheDocument()
   })
 })
 
@@ -76,7 +83,7 @@ describe('RoleTable para el super-admin', () => {
   it('un rol de sistema no ofrece editar ni eliminar', () => {
     renderRoles()
 
-    const systemRow = screen.getByRole('row', { name: /Administrador/ })
+    const systemRow = rowOf('Administrador')
     expect(within(systemRow).queryByRole('button', { name: /Acciones del rol/ })).not.toBeInTheDocument()
     expect(within(systemRow).getByText('Rol de sistema')).toBeInTheDocument()
   })

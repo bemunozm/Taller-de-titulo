@@ -18,8 +18,11 @@ import {
   LPR_ACTION_LABELS,
   LPR_DIRECTION_LABELS,
   LPR_RECOMMENDED_MIN_CONFIRM_READS,
+  LPR_RECOMMENDED_PLATE_VALUES,
   LPR_WORKER_DEFAULTS,
   describeZone,
+  recommendedPlateFormValues,
+  usesWorkerDetectionDefaults,
   lprSettingsQueryKey,
   lprFormSchema,
   toLprFormValues,
@@ -131,6 +134,37 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
   const lowConfirmReads =
     action === 'register' && confirmReads.trim() !== '' && Number(confirmReads) < LPR_RECOMMENDED_MIN_CONFIRM_READS
   const [submitInvalid, setSubmitInvalid] = useState(false)
+  const [detectorImgsz, sampleFps, minWidth, maxWidth, minRatio, maxRatio] = watch([
+    'detectorImgsz',
+    'sampleFps',
+    'minWidth',
+    'maxWidth',
+    'minRatio',
+    'maxRatio',
+  ])
+  const usesDefaults = usesWorkerDetectionDefaults({
+    detectorImgsz,
+    sampleFps,
+    minWidth,
+    maxWidth,
+    unlimitedMaxWidth,
+    minRatio,
+    maxRatio,
+  })
+
+  // Completa el formulario sin guardar; la validación corre para limpiar errores previos.
+  const applyRecommendedValues = () => {
+    const recommended = recommendedPlateFormValues()
+    const options = { shouldDirty: true, shouldValidate: true }
+    setValue('detectorImgsz', recommended.detectorImgsz, options)
+    setValue('sampleFps', recommended.sampleFps, options)
+    setValue('minWidth', recommended.minWidth, options)
+    setValue('maxWidth', recommended.maxWidth, options)
+    setValue('unlimitedMaxWidth', recommended.unlimitedMaxWidth, options)
+    setValue('minRatio', recommended.minRatio, options)
+    setValue('maxRatio', recommended.maxRatio, options)
+    setValue('confirmReads', recommended.confirmReads, options)
+  }
 
   const afterChange = () => {
     queryClient.invalidateQueries({ queryKey: lprSettingsQueryKey(camera.id) })
@@ -222,11 +256,38 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
                   </option>
                 ))}
               </Select>
-              <Description>Sentido de paso que registra esta cámara. "Ambas" lo infiere por el movimiento.</Description>
+              <Description>
+                Sentido por defecto de esta cámara. Si dibujas una línea de dirección, la línea manda y este valor solo
+                se usa cuando la línea no alcanza a determinar el sentido. "Ambas" lo infiere por el movimiento.
+              </Description>
             </Field>
           </div>
 
           <SectionTitle>Detección</SectionTitle>
+          {usesDefaults && (
+            <p
+              role="status"
+              className="rounded-lg bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-400"
+            >
+              Con los valores por defecto esta cámara probablemente no lea patentes de autos en movimiento; usa los
+              valores recomendados.
+            </p>
+          )}
+          {canEdit && (
+            <div className="space-y-1">
+              <Button outline type="button" disabled={isBusy} onClick={applyRecommendedValues}>
+                Usar valores recomendados para patentes
+              </Button>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                Resolución {LPR_RECOMMENDED_PLATE_VALUES.detectorImgsz}, {LPR_RECOMMENDED_PLATE_VALUES.sampleFps} FPS,
+                recorte de {LPR_RECOMMENDED_PLATE_VALUES.minWidth} a {LPR_RECOMMENDED_PLATE_VALUES.maxWidth} px,
+                proporción {LPR_RECOMMENDED_PLATE_VALUES.minRatio} a {LPR_RECOMMENDED_PLATE_VALUES.maxRatio} y{' '}
+                {LPR_RECOMMENDED_PLATE_VALUES.confirmReads} lecturas. Son los valores validados con la cámara del
+                portón y requieren GPU. Solo completan el formulario: no cambian el modo, la dirección, la zona ni la
+                línea, y no se guardan hasta pulsar "Guardar".
+              </p>
+            </div>
+          )}
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <Field>
               <Label>Resolución del detector</Label>
@@ -393,7 +454,10 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
             Línea de dirección
           </h3>
           <p className="text-sm text-zinc-500 dark:text-zinc-400">
-            {describeDirectionLine(directionLine)} Si el vehículo cruza la línea, ese cruce define si entra o sale.
+            {describeDirectionLine(directionLine)}{' '}
+            {directionLine
+              ? 'Si el vehículo cruza la línea, el cruce manda: define si entra o sale, aunque la dirección fija diga otra cosa. La dirección fija solo se usa cuando la línea no logra determinar el sentido.'
+              : 'Si dibujas una línea, el cruce del vehículo manda sobre la dirección fija.'}
           </p>
           {errors.directionLine && (
             <p role="alert" className="text-sm text-red-600 dark:text-red-500">

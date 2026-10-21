@@ -11,7 +11,7 @@ import {
   ChevronLeftIcon
 } from '@heroicons/react/24/outline'
 import { listAccessAttempts } from '@/api/DetectionsAPI'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useId, useMemo, useState } from 'react'
 import AnomalyTable from '@/components/traceability/AnomalyTable'
 import { listAnomalies } from '@/api/DetectionsAPI'
@@ -63,7 +63,11 @@ export default function TraceabilityView() {
     queryFn: () => listAnomalies() 
   })
 
-  const [activeTab, setActiveTab] = useState<'access' | 'anomalies'>('access')
+  // `?tab=anomalies` permite volver desde el detalle de una anomalía a su pestaña.
+  const [searchParams] = useSearchParams()
+  const [activeTab, setActiveTab] = useState<'access' | 'anomalies'>(
+    searchParams.get('tab') === 'anomalies' ? 'anomalies' : 'access',
+  )
 
   const handleRefresh = () => {
     queryClient.invalidateQueries({ queryKey: ['detections', 'attempts'] })

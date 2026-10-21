@@ -42,6 +42,7 @@ import { plateKey } from '../privacy/privacy-identifiers';
  *  - `cam-*`     acceso, con línea de dirección;
  *  - `reg-*`     solo registro, con línea de dirección;
  *  - `fixed-in` / `fixed-out`  acceso con dirección FIJA entrada / salida;
+ *  - `fixed-in-line`  acceso con dirección fija de entrada Y línea de dirección;
  *  - `reg-fixed-out`  solo registro con dirección fija de salida;
  *  - `no-line`   acceso SIN línea (su `direction_source: line` no se respalda).
  */
@@ -63,6 +64,9 @@ function settingsFor(cameraId: string): LprSettings {
   if (cameraId.startsWith('reg')) {
     return { action: 'register', directionLine: LINE };
   }
+  if (cameraId === 'fixed-in-line') {
+    return { direction: 'entry', directionLine: LINE };
+  }
   if (cameraId === 'fixed-in') return { direction: 'entry' };
   if (cameraId === 'fixed-out') return { direction: 'exit' };
   if (cameraId === 'no-line') return {};
@@ -70,6 +74,9 @@ function settingsFor(cameraId: string): LprSettings {
 }
 
 suite('Pasadas de vehículos (Postgres real)', () => {
+  // Conectar a Postgres (Docker en Windows) puede tardar más que los 5 s por defecto.
+  jest.setTimeout(60_000);
+
   let dataSource: DataSource;
   let detections: Repository<PlateDetection>;
   let attempts: Repository<AccessAttempt>;
@@ -416,7 +423,53 @@ suite('Pasadas de vehículos (Postgres real)', () => {
       });
     });
 
-    it('prioridad de fuentes: camera > line > motion > width; una fuente menor no pisa a la mayor', async () => {
+    it('cámara de entrada fija CON línea que lee un auto saliendo (exit/line): la pasada es exit, la línea no se degrada', async () => {
+      await service.createDetection(
+        read('fixed-in-line', 'exit', 'line'),
+        orgId,
+      );
+
+      expect(await onlyPassage()).toMatchObject({
+        direction: 'exit',
+        directionSource: 'line',
+      });
+      const [attempt] = await allAttempts();
+      expect(attempt.method).toBe('Patente - Salida');
+      const [stored] = await detections.find({
+        where: { organizationId: orgId },
+      });
+      expect(stored.meta).toMatchObject({
+        direction: 'exit',
+        direction_source: 'line',
+      });
+      expect(stored.meta).not.toHaveProperty('direction_source_declared');
+      expect(sendDoorOpen).toHaveBeenCalledTimes(1);
+    });
+
+    it('una lectura camera posterior NO baja una dirección medida por línea (ni parte la pasada)', async () => {
+      await service.createDetection(
+        read('fixed-in-line', 'exit', 'line'),
+        orgId,
+      );
+      await sql(
+        `UPDATE "vehicle_passages" SET "firstSeenAt" = now() - interval '40 seconds' WHERE "organizationId" = $1`,
+      );
+
+      // La cámara de entrada fija sin línea ve al mismo auto y declara su
+      // dirección fija (entry): es respaldo, la línea manda.
+      await service.createDetection(read('fixed-in', 'entry', 'camera'), orgId);
+
+      expect(await count('vehicle_passages')).toBe(1);
+      expect(await onlyPassage()).toMatchObject({
+        direction: 'exit',
+        directionSource: 'line',
+      });
+      const [attempt] = await allAttempts();
+      expect(attempt.method).toBe('Patente - Salida');
+      expect(sendDoorOpen).toHaveBeenCalledTimes(1);
+    });
+
+    it('prioridad de fuentes: line > motion > camera > width; una fuente menor no pisa a la mayor', async () => {
       await service.createDetection(read('reg-a', 'unknown', 'none'), orgId);
       const state = async () => {
         const p = await onlyPassage();
@@ -428,20 +481,39 @@ suite('Pasadas de vehículos (Postgres real)', () => {
       await service.createDetection(read('reg-a', 'entry', 'width'), orgId);
       expect(await state()).toBe('entry/width/Patente - Entrada');
 
-      await service.createDetection(read('reg-a', 'exit', 'motion'), orgId);
-      expect(await state()).toBe('exit/motion/Patente - Salida');
-
-      await service.createDetection(read('reg-a', 'entry', 'width'), orgId);
-      expect(await state()).toBe('exit/motion/Patente - Salida');
-
-      await service.createDetection(read('reg-a', 'exit', 'line'), orgId);
-      expect(await state()).toBe('exit/line/Patente - Salida');
-
+      // camera (dirección fija) mejora width...
       await service.createDetection(
         read('reg-fixed-out', 'exit', 'camera'),
         orgId,
       );
       expect(await state()).toBe('exit/camera/Patente - Salida');
+
+      // ...width no la baja...
+      await service.createDetection(read('reg-a', 'entry', 'width'), orgId);
+      expect(await state()).toBe('exit/camera/Patente - Salida');
+
+      // ...motion (medido) gana a camera (supuesto)...
+      await service.createDetection(read('reg-a', 'entry', 'motion'), orgId);
+      expect(await state()).toBe('entry/motion/Patente - Entrada');
+
+      // ...y camera ya no baja a motion.
+      await service.createDetection(
+        read('reg-fixed-out', 'exit', 'camera'),
+        orgId,
+      );
+      expect(await state()).toBe('entry/motion/Patente - Entrada');
+
+      // line gana a motion...
+      await service.createDetection(read('reg-a', 'exit', 'line'), orgId);
+      expect(await state()).toBe('exit/line/Patente - Salida');
+
+      // ...y ni motion ni camera la bajan.
+      await service.createDetection(read('reg-a', 'entry', 'motion'), orgId);
+      await service.createDetection(
+        read('reg-fixed-out', 'exit', 'camera'),
+        orgId,
+      );
+      expect(await state()).toBe('exit/line/Patente - Salida');
       expect(await count('vehicle_passages')).toBe(1);
     });
 

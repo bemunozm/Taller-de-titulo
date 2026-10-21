@@ -91,12 +91,12 @@ describe('ZoneEditor: línea de dirección', () => {
     expect((props.onSave as ReturnType<typeof vi.fn>).mock.calls[0]).toHaveLength(1)
   })
 
-  it('explica qué es la línea de dirección y que sin ella se infiere por el tamaño de la patente', () => {
+  it('explica qué es la línea de dirección y que sin ella se usa la dirección fija o el tamaño de la patente', () => {
     renderEditor()
 
     expect(screen.getByText(/cuando un vehículo cruza esta línea/i)).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent(
-      /Sin línea: la dirección se infiere por el tamaño de la patente/,
+      /Sin línea: se usa la dirección fija de la cámara y, si no tiene, se infiere por el tamaño de la patente/,
     )
   })
 

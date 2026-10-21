@@ -260,10 +260,10 @@ class PlateTracker:
                 track.last_path = list(path)
 
     def _should_wait(self, track: _Track) -> bool:
-        """Waiting only makes sense when a line is configured, the camera does
-        not fix the direction and the plate belongs to a tracked vehicle."""
+        """Waiting only makes sense when a line is configured and the plate belongs
+        to a tracked vehicle. A fixed camera direction does NOT skip the wait: the
+        line (and the measured motion) win over it, which then only serves as the fallback on timeout."""
         return (self.direction_wait_seconds > 0 and self.direction_line is not None
-                and self.direction not in (DIRECTION_ENTRY, DIRECTION_EXIT)
                 and track.vehicle_id is not None and self._frame_size is not None)
 
     def _finalize(self, track: _Track, candidate: Optional[PlateEmission] = None) -> PlateEmission:
@@ -334,7 +334,7 @@ class PlateTracker:
         )
 
     def _direction_of(self, track: _Track) -> Tuple[str, str]:
-        """`(direction, source)`: camera > line > motion > width > none."""
+        """`(direction, source)`: line > motion > camera (fixed) > width > none."""
         width_dir = (infer_direction(track.widths, self.direction_ratio)
                      if self.direction == DIRECTION_BOTH else DIRECTION_UNKNOWN)
         return resolve_direction(self.direction, self.direction_line, track.last_path,

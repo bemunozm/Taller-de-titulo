@@ -77,12 +77,13 @@ OCR = SimpleNamespace(recognize=lambda _arr: OCRResult(PLATE, 0.99, [0.99] * len
 # --------------------------------------------------------------------------
 # Piezas
 # --------------------------------------------------------------------------
-def test_wants_vehicle_tracking_solo_con_linea_y_direccion_no_fija():
+def test_wants_vehicle_tracking_con_linea_aunque_la_direccion_sea_fija():
     assert wants_vehicle_tracking(cfg())
     assert wants_vehicle_tracking(cfg(direction='unknown'))
+    assert wants_vehicle_tracking(cfg(direction='exit'))      # la linea manda sobre la fija
+    assert wants_vehicle_tracking(cfg(direction='entry'))
     assert not wants_vehicle_tracking(cfg(direction_line=None))
-    assert not wants_vehicle_tracking(cfg(direction='exit'))
-    assert not wants_vehicle_tracking(cfg(direction='entry'))
+    assert not wants_vehicle_tracking(cfg(direction_line=None, direction='exit'))
     assert not wants_vehicle_tracking(cfg(detection_blocked=True))
     assert not wants_vehicle_tracking(SimpleNamespace())          # config vieja sin el campo
 
@@ -167,8 +168,37 @@ def test_sin_vehicle_tracker_o_no_disponible_no_hay_espera_y_cae_al_ancho():
             assert vt.calls == []                             # no disponible => ni se invoca
 
 
-def test_con_direccion_fija_no_se_corre_el_modelo_de_vehiculos():
+def test_con_direccion_fija_y_linea_corre_el_modelo_y_el_cruce_manda():
+    c = cfg(direction='entry')                               # la camara dice entry...
+    tracker = make_tracker(c)
+    # ...pero el auto baja de y=400 a 700 cruzando la linea (y=500, exitSide right): SALE.
+    script = [[(5, (420, 200, 600, y))] for y in (400, 420, 440, 700)]
+    vehicles = FakeVehicles(script)
+    outs = []
+    for i in range(4):
+        _r, out = process_frame(FRAME, detector, OCR, c, tracker, 0.1 * i, vehicle_tracker=vehicles)
+        outs.append(out)
+    assert len(vehicles.calls) == 4
+    assert outs[:3] == [[], [], []]                          # espera el cruce pese a la direccion fija
+    (em,) = outs[3]
+    assert (em.direction, em.direction_source) == ('exit', 'line')
+
+
+def test_con_direccion_fija_sin_cruce_emite_al_vencer_con_la_camara_como_respaldo():
     c = cfg(direction='exit')
+    tracker = make_tracker(c)
+    vehicles = FakeVehicles([[(5, (420, 200, 600, 400))]] * 60)   # no se mueve ni cruza
+    outs = []
+    for t in (0.0, 0.1, 0.2, 1.0, 2.0, 3.0, 4.0, 4.3):
+        _r, out = process_frame(FRAME, detector, OCR, c, tracker, t, vehicle_tracker=vehicles)
+        outs.append(out)
+    assert all(o == [] for o in outs[:-1])
+    (em,) = outs[-1]
+    assert (em.direction, em.direction_source) == ('exit', 'camera')
+
+
+def test_con_direccion_fija_sin_linea_no_corre_el_modelo_y_usa_la_camara():
+    c = cfg(direction='exit', direction_line=None)
     vehicles = FakeVehicles([])
     tracker = make_tracker(c)
     out = []

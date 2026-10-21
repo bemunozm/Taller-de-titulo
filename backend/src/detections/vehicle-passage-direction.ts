@@ -6,7 +6,13 @@
 export const PASSAGE_DIRECTIONS = ['entry', 'exit', 'unknown'] as const;
 export type PassageDirection = (typeof PASSAGE_DIRECTIONS)[number];
 
-/** `camera` = dirección fija de la cámara; luego línea, movimiento, ancho. */
+/**
+ * Prioridad (mayor = más confiable): lo MEDIDO gana a lo SUPUESTO.
+ * `line` (cruce de línea sobre la trayectoria) > `motion` (desplazamiento
+ * medido) > `camera` (dirección fija de la cámara: una suposición, respaldo
+ * cuando no hay medición) > `width` (tendencia del ancho) > `none`. Una
+ * cámara de entrada fija con línea que ve un auto saliendo manda con la línea.
+ */
 export const PASSAGE_DIRECTION_SOURCES = [
   'camera',
   'line',
@@ -17,9 +23,9 @@ export const PASSAGE_DIRECTION_SOURCES = [
 export type PassageDirectionSource = (typeof PASSAGE_DIRECTION_SOURCES)[number];
 
 const SOURCE_PRIORITY: Record<PassageDirectionSource, number> = {
-  camera: 4,
-  line: 3,
-  motion: 2,
+  line: 4,
+  motion: 3,
+  camera: 2,
   width: 1,
   none: 0,
 };

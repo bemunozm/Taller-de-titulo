@@ -39,6 +39,13 @@ function makeAttempt(id: string, plate: string, extra: Partial<AccessAttempt> = 
   }
 }
 
+// Consulta por texto: `*ByRole('row', { name })` recalcula el nombre accesible de toda la tabla.
+function rowOf(text: string): HTMLElement {
+  const row = screen.getByText(text).closest('tr')
+  if (!row) throw new Error(`No hay fila para ${text}`)
+  return row
+}
+
 describe('TraceabilityTable: pasadas multicámara', () => {
   it('muestra "×N cámaras" solo si varias cámaras distintas vieron el paso', async () => {
     detectionsApi.listAccessAttempts.mockResolvedValue([
@@ -49,11 +56,11 @@ describe('TraceabilityTable: pasadas multicámara', () => {
       makeAttempt('55555555-eeee', 'EEEE55', { passage: null }),
     ])
     renderWithProviders(<TraceabilityTable />)
-    await screen.findByRole('row', { name: /AAAA11/ })
+    await screen.findByText('AAAA11', undefined, { timeout: 5_000 })
 
-    expect(within(screen.getByRole('row', { name: /AAAA11/ })).getByText('×2 cámaras')).toBeInTheDocument()
-    for (const plate of [/BBBB22/, /CCCC33/, /DDDD44/, /EEEE55/]) {
-      expect(within(screen.getByRole('row', { name: plate })).queryByText(/cámaras/)).not.toBeInTheDocument()
+    expect(within(rowOf('AAAA11')).getByText('×2 cámaras')).toBeInTheDocument()
+    for (const plate of ['BBBB22', 'CCCC33', 'DDDD44', 'EEEE55']) {
+      expect(within(rowOf(plate)).queryByText(/cámaras/)).not.toBeInTheDocument()
     }
   })
 })

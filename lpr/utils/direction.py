@@ -18,9 +18,11 @@ punto de abajo, y>0, queda a su derecha). Por eso `right` => signo +1 y `left`
 salida. Cruzar de negativo a positivo = `exit`; de positivo a negativo = `entry`.
 
 Fuente de la decision (`source`), de mayor a menor prioridad:
-`camera` (direccion fija de la camara) > `line` (cruce del segmento) >
-`motion` (desplazamiento neto sobre la normal) > `width` (tendencia del ancho de
-la patente) > `none`.
+`line` (cruce medido del segmento) > `motion` (desplazamiento neto sobre la
+normal) > `camera` (direccion fija entry/exit) > `width` (tendencia del ancho
+de la patente) > `none`. Lo MEDIDO gana a lo SUPUESTO: la linea y el
+movimiento del vehiculo mandan aunque la camara tenga una direccion fija, que
+solo decide cuando no hubo ni cruce ni movimiento suficiente (o no hay linea).
 """
 import math
 from dataclasses import dataclass
@@ -36,8 +38,9 @@ SOURCE_LINE = 'line'
 SOURCE_MOTION = 'motion'
 SOURCE_WIDTH = 'width'
 SOURCE_NONE = 'none'
-# Fuentes que ya no cambian con mas evidencia: la espera de direccion termina.
-RESOLVED_SOURCES = (SOURCE_CAMERA, SOURCE_LINE)
+# Fuente que ya no cambia con mas evidencia: la espera de direccion termina.
+# `motion` y `camera` NO estan: son respaldos y con linea se espera el cruce.
+RESOLVED_SOURCES = (SOURCE_LINE,)
 
 # (t, x, y) en pixeles del cuadro completo.
 PathPoint = Tuple[float, float, float]
@@ -190,14 +193,14 @@ def resolve_direction(
 ) -> Tuple[str, str]:
     """`(direction, source)` por prioridad.
 
-    * `camera` entry/exit: manda siempre (la camara solo ve un sentido).
-    * `unknown` (sin configuracion) no adivina nada... salvo que haya una linea
-      configurada: entonces es una decision explicita del operador y `line` /
-      `motion` aplican. La tendencia del ancho solo se usa con `both`
-      (comportamiento previo).
+    * `line`: el cruce medido manda SIEMPRE, incluso con direccion fija.
+    * `motion` (solo con linea): sin cruce, el desplazamiento neto del vehiculo
+      sobre la normal tambien es una medicion y gana a la direccion fija.
+    * `camera` entry/exit: decide solo si no hubo ni cruce ni motion (o no hay
+      linea). Gana a `width`.
+    * `unknown` (sin configuracion) no adivina nada salvo que haya linea. La
+      tendencia del ancho solo se usa con `both` (comportamiento previo).
     """
-    if camera_direction in (DIRECTION_ENTRY, DIRECTION_EXIT):
-        return camera_direction, SOURCE_CAMERA
     if line is not None and frame_size is not None and points:
         w, h = frame_size
         crossed = detect_line_crossing(points, line, w, h)
@@ -206,6 +209,8 @@ def resolve_direction(
         moved = motion_direction(points, line, w, h)
         if moved:
             return moved, SOURCE_MOTION
+    if camera_direction in (DIRECTION_ENTRY, DIRECTION_EXIT):
+        return camera_direction, SOURCE_CAMERA
     if camera_direction == DIRECTION_BOTH and width_direction in (DIRECTION_ENTRY, DIRECTION_EXIT):
         return width_direction, SOURCE_WIDTH
     return DIRECTION_UNKNOWN, SOURCE_NONE

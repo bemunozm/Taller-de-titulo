@@ -24,11 +24,17 @@ import {
   FunnelIcon,
   XMarkIcon
 } from '@heroicons/react/16/solid'
+import { anomalyDetailPath } from '@/helpers/anomaly'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table'
 
 type BadgeColor = NonNullable<ComponentProps<typeof Badge>['color']>
 
 const SUSPICION_COLORS: Record<string, BadgeColor> = { HIGH: 'red', MEDIUM: 'orange', LOW: 'green' }
+
+function formatRowDate(timestamp: string): string {
+  const date = new Date(timestamp)
+  return Number.isNaN(date.getTime()) ? 'fecha desconocida' : date.toLocaleString('es-CL')
+}
 
 const columnHelper = createColumnHelper<AnomalyEvent>()
 
@@ -74,7 +80,7 @@ const columns = [
     header: 'Veredicto de la IA (Razonamiento)',
     cell: (info) => (
       <div className="max-w-md">
-        <p className="text-xs text-zinc-600 dark:text-zinc-400 line-clamp-2 hover:line-clamp-none transition-all cursor-pointer">
+        <p className="text-xs text-zinc-600 dark:text-zinc-400 line-clamp-2">
           {info.getValue() || 'Sin evaluación disponible'}
         </p>
       </div>
@@ -223,7 +229,12 @@ export default function AnomalyTable() {
               </TableRow>
             ) : (
               rows.map((row) => (
-                <TableRow key={row.id}>
+                // Toda la fila lleva al detalle; el enlace de la primera celda es el foco de teclado.
+                <TableRow
+                  key={row.id}
+                  href={anomalyDetailPath(row.original.id)}
+                  title={`Ver detalle de la anomalía del ${formatRowDate(row.original.timestamp)}`}
+                >
                   {row.getVisibleCells().map((cell) => (
                     <TableCell key={cell.id}>
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}

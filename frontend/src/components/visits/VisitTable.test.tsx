@@ -90,14 +90,21 @@ async function openActionsMenu(user: ReturnType<typeof userEvent.setup>, visitor
   await screen.findByRole('menuitem', { name: /Eliminar/ })
 }
 
+// Consulta por texto: `*ByRole('row', { name })` recalcula el nombre accesible de toda la tabla.
+function rowOf(text: string): HTMLElement {
+  const row = screen.getByText(text).closest('tr')
+  if (!row) throw new Error(`No hay fila para ${text}`)
+  return row
+}
+
 describe('VisitTable con una visita en awaiting_approval', () => {
   it('muestra el badge "Esperando aprobación" en su fila', () => {
     renderTable()
 
-    const row = screen.getByRole('row', { name: /Ana Solicitud/ })
+    const row = rowOf('Ana Solicitud')
     expect(within(row).getByText('Esperando aprobación')).toBeInTheDocument()
 
-    const pendingRow = screen.getByRole('row', { name: /Bruno Aprobado/ })
+    const pendingRow = rowOf('Bruno Aprobado')
     expect(within(pendingRow).getByText('Pendiente')).toBeInTheDocument()
   })
 
@@ -130,8 +137,8 @@ describe('VisitTable con una visita en awaiting_approval', () => {
 
     await user.selectOptions(statusFilter, 'awaiting_approval')
 
-    expect(screen.getByRole('row', { name: /Ana Solicitud/ })).toBeInTheDocument()
-    expect(screen.queryByRole('row', { name: /Bruno Aprobado/ })).not.toBeInTheDocument()
+    expect(rowOf('Ana Solicitud')).toBeInTheDocument()
+    expect(screen.queryByText('Bruno Aprobado')).not.toBeInTheDocument()
   })
 })
 
@@ -241,9 +248,9 @@ describe('VisitTable: patente', () => {
   it('muestra requestedPlate cuando la visita aún no tiene vehículo', () => {
     renderTable([requestedVisit, vehicleVisit])
 
-    expect(within(screen.getByRole('row', { name: /Elena Solicitud/ })).getByText('WXYZ34')).toBeInTheDocument()
+    expect(within(rowOf('Elena Solicitud')).getByText('WXYZ34')).toBeInTheDocument()
 
-    const vehicleRow = screen.getByRole('row', { name: /Felipe Vehiculo/ })
+    const vehicleRow = rowOf('Felipe Vehiculo')
     expect(within(vehicleRow).getByText('ABCD12')).toBeInTheDocument()
     expect(within(vehicleRow).getByText(/Toyota/)).toBeInTheDocument()
   })
@@ -254,8 +261,8 @@ describe('VisitTable: patente', () => {
 
     await user.type(screen.getByPlaceholderText('Buscar por nombre, RUT, patente...'), 'WXYZ')
 
-    expect(screen.getByRole('row', { name: /Elena Solicitud/ })).toBeInTheDocument()
-    expect(screen.queryByRole('row', { name: /Felipe Vehiculo/ })).not.toBeInTheDocument()
+    expect(rowOf('Elena Solicitud')).toBeInTheDocument()
+    expect(screen.queryByText('Felipe Vehiculo')).not.toBeInTheDocument()
   })
 })
 

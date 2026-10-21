@@ -75,6 +75,13 @@ describe('Router: política de privacidad pública (Ley 21.719, art. 14 ter)', (
     expect(window.location.pathname).toBe('/auth/login')
   })
 
+  it('el detalle de anomalía es una ruta protegida: sin sesión redirige al login', async () => {
+    const { queryClient } = renderAt('/traceability/anomalies/11111111-1111-4111-8111-111111111111')
+
+    await waitForSessionCheck(queryClient)
+    expect(window.location.pathname).toBe('/auth/login')
+  })
+
   it('el footer de la landing enlaza la política y ya no ofrece "Términos"', async () => {
     // Las animaciones `whileInView` de la landing usan IntersectionObserver (jsdom no lo trae).
     vi.stubGlobal(

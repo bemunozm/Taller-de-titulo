@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import type { AnomalyEvent } from '@/api/DetectionsAPI'
 import { ApiError } from '@/helpers/httpErrors'
 import { renderWithProviders } from '@/test/renderWithProviders'
+import { Route, Routes } from 'react-router-dom'
 import AnomalyTable from './AnomalyTable'
 
 const detectionsApi = vi.hoisted(() => ({ listAnomalies: vi.fn<() => Promise<AnomalyEvent[]>>() }))
@@ -54,5 +55,55 @@ describe('AnomalyTable (GET /anomalies con la sesión)', () => {
     await user.click(screen.getByRole('button', { name: /Reintentar/ }))
 
     await waitFor(() => expect(screen.getByText('cam-porton')).toBeInTheDocument())
+  })
+})
+
+describe('AnomalyTable: navegación al detalle', () => {
+  function renderWithRoutes() {
+    return renderWithProviders(
+      <Routes>
+        <Route path="/" element={<AnomalyTable />} />
+        <Route path="/traceability/anomalies/:id" element={<p>Pantalla de detalle</p>} />
+      </Routes>,
+    )
+  }
+
+  it('cada fila enlaza al detalle de su anomalía, con nombre accesible', async () => {
+    detectionsApi.listAnomalies.mockResolvedValue([ANOMALY])
+    renderWithRoutes()
+
+    await screen.findByText('cam-porton')
+    const links = screen.getAllByRole('link', { name: /Ver detalle de la anomalía/ })
+    expect(links.length).toBeGreaterThan(0)
+    for (const link of links) {
+      expect(link).toHaveAttribute('href', `/traceability/anomalies/${ANOMALY.id}`)
+    }
+    // Solo el enlace de la primera celda entra en el orden de tabulación.
+    expect(links.filter((link) => link.getAttribute('tabindex') === '0')).toHaveLength(1)
+  })
+
+  it('con el teclado: Enter sobre el enlace abre el detalle', async () => {
+    detectionsApi.listAnomalies.mockResolvedValue([ANOMALY])
+    const user = userEvent.setup()
+    renderWithRoutes()
+
+    await screen.findByText('cam-porton')
+    await user.tab() // filtros
+    const first = screen.getAllByRole('link', { name: /Ver detalle de la anomalía/ })[0]
+    first.focus()
+    await user.keyboard('{Enter}')
+
+    expect(await screen.findByText('Pantalla de detalle')).toBeInTheDocument()
+  })
+
+  it('click en la fila (el enlace que la cubre) abre el detalle', async () => {
+    detectionsApi.listAnomalies.mockResolvedValue([ANOMALY])
+    const user = userEvent.setup()
+    renderWithRoutes()
+
+    await screen.findByText('cam-porton')
+    await user.click(screen.getAllByRole('link', { name: /Ver detalle de la anomalía/ })[2])
+
+    expect(await screen.findByText('Pantalla de detalle')).toBeInTheDocument()
   })
 })
