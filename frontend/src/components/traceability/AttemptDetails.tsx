@@ -1,6 +1,7 @@
 import type { AccessAttempt, PlateDetection } from '@/api/DetectionsAPI'
 import { Button } from '@/components/ui/Button'
 import { AccessDecisionBadge } from './AccessDecisionBadge'
+import { DetectionImages } from './DetectionImages'
 import { getAttemptDirectionLabel } from '@/helpers/accessDecision'
 
 type Props = {
@@ -59,14 +60,9 @@ export default function AttemptDetails({ attempt, onClose }: Props) {
           <div><strong>Cámara:</strong> {detection.cameraId}</div>
           <div><strong>Conf. OCR:</strong> {detection.ocr_confidence ?? '-'}</div>
           <div><strong>Conf. Det:</strong> {detection.det_confidence ?? '-'}</div>
-          {detection.meta?.snapshot_jpeg_b64 && (
-            <div className="mt-2">
-              <img src={`data:image/jpeg;base64,${detection.meta.snapshot_jpeg_b64}`} alt="snapshot" className="max-w-full rounded" />
-            </div>
-          )}
-          {detection.full_frame_path && (
-            <div className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Frame path: {detection.full_frame_path}</div>
-          )}
+          <div className="mt-2">
+            <DetectionImages detection={detection} capturedAt={detection.createdAt} emptyMessage="Sin imagen" />
+          </div>
         </div>
       </div>
     </div>
