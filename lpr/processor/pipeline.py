@@ -25,7 +25,7 @@ from PIL import Image
 from lpr.processor.plate_tracker import PlateEmission, PlateTracker, TrackObservation
 from lpr.processor.rules import normalize_plate, resolve_plate
 from lpr.settings import settings
-from lpr.utils.direction import DIRECTION_ENTRY, DIRECTION_EXIT, DirectionLine
+from lpr.utils.direction import DirectionLine
 from lpr.utils.images import frame_to_pil
 from lpr.utils.zones import bounding_rect, point_in_any, polygons_to_pixels
 
@@ -203,10 +203,9 @@ def direction_line_of(cfg: Any) -> Optional[DirectionLine]:
 
 def wants_vehicle_tracking(cfg: Any) -> bool:
     """Vehicle tracking costs a second model per frame: only when a direction
-    line is configured and the camera does not fix the direction itself."""
-    return (direction_line_of(cfg) is not None
-            and getattr(cfg, 'direction', 'unknown') not in (DIRECTION_ENTRY, DIRECTION_EXIT)
-            and not getattr(cfg, 'detection_blocked', False))
+    line is configured. The line wins over a fixed camera direction, so it runs
+    whatever `cfg.direction` is (the fixed one is only the fallback)."""
+    return direction_line_of(cfg) is not None and not getattr(cfg, 'detection_blocked', False)
 
 
 def assign_vehicle(plate_box: Tuple[float, float, float, float],
@@ -259,8 +258,9 @@ def process_frame(
     tracker triggered.
 
     `vehicle_tracker` (optional, `VehicleTracker`) only runs when
-    `wants_vehicle_tracking(cfg)`; without it (or if it failed to load) the
-    direction falls back to the plate width trend / unknown."""
+    `wants_vehicle_tracking(cfg)` (a direction line is configured); without it
+    (or if it failed to load) the direction falls back to the camera's fixed
+    direction / the plate width trend / unknown."""
     h, w = frame.shape[:2]
     line = direction_line_of(cfg)
     tracker.set_direction_line(line)

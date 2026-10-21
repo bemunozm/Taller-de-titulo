@@ -160,8 +160,29 @@ def test_una_sola_emision_por_track_aunque_siga_visible():
     assert tr.flush() == []
 
 
-def test_la_direccion_fija_de_la_camara_no_espera():
+def test_camara_fija_con_linea_igual_espera_el_cruce():
+    tr = tracker(direction='entry')
+    assert confirm(tr, paths=BEFORE) == []                       # la fija NO evita la espera
+
+
+def test_camara_fija_entry_y_cruce_hacia_exitside_emite_exit_por_linea():
+    tr = tracker(direction='entry')
+    confirm(tr, paths=BEFORE)
+    (em,) = tr.update([], now=0.6, paths={5: CROSSED}, frame_size=FRAME)   # cruza hacia abajo = salida
+    assert (em.direction, em.direction_source) == ('exit', 'line')
+
+
+def test_camara_fija_exit_sin_cruce_emite_al_vencer_con_la_camara():
     tr = tracker(direction='exit')
+    confirm(tr, paths=BEFORE)
+    for t in (1.0, 2.0, 3.0, 4.0):
+        assert tr.update([obs(505, 400, 5)], now=t, paths={5: BEFORE}, frame_size=FRAME) == []
+    (em,) = tr.update([obs(505, 400, 5)], now=4.3, paths={5: BEFORE}, frame_size=FRAME)
+    assert (em.direction, em.direction_source) == ('exit', 'camera')
+
+
+def test_camara_fija_sin_linea_emite_de_inmediato_con_la_camara():
+    tr = tracker(direction='exit', line=None)
     (em,) = confirm(tr, paths=BEFORE)
     assert (em.direction, em.direction_source) == ('exit', 'camera')
 
@@ -215,3 +236,11 @@ def test_no_se_pierde_la_lectura_si_la_espera_vence_y_el_vehiculo_ya_no_esta():
     confirm(tr, paths=BEFORE)
     (em,) = tr.update([], now=1.4, paths=None, frame_size=FRAME)   # espera vencida (1.0 s desde t=0.2)
     assert em.text == 'BBCD12'
+
+
+def test_camara_fija_entry_con_motion_hacia_la_salida_emite_exit_por_motion():
+    tr = tracker(direction='entry')
+    moving = path((500, 100), (500, 200), (500, 300), (500, 400))   # 300 px hacia exitSide, sin cruzar
+    confirm(tr, paths=moving)
+    (em,) = tr.update([obs(505, 400, 5)], now=4.3, paths={5: moving}, frame_size=FRAME)
+    assert (em.direction, em.direction_source) == ('exit', 'motion')

@@ -141,9 +141,32 @@ def test_movimiento_paralelo_a_la_linea_no_decide():
 # --------------------------------------------------------------------------
 # Prioridad de fuentes
 # --------------------------------------------------------------------------
-def test_la_direccion_fija_de_la_camara_manda_siempre():
-    assert resolve_direction('entry', line(), DOWN, 'exit', (W, H)) == ('entry', 'camera')
+def test_la_linea_manda_aunque_la_camara_tenga_direccion_fija():
+    # DOWN cruza hacia el lado de salida (exitSide='right'): exit, aunque la camara diga entry.
+    assert resolve_direction('entry', line('right'), DOWN, 'entry', (W, H)) == ('exit', 'line')
+    assert resolve_direction('exit', line('right'), UP, 'exit', (W, H)) == ('entry', 'line')
+
+
+def test_camara_fija_entry_con_cruce_hacia_exitside_es_exit_por_linea():
+    assert resolve_direction('entry', line('left'), UP, 'unknown', (W, H)) == ('exit', 'line')
+
+
+def test_camara_fija_entry_con_auto_saliendo_despacio_sin_cruce_es_exit_por_motion():
+    approaching = path((500, 100), (500, 200), (500, 300), (500, 400))   # baja 300 px sin llegar a la linea
+    assert resolve_direction('entry', line('right'), approaching, 'entry', (W, H)) == ('exit', 'motion')
+    assert resolve_direction('exit', line('right'), list(reversed(approaching)), 'exit', (W, H)) == ('entry', 'motion')
+
+
+def test_camara_fija_sin_cruce_ni_motion_decide_la_camara_y_gana_a_width():
+    still = path((500, 100), (500, 110))
+    assert resolve_direction('exit', line('right'), still, 'entry', (W, H)) == ('exit', 'camera')
+    assert resolve_direction('entry', line('right'), [], 'exit', (W, H)) == ('entry', 'camera')
+
+
+def test_sin_linea_la_camara_fija_es_la_fuente():
     assert resolve_direction('exit', None, [], 'entry', None) == ('exit', 'camera')
+    assert resolve_direction('entry', None, DOWN, 'exit', (W, H)) == ('entry', 'camera')
+    assert resolve_direction('entry', line(), DOWN, 'exit', None) == ('entry', 'camera')
 
 
 def test_linea_gana_al_ancho():
