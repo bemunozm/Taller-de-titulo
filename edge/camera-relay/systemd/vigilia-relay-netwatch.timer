@@ -1,0 +1,13 @@
+# /etc/systemd/system/vigilia-relay-netwatch.timer (lo instala install.sh)
+# Corre vigilia-relay-netwatch.service cada 3 minutos, desde 5 min después
+# del arranque (la red y tailscaled tienen tiempo de levantar).
+[Unit]
+Description=Vigilia - vigilante de red del relay cada 3 min
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=3min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

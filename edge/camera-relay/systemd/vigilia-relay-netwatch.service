@@ -1,0 +1,52 @@
+# /etc/systemd/system/vigilia-relay-netwatch.service (lo instala install.sh)
+#
+# Vigilante de red del relay; lo dispara vigilia-relay-netwatch.timer cada
+# 3 minutos. Ver /opt/vigilia-relay/netwatch.sh:
+# - Tailscale caído o el gateway sin responder 3 veces seguidas -> reinicia
+#   tailscaled;
+# - más de 30 min sin red -> reinicia la Pi (como mucho 3 veces por día).
+# Corre como root: necesita `systemctl restart tailscaled`, `systemctl reboot`
+# y ping. El estado queda en /var/lib/vigilia-relay/netwatch.state.
+[Unit]
+Description=Vigilia - vigilante de red del relay (Tailscale y gateway)
+Documentation=file:/opt/vigilia-relay/README.md
+After=network-online.target tailscaled.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/vigilia-relay/netwatch.sh
+TimeoutStartSec=120s
+StateDirectory=vigilia-relay
+StateDirectoryMode=0700
+Environment=NETWATCH_GATEWAY_FAILS=3
+Environment=NETWATCH_OFFLINE_REBOOT_MIN=30
+Environment=NETWATCH_MAX_REBOOTS_PER_DAY=3
+# Si el router no responde ping, un destino de Internet también cuenta como red.
+Environment=NETWATCH_FALLBACK_TARGET=1.1.1.1
+
+# Endurecimiento sin quitarle lo que necesita: systemctl le pide a PID 1 el
+# restart/reboot por su socket (no requiere capabilities: PID 1 lo autoriza
+# por uid 0), ping usa CAP_NET_RAW, `ip route` netlink y `tailscale status`
+# el socket Unix de tailscaled. Solo escribe en StateDirectory.
+# Verificar en la Pi (README, Fase A): el reinicio por falta de red funciona.
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_RAW
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

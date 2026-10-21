@@ -1,0 +1,13 @@
+# /etc/systemd/system/vigilia-relay-follow-nvr.timer (lo instala install.sh)
+# Corre vigilia-relay-follow-nvr.service cada 5 minutos, desde 3 min después
+# del arranque (la red y el NVR tienen tiempo de levantar).
+[Unit]
+Description=Vigilia - sigue la IP del NVR cada 5 min
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

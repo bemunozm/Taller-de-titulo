@@ -4,6 +4,11 @@
 .env.*
 !.env.example
 
+# Config real del relay de cámaras (edge/camera-relay): trae la clave del NVR.
+# Solo se versionan relay.env.example y cameras.conf.example.
+relay.env
+cameras.conf
+
 # Videos grandes de pruebas
 mediamtx/*.mp4
 lpr/test_video/*.mp4
@@ -38,3 +43,12 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Datos personales de evaluacion del LPR (clips y verdad terreno: patentes y personas, Ley 21.719)
+lpr/eval-data/
+# Cualquier video bajo lpr/ (clips grabados de camaras: personas y patentes) y las salidas de replay_eval
+lpr/**/*.mkv
+lpr/**/*.avi
+lpr/**/*.mp4
+lpr/**/*.mov
+lpr/**/replay-*.json

@@ -1,0 +1,4 @@
+# edge/camera-relay — dependencias para CORRER LOS TESTS (CI y scripts/gate.sh).
+# El CLI (vigilia_relay.py) es solo stdlib: en la Pi no se instala nada de aquí.
+# pytest: la misma versión que lpr/requirements-ci.txt.
+pytest==9.0.3

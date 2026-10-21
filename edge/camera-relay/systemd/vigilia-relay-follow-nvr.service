@@ -1,0 +1,71 @@
+# /etc/systemd/system/vigilia-relay-follow-nvr.service (lo instala install.sh)
+#
+# Sigue la IP del NVR (DHCP) por su MAC; lo dispara
+# vigilia-relay-follow-nvr.timer cada 5 minutos. Ver README, "IP del NVR por
+# DHCP: seguimiento automático".
+# - Chequeo barato: TCP al NVR y su MAC en `ip neigh`.
+# - Con 2 fallos seguidos: ping a la /24 de eth0, busca la MAC y, con un único
+#   candidato que responde, corre el flujo de apply (probe con credenciales,
+#   drop-in IPAddressAllow con la /32 nueva, rollback).
+# - Por día: máximo 3 cambios de IP aplicados y 12 intentos; si la MAC aparece
+#   en 2+ IPs, alerta y nada. Sin NVR_MAC no sigue a nadie.
+#
+# Corre como root porque escribe /etc/vigilia-relay y el drop-in de
+# vigilia-relay.service, y le pide a PID 1 daemon-reload y restart (por su
+# socket Unix: no requiere capabilities). Las capabilities, abajo.
+#
+# Exit 8 (otro apply/set-nvr en curso) no es un fallo. Los códigos 9 (MAC
+# duplicada), 10 (NVR no encontrado) y 11 (tope diario) dejan la unidad en
+# failed a propósito: se ven en `systemctl --failed`.
+[Unit]
+Description=Vigilia - sigue la IP del NVR por su MAC
+Documentation=file:/opt/vigilia-relay/README.md
+After=network-online.target vigilia-relay.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vigilia-relay follow-nvr
+SuccessExitStatus=8
+# Barrido (~10 s) + probe + apply (hasta 30 s) + rollback (hasta 45 s).
+TimeoutStartSec=300s
+StateDirectory=vigilia-relay
+StateDirectoryMode=0700
+ReadWritePaths=/etc/vigilia-relay -/etc/systemd/system/vigilia-relay.service.d
+UMask=0077
+
+NoNewPrivileges=yes
+# Por qué está cada una (todo lo demás queda fuera del bounding set):
+# - CAP_NET_RAW: el ping del barrido (socket ICMP crudo; con NoNewPrivileges el
+#   ping no puede usar su file capability, así que la necesita el proceso).
+# - CAP_SETUID y CAP_SETGID: el probe con credenciales corre ffprobe como el
+#   usuario sin privilegios vigilia-probe, igual que `apply` (setuid, setgid y
+#   setgroups([]) antes de `setpriv --no-new-privs`); sin ellas el probe falla.
+# - CAP_CHOWN: apply_config deja mediamtx.yml como root:vigilia-relay (640) para
+#   que MediaMTX lo lea sin poder escribirlo.
+# No hace falta CAP_DAC_OVERRIDE: todo lo que escribe es de root. CAP_NET_ADMIN
+# tampoco: `ip -j` solo lee (netlink) y no se toca la tabla de vecinos.
+CapabilityBoundingSet=CAP_NET_RAW CAP_SETUID CAP_SETGID CAP_CHOWN
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Solo loopback (API de MediaMTX) y la LAN privada (el NVR y su /24).
+IPAddressAllow=localhost 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+IPAddressDeny=any

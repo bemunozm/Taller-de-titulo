@@ -1,0 +1,88 @@
+// Política del tailnet para el relay de cámaras de Vigilia.
+// Se pega en https://login.tailscale.com/admin/acls (Access controls ->
+// editor de texto). La consola corre los "tests" al guardar: si alguno falla,
+// no guarda.
+//
+// La ACL ES EL CONTROL PRINCIPAL: UFW no filtra el tailnet (tailscaled pone
+// su cadena ts-input antes que las reglas de UFW).
+//
+// IMPORTANTE: esta política REEMPLAZA la que trae la cuenta por defecto (todo
+// abierto entre todos los nodos). Si ya tienes otras reglas, fusiónalas.
+//
+// Antes de pegar, reemplaza:
+//   benjamin@example.com -> tu login de Tailscale
+//   100.101.102.103      -> la IP de Tailscale de tu PC (`tailscale ip -4`)
+//   "benjamin"           -> tu usuario de Linux en la Pi (el de Raspberry Pi Imager)
+{
+	"tagOwners": {
+		// Solo tu cuenta puede poner estos tags (tailscale up --advertise-tags).
+		"tag:vigilia-relay":   ["benjamin@example.com"],
+		"tag:vigilia-central": ["benjamin@example.com"],
+	},
+
+	"hosts": {
+		"benjamin-pc": "100.101.102.103",
+	},
+
+	"acls": [
+		// Tus dispositivos entre sí (autogroup:self no incluye nodos con tag).
+		{"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self:*"]},
+
+		// RTSP del relay: solo el PC de Benjamin (el celular no)...
+		{"action": "accept", "src": ["benjamin-pc"], "dst": ["tag:vigilia-relay:8554"]},
+		// ...y, en la etapa siguiente, el MediaMTX central del VPS.
+		{"action": "accept", "src": ["tag:vigilia-central"], "dst": ["tag:vigilia-relay:8554"]},
+
+		// Tailscale SSH necesita esta regla de red al 22 además de la regla "ssh".
+		{"action": "accept", "src": ["benjamin@example.com"], "dst": ["tag:vigilia-relay:22"]},
+
+		// tag:vigilia-relay no aparece nunca como src: el relay no puede
+		// iniciar conexiones a nada del tailnet (si roban la Pi, no es un
+		// puente hacia tu PC). Las reglas son con estado: las respuestas pasan.
+	],
+
+	"ssh": [
+		{
+			// "check": re-autenticación en el navegador (con el 2FA de la cuenta)
+			// cada checkPeriod.
+			"action":      "check",
+			"checkPeriod": "12h",
+			"src":         ["benjamin@example.com"],
+			"dst":         ["tag:vigilia-relay"],
+			// Tu usuario de Linux en la Pi (el de Raspberry Pi Imager), no autogroup:nonroot.
+			"users":       ["benjamin"],
+		},
+	],
+
+	"tests": [
+		{
+			"src":    "benjamin-pc",
+			"accept": ["tag:vigilia-relay:8554"],
+			"deny":   ["tag:vigilia-relay:9997", "tag:vigilia-relay:80"],
+		},
+		{
+			// El relay no llega a nada (ni a tu PC).
+			"src":  "tag:vigilia-relay",
+			"deny": ["benjamin-pc:22", "benjamin-pc:3389", "benjamin-pc:8554"],
+		},
+		{
+			"src":    "tag:vigilia-central",
+			"accept": ["tag:vigilia-relay:8554"],
+			"deny":   ["tag:vigilia-relay:22"],
+		},
+		{
+			// Tus otros dispositivos (el celular) no ven el RTSP: solo benjamin-pc.
+			"src":  "benjamin@example.com",
+			"deny": ["tag:vigilia-relay:8554"],
+		},
+	],
+
+	"sshTests": [
+		{
+			"src":   "benjamin@example.com",
+			"dst":   ["tag:vigilia-relay"],
+			"check": ["benjamin"],
+			"deny":  ["root"],
+		},
+	],
+}

@@ -1,0 +1,19 @@
+# /etc/vigilia-relay/cameras.conf — una cámara por línea (600 root).
+#
+#   nombre nvr:<canal>      path `nombre` = substream del canal ({canal}02) y
+#                           `nombre-hd` = stream principal ({canal}01)
+#   nombre url:rtsp://...   cualquier otra fuente RTSP (pruebas u otra marca).
+#                           El host es SIEMPRE una IP (el servicio no tiene DNS);
+#                           el esquema, rtsp:// o rtsps:// en minúsculas; un '$'
+#                           o un '#' van codificados como %24 y %23.
+#
+# Nombres: minúsculas, dígitos, '_' o '-', empiezan con letra o dígito, hasta
+# 32 caracteres, únicos y sin terminar en -hd (está reservado).
+# Sin este archivo se generan cam01..camNN a partir de NVR_CHANNELS.
+# Para ver qué canal es cada cámara: sudo vigilia-relay probe
+# Después de editarlo: sudo vigilia-relay apply
+#
+# Ejemplo (descomenta y ajusta los canales):
+# porton nvr:3
+# puerta nvr:5
+# prueba url:rtsp://usuario:clave-FALSA@192.168.1.50:554/stream1
