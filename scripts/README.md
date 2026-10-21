@@ -7,7 +7,7 @@ termina con un resumen `OK` / `FAIL` / `SKIP` por paso. Sale con código 1 si
 algún paso falló.
 
 ```bash
-bash scripts/gate.sh                 # backend, hub, frontend y lpr (sin e2e)
+bash scripts/gate.sh                 # backend, hub, frontend, lpr y camera-relay (sin e2e)
 bash scripts/gate.sh --with-e2e      # + e2e del backend (los corre el Gate P9)
 bash scripts/gate.sh --require-db    # sin Postgres, las migraciones son FAIL y no SKIP
 ```
@@ -26,7 +26,12 @@ Funciona en Git Bash (Windows) y en Linux, desde cualquier carpeta: usa
    `jest.config.js`) y `build`.
 3. frontend: `test:run` y `build` (el build tarda varios minutos).
 4. lpr: `python -m pytest lpr/tests`.
-5. Solo con `--with-e2e`: `npm --prefix backend run test:e2e`.
+5. camera-relay: `python -m pytest edge/camera-relay/tests` (kit del relay de
+   la Raspberry Pi, `edge/camera-relay/README.md`). Incluye el contract test
+   con el binario real de MediaMTX v1.15.2 si hay `MEDIAMTX_BIN`; si no está
+   definido y existe `mediamtx/mediamtx.exe` (Windows), usa ese. Sin binario,
+   el contract test se salta y el gate lo avisa.
+6. Solo con `--with-e2e`: `npm --prefix backend run test:e2e`.
 
 Lint y `npm audit` no se corren: en CI son no bloqueantes.
 
@@ -53,6 +58,11 @@ Lint y `npm audit` no se corren: en CI son no bloqueantes.
   ```
 
   Sin `PYTHON`, el gate busca `python3`, `python` o `py` (>= 3.11).
+- Para camera-relay basta `pytest` en ese mismo Python (el CLI del kit es
+  solo stdlib): `pip install -r edge/camera-relay/requirements-ci.txt`. En
+  Linux, el contract test necesita el binario:
+  `MEDIAMTX_BIN=/ruta/a/mediamtx bash scripts/gate.sh`. El E2E con NVR falso
+  (`edge/camera-relay/e2e/run-e2e.ps1`, Windows) no es parte del gate.
 
 ## E2E del backend (Fase 4 · P8.B)
 

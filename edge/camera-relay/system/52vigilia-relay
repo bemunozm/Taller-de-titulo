@@ -1,0 +1,23 @@
+// /etc/apt/apt.conf.d/52vigilia-relay (lo instala install.sh)
+//
+// unattended-upgrades con las actualizaciones de seguridad de Debian y las del
+// repo de Raspberry Pi (kernel, firmware: no tiene una suite "security"
+// aparte), SIN reinicio automático: el reinicio y el `apt full-upgrade`
+// mensual los hace Benjamin por Tailscale SSH (README, "Actualizar el
+// sistema"). Tailscale se actualiza solo con `tailscale set --auto-update`.
+//
+// "#clear" vacía la lista que trae 50unattended-upgrades: las listas de apt
+// se acumulan entre archivos, así que sin esto se sumarían sus orígenes.
+#clear Unattended-Upgrade::Origins-Pattern;
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Debian,codename=${distro_codename},label=Debian-Security";
+        "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+        "origin=Raspberry Pi Foundation,codename=${distro_codename},label=Raspberry Pi Foundation";
+};
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "false";
+
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";

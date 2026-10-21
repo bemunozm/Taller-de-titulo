@@ -9,7 +9,9 @@
 #   2. vigilia-hub: typecheck, test (con umbral de cobertura) y build
 #   3. frontend: test:run y build
 #   4. lpr: python -m pytest lpr/tests
-#   5. con --with-e2e: npm --prefix backend run test:e2e
+#   5. camera-relay: python -m pytest edge/camera-relay/tests (con el contract
+#      test de MediaMTX si hay MEDIAMTX_BIN o mediamtx/mediamtx.exe)
+#   6. con --with-e2e: npm --prefix backend run test:e2e
 # Lint y `npm audit` no se corren aquí: en CI son no bloqueantes.
 #
 # Uso (Git Bash en Windows o Linux, desde cualquier carpeta):
@@ -30,7 +32,9 @@ Uso: bash scripts/gate.sh [--with-e2e] [--require-db] [-h|--help]
 
 Variables: DB_HOST, DB_PORT, DB_USER, DB_PASSWORD (Postgres local; por defecto
 las de backend/.env), VIGILIA_ALLOW_REMOTE_TEST_DB=true (permite un DB_HOST no
-local) y PYTHON (intérprete >= 3.11 para el LPR).
+local), PYTHON (intérprete >= 3.11 para el LPR y el kit del relay) y
+MEDIAMTX_BIN (binario de MediaMTX v1.15.2 para el contract test del relay;
+en Windows, por defecto mediamtx/mediamtx.exe).
 EOF
 }
 
@@ -60,6 +64,7 @@ BACKEND="$ROOT/backend"
 HUB="$ROOT/vigilia-hub"
 FRONTEND="$ROOT/frontend"
 LPR_TESTS="$ROOT/lpr/tests"
+CAMERA_RELAY_TESTS="$ROOT/edge/camera-relay/tests"
 GATE_DB="$ROOT/scripts/gate-db.cjs"
 
 if [[ -t 1 ]]; then
@@ -211,6 +216,29 @@ lpr_tests() {
   run_step "lpr: pytest" "$python" -m pytest "$LPR_TESTS" -q -p no:cacheprovider
 }
 
+# --- Kit del relay de cámaras (edge/camera-relay) --------------------------------
+# El CLI es solo stdlib: basta pytest (edge/camera-relay/requirements-ci.txt).
+camera_relay_tests() {
+  local python
+  if ! python="$(find_python)"; then
+    fail_step "camera-relay: pytest" "no hay Python >= 3.11 (define PYTHON=/ruta/al/python)"
+    return
+  fi
+  if ! "$python" -c 'import pytest' > /dev/null 2>&1; then
+    fail_step "camera-relay: pytest" "falta pytest en $python (pip install -r edge/camera-relay/requirements-ci.txt)"
+    return
+  fi
+  # Contract test con el binario real: MEDIAMTX_BIN o, en Windows, el del repo.
+  local mediamtx_bin="${MEDIAMTX_BIN:-}"
+  if [[ -z "$mediamtx_bin" && -f "$ROOT/mediamtx/mediamtx.exe" ]]; then
+    mediamtx_bin="$ROOT/mediamtx/mediamtx.exe"
+  fi
+  if [[ -z "$mediamtx_bin" ]]; then
+    warn "camera-relay: sin MEDIAMTX_BIN, el contract test con MediaMTX se salta"
+  fi
+  run_step "camera-relay: pytest" env MEDIAMTX_BIN="$mediamtx_bin" "$python" -m pytest "$CAMERA_RELAY_TESTS" -q -p no:cacheprovider
+}
+
 # --- Ejecución -----------------------------------------------------------------
 echo "${BOLD}Gate de Vigilia${RESET} (raíz: $ROOT)"
 if ! node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 12) ? 0 : 1)' 2> /dev/null; then
@@ -236,6 +264,7 @@ if has_deps "$FRONTEND" "frontend"; then
 fi
 
 lpr_tests
+camera_relay_tests
 
 if [[ $WITH_E2E -eq 1 ]]; then
   if [[ -d "$BACKEND/node_modules" ]]; then

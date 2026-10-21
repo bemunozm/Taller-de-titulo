@@ -1,0 +1,43 @@
+# NVR falso con Basic + auth HTTP para el E2E del relay (run-e2e.ps1).
+#
+# Existe porque MediaMTX v1.15.2 no acepta ':', '/' ni '%' en las claves de
+# authInternalUsers (ver fake-nvr.yml): aquí la clave la valida
+# fake_nvr_auth.py, así que puede llevar '/' y '%' además de @#$. Con esto se
+# prueba de punta a punta el modo nvr: de vigilia_relay.py (encoding de la
+# clave), el probe con ffprobe y el cliente RTSP del relay con esa clave.
+#
+# ':' no se puede probar con un NVR falso hecho con MediaMTX: su parser Basic
+# (lado servidor) descarta las credenciales cuya clave lo contiene, y sus
+# usuarios internos no lo admiten. El encoding de ':' lo cubren los tests
+# unitarios (test_render.py) y el contract test (MediaMTX acepta la `source`).
+#
+# No hay claves en este archivo: las tiene fake_nvr_auth.py (FALSAS).
+logLevel: info
+logDestinations: [stdout]
+
+authMethod: http
+authHTTPAddress: http://127.0.0.1:19999/auth
+# Sin exclusiones: la API también pasa por fake_nvr_auth.py.
+authHTTPExclude: []
+
+api: yes
+apiAddress: 127.0.0.1:19998
+metrics: no
+pprof: no
+playback: no
+
+rtsp: yes
+rtspTransports: [tcp]
+rtspEncryption: "no"
+rtspAddress: :18555
+# Con auth HTTP, MediaMTX no tiene la clave en claro: solo Basic.
+rtspAuthMethods: [basic]
+
+rtmp: no
+hls: no
+webrtc: no
+srt: no
+
+paths:
+  Streaming/Channels/102:
+    source: publisher

@@ -1,0 +1,89 @@
+# /etc/systemd/system/vigilia-relay.service (lo instala install.sh)
+#
+# MediaMTX v1.15.2 como relay de cámaras: toma on-demand los streams del NVR y
+# los sirve por RTSP en :8554 (solo alcanzable por Tailscale: UFW cierra eth0
+# salvo el 22), con la API en 127.0.0.1:9997. Config: /etc/vigilia-relay/
+# mediamtx.yml, generada por `vigilia-relay apply` (MediaMTX la recarga en
+# caliente).
+#
+# - Restart=always y no on-failure: ante una config inválida MediaMTX v1.15.2
+#   termina con código 0 (verificado), y on-failure no lo levantaría.
+# - StartLimitIntervalSec=0: reintenta para siempre (en la conserjería nadie
+#   va a correr `systemctl reset-failed`).
+# - Sin WatchdogSec: MediaMTX no implementa sd_notify (lo mataría cada vez).
+# - Sin Requires=tailscaled: un reinicio de tailscaled (netwatch) no debe
+#   bajar el relay; MediaMTX escucha en todas las interfaces y toma tailscale0
+#   cuando aparece.
+# Meta de endurecimiento: `systemd-analyze security vigilia-relay` < 2.
+[Unit]
+Description=Vigilia - relay de camaras (MediaMTX)
+Documentation=file:/opt/vigilia-relay/README.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=vigilia-relay
+Group=vigilia-relay
+ExecStart=/opt/vigilia-relay/bin/mediamtx /etc/vigilia-relay/mediamtx.yml
+WorkingDirectory=/
+Restart=always
+RestartSec=3s
+TimeoutStopSec=15s
+
+# Recursos: la Pi 3B tiene 1 GB y no transcodifica.
+MemoryMax=400M
+TasksMax=256
+LimitNOFILE=4096
+UMask=0077
+
+# Privilegios
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+PrivateUsers=yes
+RemoveIPC=yes
+KeyringMode=private
+
+# Sistema de archivos y dispositivos (solo lee su config).
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateMounts=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectProc=invisible
+ProcSubset=pid
+
+# Kernel
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+
+# Red: IPv4/IPv6 (RTSP y API), Unix y Netlink (Go enumera interfaces).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+# Fail-closed: solo loopback y Tailscale (los lectores). `vigilia-relay apply`
+# agrega el NVR y los hosts de url: en el drop-in
+# vigilia-relay.service.d/10-ipaddress.conf (lo reemplaza entero). Un
+# MediaMTX comprometido no puede hablar con nada más de la LAN ni de Internet.
+IPAddressAllow=localhost 100.64.0.0/10 fd7a:115c:a1e0::/48
+IPAddressDeny=any
+
+# Syscalls: con EPERM en vez de matar el proceso, por si el runtime de Go
+# prueba algo filtrado (p. ej. setrlimit, que ignora si falla).
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

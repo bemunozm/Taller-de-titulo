@@ -2,7 +2,9 @@
 #
 # Bloqueantes: backend (typecheck, build, unit, migraciones contra Postgres 15
 # y e2e), vigilia-hub (typecheck, test con umbral de cobertura, build),
-# frontend (test y build) y lpr (pytest con el set liviano requirements-ci.txt).
+# frontend (test y build), lpr (pytest con el set liviano requirements-ci.txt)
+# y camera-relay (pytest en 3.11 y 3.13 con el contract test de MediaMTX,
+# shellcheck y systemd-analyze security).
 # No bloqueantes (pasos con continue-on-error, resumidos en el Summary del job):
 # `lint:check` del backend, `lint` del frontend y `npm audit --audit-level=high`.
 #
@@ -260,3 +262,69 @@ jobs:
       # Desde la raíz del repo: tests/conftest.py agrega la raíz al sys.path.
       - name: Tests
         run: python -m pytest lpr/tests
+
+  # Kit del relay de cámaras de la Raspberry Pi 3B (edge/camera-relay/README.md).
+  # Python 3.11 = Raspberry Pi OS Bookworm; 3.13 = Trixie. El contract test
+  # corre contra el binario real de MediaMTX v1.15.2 (linux_amd64), descargado
+  # del release y verificado por SHA256 (el de arm64 lo fija install.sh).
+  camera-relay:
+    name: camera-relay (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.13']
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      MEDIAMTX_VERSION: v1.15.2
+      # checksums.sha256 del release v1.15.2 (= digest del asset en la API de GitHub).
+      MEDIAMTX_SHA256_LINUX_AMD64: 8143486d886cc2d5c76f98d687cfb2ee6daf947fd45989c9322c0618057dcf5b
+      # El contract test falla (no se salta) si falta el binario.
+      VIGILIA_REQUIRE_CONTRACT: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: edge/camera-relay/requirements-ci.txt
+
+      - name: Instalar dependencias de test
+        run: python -m pip install -r edge/camera-relay/requirements-ci.txt
+
+      # Solo el binario: el mediamtx.yml del tar trae todo abierto.
+      - name: MediaMTX v1.15.2 (linux_amd64, SHA256 verificado)
+        run: |
+          dir="$RUNNER_TEMP/mediamtx"
+          mkdir -p "$dir"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/mediamtx.tar.gz" \
+            "https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_linux_amd64.tar.gz"
+          echo "${MEDIAMTX_SHA256_LINUX_AMD64}  $dir/mediamtx.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/mediamtx.tar.gz" -C "$dir" --no-same-owner mediamtx
+          test "$("$dir/mediamtx" --version)" = "$MEDIAMTX_VERSION"
+          echo "MEDIAMTX_BIN=$dir/mediamtx" >> "$GITHUB_ENV"
+
+      - name: Tests (incluye el contract test con el binario real)
+        run: python -m pytest edge/camera-relay/tests -p no:cacheprovider -rs
+
+      - name: shellcheck y bash -n
+        run: |
+          shellcheck --version | head -n 2
+          shellcheck -S style edge/camera-relay/install.sh edge/camera-relay/netwatch.sh
+          bash -n edge/camera-relay/install.sh
+          bash -n edge/camera-relay/netwatch.sh
+
+      # Meta del plan: exposición < 2.0 (--threshold va en décimas).
+      - name: systemd-analyze security de la unidad del relay
+        run: systemd-analyze security --offline=true --threshold=20 edge/camera-relay/systemd/vigilia-relay.service
+
+      # Oneshots de root (netwatch 2.1-2.3, follow-nvr 2.5-2.7 según el systemd):
+      # necesitan root (ufw, ip, setpriv); el tope evita que se aflojen.
+      - name: systemd-analyze security de netwatch y follow-nvr
+        run: |
+          systemd-analyze security --offline=true --threshold=30 edge/camera-relay/systemd/vigilia-relay-netwatch.service
+          systemd-analyze security --offline=true --threshold=30 edge/camera-relay/systemd/vigilia-relay-follow-nvr.service

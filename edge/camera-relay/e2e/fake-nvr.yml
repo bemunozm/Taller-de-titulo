@@ -1,0 +1,57 @@
+# NVR falso con Digest para el E2E del relay (edge/camera-relay/e2e/run-e2e.ps1).
+#
+# Imita al NVR Hikvision del condominio: RTSP con Digest, un usuario "solo
+# vista en vivo" y el path Streaming/Channels/102 (substream del canal 1),
+# que publica ffmpeg con testsrc. Lo levanta MediaMTX v1.15.2.
+#
+# TODAS las claves de este archivo son FALSAS y solo existen en esta prueba.
+#
+# Límite de MediaMTX v1.15.2: las claves de authInternalUsers solo admiten
+# A-Z 0-9 ! $ ( ) * + . ; < = > [ ] ^ _ - , @ # & (rechaza ':', '/' y '%' al
+# cargar). Por eso esta clave lleva solo '@', '#' y '$' (con "$G1", que
+# MediaMTX NO debe expandir en la `source` del relay). La clave con el set
+# completo @:/#%$ la valida fake-nvr-basic.yml + fake_nvr_auth.py.
+logLevel: info
+logDestinations: [stdout]
+
+authMethod: internal
+authInternalUsers:
+  # Usuario del NVR que usa el relay (Digest necesita la clave en claro).
+  - user: nvr-viewer
+    pass: 'E2e@#$G1-fake'
+    ips: []
+    permissions:
+      - action: read
+  # ffmpeg publica el testsrc sin credenciales, solo desde loopback.
+  - user: any
+    ips: ['127.0.0.1', '::1']
+    permissions:
+      - action: publish
+  # API del NVR falso: el E2E cuenta sus lectores (on-demand del relay).
+  - user: nvr-admin
+    pass: fake-nvr-admin-e2e
+    ips: ['127.0.0.1', '::1']
+    permissions:
+      - action: api
+
+api: yes
+apiAddress: 127.0.0.1:19997
+metrics: no
+pprof: no
+playback: no
+
+rtsp: yes
+rtspTransports: [tcp]
+rtspEncryption: "no"
+rtspAddress: :18554
+# Como el Hikvision: Digest.
+rtspAuthMethods: [digest]
+
+rtmp: no
+hls: no
+webrtc: no
+srt: no
+
+paths:
+  Streaming/Channels/102:
+    source: publisher
