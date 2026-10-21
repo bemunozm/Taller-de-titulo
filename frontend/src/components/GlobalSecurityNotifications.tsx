@@ -1,12 +1,14 @@
 import { useEffect, useState, type ComponentProps } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
+import { useNavigate } from 'react-router-dom'
 import { ShieldExclamationIcon } from '@heroicons/react/24/outline'
 import { ClockIcon, PhotoIcon, VideoCameraIcon } from '@heroicons/react/16/solid'
 import { Alert, AlertActions, AlertBody, AlertDescription, AlertTitle } from '@/components/ui/Alert'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { getAnomaly } from '@/api/DetectionsAPI'
+import { anomalyDetailPath } from '@/helpers/anomaly'
 import { usePermissions } from '@/hooks/usePermissions'
 import { formatDateTime } from '@/helpers/index'
 import {
@@ -78,6 +80,12 @@ function SecurityAlertDialog({ alert, open, onClose }: SecurityAlertDialogProps)
   const isCritical = alert.severity === 'HIGH'
   const severity = alert.severity ? SEVERITY_BADGE[alert.severity] : null
   const cameraLabel = alert.cameraName ?? alert.cameraId ?? 'Cámara sin identificar'
+  const navigate = useNavigate()
+
+  const openDetail = () => {
+    onClose()
+    navigate(anomalyDetailPath(alert.anomalyId))
+  }
 
   return (
     <Alert open={open} onClose={onClose} size="lg">
@@ -156,6 +164,9 @@ function SecurityAlertDialog({ alert, open, onClose }: SecurityAlertDialogProps)
       </AlertBody>
 
       <AlertActions>
+        <Button outline onClick={openDetail}>
+          Ver detalle
+        </Button>
         <Button onClick={onClose} color={isCritical ? 'red' : 'dark/zinc'}>
           Entendido
         </Button>

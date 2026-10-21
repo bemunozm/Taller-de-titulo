@@ -11,6 +11,7 @@ import { ForbiddenView } from "@/views/errors/ForbiddenView";
 import { NotFoundView } from "@/views/errors/NotFoundView";
 import TraceabilityView from "./views/TraceabilityView";
 import TraceabilityDetailView from "./views/TraceabilityDetailView";
+import AnomalyDetailView from "./views/AnomalyDetailView";
 import { StackedLayout } from "./layouts/StackedLayout";
 import { Avatar } from "@/components/ui/Avatar";
 import {
@@ -467,7 +468,16 @@ export default function Router() {
               <ProtectedRoute permission="detections.read" anyRole={['Administrador', 'Super Administrador', 'Conserje']}>
                 <TraceabilityDetailView />
               </ProtectedRoute>
-            } 
+            }
+          />
+          {/* Detalle de anomalía: mismo permiso que la lista (GET /anomalies/:id exige detections.read) */}
+          <Route
+            path="/traceability/anomalies/:id"
+            element={
+              <ProtectedRoute permission="detections.read" anyRole={['Administrador', 'Super Administrador', 'Conserje']}>
+                <AnomalyDetailView />
+              </ProtectedRoute>
+            }
           />
           
           {/* Métricas de Rendimiento */}

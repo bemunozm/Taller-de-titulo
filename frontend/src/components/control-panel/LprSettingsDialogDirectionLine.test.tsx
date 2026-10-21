@@ -83,10 +83,10 @@ beforeEach(() => {
 })
 
 describe('LprSettingsDialog: línea de dirección', () => {
-  it('sin línea explica que la dirección se infiere por el tamaño de la patente', async () => {
+  it('sin línea explica que se usa la dirección fija y, si no hay, el tamaño de la patente', async () => {
     await renderDialog(null)
 
-    expect(screen.getByText(/Sin línea: la dirección se infiere por el tamaño de la patente/)).toBeInTheDocument()
+    expect(screen.getByText(/Sin línea: se usa la dirección fija de la cámara y, si no tiene, se infiere por el tamaño de la patente/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Dibujar línea de dirección' })).toBeInTheDocument()
   })
 

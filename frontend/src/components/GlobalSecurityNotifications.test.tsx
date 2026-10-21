@@ -3,6 +3,7 @@ import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { AxiosError, AxiosHeaders, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
 import type { AnomalyHighlight } from '@/helpers/securityAlerts'
+import { useLocation } from 'react-router-dom'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { GlobalSecurityNotifications } from './GlobalSecurityNotifications'
 
@@ -48,6 +49,10 @@ function highlight(overrides: Partial<AnomalyHighlight> = {}): AnomalyHighlight 
     timestamp: new Date('2026-10-09T03:15:00.000Z'),
     ...overrides,
   }
+}
+
+function LocationProbe() {
+  return <span data-testid="location">{useLocation().pathname}</span>
 }
 
 function emitHighlight(value: AnomalyHighlight): void {
@@ -188,6 +193,21 @@ describe('GlobalSecurityNotifications: aviso y foto', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Entendido' }))
 
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+  it('"Ver detalle" cierra el aviso y lleva al detalle de la anomalía', async () => {
+    const user = userEvent.setup()
+    renderWithProviders(
+      <>
+        <GlobalSecurityNotifications />
+        <LocationProbe />
+      </>,
+    )
+    emitHighlight(highlight())
+
+    await user.click(await screen.findByRole('button', { name: 'Ver detalle' }))
+
+    expect(screen.getByTestId('location')).toHaveTextContent('/traceability/anomalies/anom-1')
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 })

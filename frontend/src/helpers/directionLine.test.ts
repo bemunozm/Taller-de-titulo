@@ -76,7 +76,7 @@ describe('helpers de la línea', () => {
   })
 
   it('describeDirectionLine resume la línea o su ausencia', () => {
-    expect(describeDirectionLine(null)).toMatch(/Sin línea: la dirección se infiere por el tamaño de la patente/)
+    expect(describeDirectionLine(null)).toMatch(/Sin línea: se usa la dirección fija de la cámara y, si no tiene, se infiere por el tamaño de la patente/)
     expect(describeDirectionLine(HORIZONTAL)).toBe('Línea de dirección definida — salida hacia la izquierda.')
     expect(describeDirectionLine({ ...HORIZONTAL, exitSide: 'right' })).toContain('salida hacia la derecha')
   })

@@ -26,6 +26,7 @@ import { motion, AnimatePresence } from 'motion/react'
 import {
   DEFAULT_VIDEO_ASPECT,
   EXIT_SIDE_LABELS,
+  describeDirectionLine,
   directionLineLength,
   flipExitSide,
   getExitArrow,
@@ -717,7 +718,7 @@ export function ZoneEditor({
                 </div>
                 <Field>
                   <Description className="!text-xs !text-zinc-400">
-                    Cuando un vehículo cruza esta línea, el sistema decide si entra o sale. Dibújala atravesando el
+                    Cuando un vehículo cruza esta línea, el sistema decide si entra o sale, y el cruce manda sobre la dirección fija de la cámara. Dibújala atravesando el
                     carril (dos clics) y deja la flecha apuntando hacia donde va el auto cuando sale; si apunta al
                     revés, usa "Invertir sentido".
                   </Description>
@@ -727,7 +728,7 @@ export function ZoneEditor({
                     ? `Línea definida: salida hacia ${EXIT_SIDE_LABELS[directionLine.exitSide]}.`
                     : lineStart
                       ? 'Marca el segundo punto de la línea (clic derecho cancela).'
-                      : 'Sin línea: la dirección se infiere por el tamaño de la patente.'}
+                      : describeDirectionLine(null)}
                 </p>
                 <div className="grid grid-cols-2 gap-2">
                   <Button

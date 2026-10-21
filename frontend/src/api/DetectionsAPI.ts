@@ -1,10 +1,12 @@
 import api from '@/lib/axios'
 import { isAxiosError } from 'axios'
 import { ApiError, toApiError } from '@/helpers/httpErrors'
+import { parseAnomalyEvent, type AnomalyEvent } from '@/types/anomaly'
 import { parseAttemptPassage, type AttemptPassage } from '@/types/passage'
 
 export { parseAttemptPassage, PASSAGE_DIRECTIONS, PASSAGE_DIRECTION_SOURCES } from '@/types/passage'
 export type { AttemptPassage, PassageSighting } from '@/types/passage'
+export type { AnomalyEvent } from '@/types/anomaly'
 
 /** Metadatos libres del worker LPR; solo se lee el snapshot. */
 export type PlateDetectionMeta = {
@@ -53,20 +55,6 @@ export type AccessAttempt = {
   passage?: AttemptPassage | null
 }
 
-// Entidad `AnomalyEvent` del backend: las columnas nullable llegan como `null`.
-export type AnomalyEvent = {
-  id: string
-  cameraId: string
-  anomalyType: string
-  confidence: number
-  snapshotJpegB64?: string | null
-  durationSeconds?: number | null
-  trackId?: number | null
-  suspicionLevel?: string | null
-  aiReasoning?: string | null
-  timestamp: string
-}
-
 export async function listPlateDetections(): Promise<PlateDetection[]> {
   try {
     const { data } = await api.get<PlateDetection[]>('/detections/plates')
@@ -108,22 +96,19 @@ export async function listAnomalies(): Promise<AnomalyEvent[]> {
   }
 }
 
-function isAnomalyEvent(value: unknown): value is AnomalyEvent {
-  return typeof value === 'object' && value !== null && typeof (value as { id?: unknown }).id === 'string'
-}
-
 /**
  * Una anomalía con su foto (`snapshotJpegB64`), acotada al condominio de la
  * sesión y con `detections.read` (P6). El aviso por WebSocket no trae la
- * imagen: se pide aquí por id.
+ * imagen: se pide aquí por id. También alimenta la vista de detalle.
  */
 export async function getAnomaly(id: string): Promise<AnomalyEvent> {
   try {
     const { data } = await api.get<unknown>(`/anomalies/${encodeURIComponent(id)}`)
-    if (!isAnomalyEvent(data)) {
+    const anomaly = parseAnomalyEvent(data)
+    if (!anomaly) {
       throw new ApiError('La anomalía llegó con un formato inesperado', null)
     }
-    return data
+    return anomaly
   } catch (error) {
     throw toApiError(error, 'No se pudo cargar la anomalía', {
       401: 'Tu sesión no permite ver la anomalía',

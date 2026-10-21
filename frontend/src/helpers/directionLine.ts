@@ -85,6 +85,6 @@ export function getExitArrow(line: DirectionLine, aspect: number = DEFAULT_VIDEO
 
 /** Resumen de la línea para el formulario LPR. */
 export function describeDirectionLine(line: DirectionLine | null | undefined): string {
-  if (!line) return 'Sin línea: la dirección se infiere por el tamaño de la patente.'
+  if (!line) return 'Sin línea: se usa la dirección fija de la cámara y, si no tiene, se infiere por el tamaño de la patente.'
   return `Línea de dirección definida — salida hacia ${EXIT_SIDE_LABELS[line.exitSide]}.`
 }

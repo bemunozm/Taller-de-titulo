@@ -390,3 +390,86 @@ describe('LprSettingsDialog: permisos', () => {
     expect(screen.getByRole('button', { name: 'Dibujar zona de detección' })).toBeInTheDocument()
   })
 })
+
+const DEFAULTS_WARNING =
+  'Con los valores por defecto esta cámara probablemente no lea patentes de autos en movimiento; usa los valores recomendados.'
+
+describe('LprSettingsDialog: valores recomendados para patentes', () => {
+  it('con la cámara sin configurar avisa que usa los defaults del worker', async () => {
+    await renderDialog(null)
+
+    expect(screen.getByText(DEFAULTS_WARNING)).toBeInTheDocument()
+  })
+
+  it('con resolución, FPS y recorte definidos no muestra el aviso', async () => {
+    await renderDialog(FULL_SETTINGS)
+
+    expect(screen.queryByText(DEFAULTS_WARNING)).not.toBeInTheDocument()
+  })
+
+  it('el botón completa el formulario sin guardar, conserva modo/dirección/zona y quita el aviso', async () => {
+    const { user } = await renderDialog({ action: 'register', direction: 'exit', zone: ZONE })
+
+    await user.click(screen.getByRole('button', { name: 'Usar valores recomendados para patentes' }))
+
+    await waitFor(() => expect(screen.queryByText(DEFAULTS_WARNING)).not.toBeInTheDocument())
+    expect(screen.getByLabelText('Resolución del detector')).toHaveValue('1920')
+    expect(screen.getByLabelText('FPS de muestreo')).toHaveValue(8)
+    expect(screen.getByLabelText('Ancho mínimo (px)')).toHaveValue(60)
+    expect(screen.getByLabelText('Ancho máximo (px)')).toHaveValue(250)
+    expect(screen.getByLabelText('Relación mínima (ancho/alto)')).toHaveValue(0.8)
+    expect(screen.getByLabelText('Relación máxima (ancho/alto)')).toHaveValue(6)
+    expect(screen.getByLabelText('Lecturas para confirmar')).toHaveValue(3)
+    expect(screen.getByLabelText('Modo')).toHaveValue('register')
+    expect(screen.getByLabelText('Dirección')).toHaveValue('exit')
+    expect(screen.getByText(/1 zona definida/)).toBeInTheDocument()
+    expect(cameraApi.updateCameraLprSettings).not.toHaveBeenCalled()
+  })
+
+  it('al guardar después, el PATCH lleva los valores recomendados y conserva el resto', async () => {
+    const { user } = await renderDialog({ action: 'register', direction: 'exit', zone: ZONE })
+
+    await user.click(screen.getByRole('button', { name: 'Usar valores recomendados para patentes' }))
+    await user.click(screen.getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(cameraApi.updateCameraLprSettings).toHaveBeenCalledTimes(1))
+    expect(lastSavedPayload()).toEqual({
+      action: 'register',
+      direction: 'exit',
+      zone: ZONE,
+      detectorImgsz: 1920,
+      sampleFps: 8,
+      confirmReads: 3,
+      crop: { minWidth: 60, maxWidth: 250, minRatio: 0.8, maxRatio: 6 },
+    })
+  })
+
+  it('explica que son los valores validados con la cámara del portón y requieren GPU', async () => {
+    await renderDialog(null)
+
+    expect(screen.getByText(/validados con la cámara del portón y requieren GPU/)).toBeInTheDocument()
+  })
+
+  it('sin permiso de edición no ofrece el botón', async () => {
+    await renderDialog(null, false)
+
+    expect(screen.queryByRole('button', { name: 'Usar valores recomendados para patentes' })).not.toBeInTheDocument()
+  })
+})
+
+describe('LprSettingsDialog: la línea manda sobre la dirección fija', () => {
+  it('la ayuda de Dirección explica que la línea manda y la dirección es respaldo', async () => {
+    await renderDialog(null)
+
+    expect(
+      screen.getByText(/Sentido por defecto de esta cámara\. Si dibujas una línea de dirección, la línea manda/),
+    ).toBeInTheDocument()
+  })
+
+  it('con línea, la sección explica que el cruce manda y la dirección fija es respaldo', async () => {
+    await renderDialog({ directionLine: { from: { x: 0.2, y: 0.7 }, to: { x: 0.85, y: 0.75 }, exitSide: 'left' } })
+
+    expect(screen.getByText(/el cruce manda: define si entra o sale/)).toBeInTheDocument()
+    expect(screen.getByText(/solo se usa cuando la línea no logra determinar el sentido/)).toBeInTheDocument()
+  })
+})

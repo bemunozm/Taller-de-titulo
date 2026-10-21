@@ -225,5 +225,60 @@ export function describeZone(zone: ReadonlyArray<ReadonlyArray<ZonePoint>>): str
   return zone.length === 1 ? '1 zona definida.' : `${zone.length} zonas definidas.`
 }
 
+/**
+ * Valores validados con la cámara del portón para leer patentes de autos en
+ * movimiento (requieren GPU). Se aplican al formulario como texto; no incluyen
+ * modo, dirección, zona ni línea de dirección.
+ */
+export const LPR_RECOMMENDED_PLATE_VALUES = {
+  detectorImgsz: 1920,
+  sampleFps: 8,
+  minWidth: 60,
+  maxWidth: 250,
+  minRatio: 0.8,
+  maxRatio: 6,
+  confirmReads: 3,
+} as const
+
+type RecommendedFormFields = Pick<
+  LprFormValues,
+  'detectorImgsz' | 'sampleFps' | 'minWidth' | 'maxWidth' | 'unlimitedMaxWidth' | 'minRatio' | 'maxRatio' | 'confirmReads'
+>
+
+/** Campos del formulario que cambia "Usar valores recomendados para patentes". */
+export function recommendedPlateFormValues(): RecommendedFormFields {
+  const recommended = LPR_RECOMMENDED_PLATE_VALUES
+  return {
+    detectorImgsz: String(recommended.detectorImgsz),
+    sampleFps: String(recommended.sampleFps),
+    minWidth: String(recommended.minWidth),
+    maxWidth: String(recommended.maxWidth),
+    unlimitedMaxWidth: false,
+    minRatio: String(recommended.minRatio),
+    maxRatio: String(recommended.maxRatio),
+    confirmReads: String(recommended.confirmReads),
+  }
+}
+
+type DefaultsCheckFields = Pick<
+  LprFormValues,
+  'detectorImgsz' | 'sampleFps' | 'minWidth' | 'maxWidth' | 'unlimitedMaxWidth' | 'minRatio' | 'maxRatio'
+>
+
+/**
+ * ¿La cámara cae en los defaults del worker (640 px, 1 fps, proporción >= 2)?
+ * Cierto si la resolución o los FPS están vacíos, o si no hay ningún recorte
+ * (ni anchos ni proporciones). Con eso no suele leer patentes en movimiento.
+ */
+export function usesWorkerDetectionDefaults(values: DefaultsCheckFields): boolean {
+  const noCrop =
+    values.minWidth.trim() === '' &&
+    values.maxWidth.trim() === '' &&
+    !values.unlimitedMaxWidth &&
+    values.minRatio.trim() === '' &&
+    values.maxRatio.trim() === ''
+  return values.detectorImgsz === '' || values.sampleFps.trim() === '' || noCrop
+}
+
 /** Clave de react-query de `GET /cameras/:id/lpr-settings`. */
 export const lprSettingsQueryKey = (cameraId: string) => ['camera-lpr-settings', cameraId] as const

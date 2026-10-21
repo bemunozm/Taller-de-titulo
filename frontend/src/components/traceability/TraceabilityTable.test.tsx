@@ -35,12 +35,20 @@ const ATTEMPTS: AccessAttempt[] = [
   makeAttempt('33333333-cccc', 'Denegado', 'CCCC33'),
 ]
 
+// Consultas por texto: `*ByRole('row', { name })` recalcula el nombre accesible de toda la
+// tabla en cada intento y, con la CPU saturada, superaba el timeout de 1 s de `findBy`.
+function rowOf(plate: string): HTMLElement {
+  const row = screen.getByText(plate).closest('tr')
+  if (!row) throw new Error(`No hay fila para ${plate}`)
+  return row
+}
+
 async function renderTable() {
   detectionsApi.listAccessAttempts.mockResolvedValue(ATTEMPTS)
   const user = userEvent.setup()
   renderWithProviders(<TraceabilityTable />)
   // Control positivo: los datos ya cargaron.
-  await screen.findByRole('row', { name: /BBBB22/ })
+  await screen.findByText('BBBB22', undefined, { timeout: 5_000 })
   return { user, decisionFilter: screen.getByRole('combobox', { name: 'Filtrar por decisión' }) }
 }
 
@@ -48,10 +56,10 @@ describe('TraceabilityTable: decisión Duplicado', () => {
   it('la fila Duplicado muestra su badge propio en tono neutro', async () => {
     await renderTable()
 
-    const duplicateBadge = within(screen.getByRole('row', { name: /BBBB22/ })).getByText('Duplicado')
+    const duplicateBadge = within(rowOf('BBBB22')).getByText('Duplicado')
     expect(duplicateBadge).toHaveClass('text-zinc-700')
 
-    const allowedBadge = within(screen.getByRole('row', { name: /AAAA11/ })).getByText('Permitido')
+    const allowedBadge = within(rowOf('AAAA11')).getByText('Permitido')
     expect(allowedBadge).toHaveClass('text-green-700')
   })
 
@@ -62,9 +70,9 @@ describe('TraceabilityTable: decisión Duplicado', () => {
 
     await user.selectOptions(decisionFilter, 'Duplicado')
 
-    expect(screen.getByRole('row', { name: /BBBB22/ })).toBeInTheDocument()
-    expect(screen.queryByRole('row', { name: /AAAA11/ })).not.toBeInTheDocument()
-    expect(screen.queryByRole('row', { name: /CCCC33/ })).not.toBeInTheDocument()
+    expect(rowOf('BBBB22')).toBeInTheDocument()
+    expect(screen.queryByText('AAAA11')).not.toBeInTheDocument()
+    expect(screen.queryByText('CCCC33')).not.toBeInTheDocument()
   })
 
   it('el filtro "Permitido" usa el valor real del backend (no "Aprovado")', async () => {
@@ -74,7 +82,7 @@ describe('TraceabilityTable: decisión Duplicado', () => {
 
     await user.selectOptions(decisionFilter, 'Permitido')
 
-    expect(screen.getByRole('row', { name: /AAAA11/ })).toBeInTheDocument()
-    expect(screen.queryByRole('row', { name: /BBBB22/ })).not.toBeInTheDocument()
+    expect(rowOf('AAAA11')).toBeInTheDocument()
+    expect(screen.queryByText('BBBB22')).not.toBeInTheDocument()
   })
 })
