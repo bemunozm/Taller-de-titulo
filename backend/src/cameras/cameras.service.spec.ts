@@ -3,6 +3,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import {
   BadRequestException,
   ForbiddenException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { DataSource, FindOperator, type Repository } from 'typeorm';
@@ -284,6 +285,88 @@ describe('CamerasService — aislamiento por condominio (P5.B)', () => {
     );
   });
 
+  describe('PATCH con sourceUrl nueva: relanza los workers (E10)', () => {
+    const OLD = 'rtsp://admin:secreto@10.0.0.1/a';
+    const NEW = 'rtsp://admin:secreto@10.0.0.1/a-hd';
+
+    it('LPR y Guardián activos: da de baja y registra de nuevo ambos con la URL nueva', async () => {
+      rows[0].enableLpr = true;
+      rows[0].enableGuardian = true;
+
+      await service.update(CAM_A, { sourceUrl: NEW });
+
+      expect(workerNotifier.unregisterCamera).toHaveBeenCalledWith(CAM_A);
+      expect(workerNotifier.unregisterCamera).toHaveBeenCalledWith(
+        `${CAM_A}_guardia`,
+      );
+      expect(workerNotifier.registerCamera).toHaveBeenCalledWith(
+        CAM_A,
+        NEW,
+        'cam-a',
+      );
+      expect(workerNotifier.registerCamera).toHaveBeenCalledWith(
+        `${CAM_A}_guardia`,
+        NEW,
+        'cam-a',
+        'guardia',
+      );
+      const unregisterOrder =
+        workerNotifier.unregisterCamera.mock.invocationCallOrder;
+      const registerOrder =
+        workerNotifier.registerCamera.mock.invocationCallOrder;
+      expect(unregisterOrder[0]).toBeLessThan(registerOrder[0]);
+      expect(unregisterOrder[1]).toBeLessThan(registerOrder[1]);
+    });
+
+    it('solo LPR activo: no toca el worker del Guardián', async () => {
+      rows[0].enableLpr = true;
+
+      await service.update(CAM_A, { sourceUrl: NEW });
+
+      expect(workerNotifier.unregisterCamera).toHaveBeenCalledTimes(2);
+      // El segundo unregister es la baja habitual del Guardián apagado (ya existía).
+      expect(workerNotifier.unregisterCamera).toHaveBeenLastCalledWith(
+        `${CAM_A}_guardia`,
+      );
+      expect(workerNotifier.registerCamera).toHaveBeenCalledTimes(1);
+    });
+
+    it('la misma URL (o sin sourceUrl) no relanza ningún worker', async () => {
+      rows[0].enableLpr = true;
+
+      await service.update(CAM_A, { sourceUrl: OLD });
+      await service.update(CAM_A, { location: 'Acceso norte' });
+
+      // Solo el register habitual; ninguna baja previa de la cámara LPR.
+      expect(workerNotifier.unregisterCamera).not.toHaveBeenCalledWith(CAM_A);
+      expect(workerNotifier.registerCamera).toHaveBeenCalledTimes(2);
+    });
+
+    it('sin LPR ni Guardián: no registra nada con la URL nueva', async () => {
+      await service.update(CAM_A, { sourceUrl: NEW });
+
+      expect(workerNotifier.registerCamera).not.toHaveBeenCalled();
+    });
+
+    it('si el manager falla, el PATCH igual guarda y el log no incluye la URL', async () => {
+      rows[0].enableLpr = true;
+      workerNotifier.unregisterCamera.mockRejectedValue(
+        new Error('manager caído'),
+      );
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+
+      await expect(
+        service.update(CAM_A, { sourceUrl: NEW }),
+      ).resolves.toBeDefined();
+
+      expect(repo.save).toHaveBeenCalled();
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('secreto');
+      warn.mockRestore();
+    });
+  });
+
   it('DELETE /cameras/:id de otro condominio -> 404 sin borrar', async () => {
     await expect(service.remove(CAM_B)).rejects.toThrow(NotFoundException);
     expect(repo.delete).not.toHaveBeenCalled();
@@ -372,6 +455,31 @@ describe('CamerasService — aislamiento por condominio (P5.B)', () => {
       expect(workerNotifier.registerCamera).not.toHaveBeenCalled();
       expect(workerNotifier.unregisterCamera).not.toHaveBeenCalled();
       expect(mediamtx.registerSource).not.toHaveBeenCalled();
+    });
+
+    it('directionLine: se guarda tal cual y el worker la lee en GET lpr-settings', async () => {
+      const directionLine = {
+        from: { x: 0.2, y: 0.7 },
+        to: { x: 0.85, y: 0.75 },
+        exitSide: 'left',
+      } as const;
+
+      await service.updateLprSettings(
+        CAM_A,
+        Object.assign(new UpdateLprSettingsDto(), {
+          action: 'register',
+          directionLine,
+        }),
+      );
+
+      const saved = (repo.save.mock.calls[0] as [Camera])[0];
+      expect(saved.lprSettings).toEqual({ action: 'register', directionLine });
+      await expect(
+        service.getLprSettingsForOrganization(CAM_A, ORG_A),
+      ).resolves.toMatchObject({
+        cameraId: CAM_A,
+        lprSettings: { action: 'register', directionLine },
+      });
     });
 
     it('updateLprSettings con {} resetea a null', async () => {

@@ -55,6 +55,13 @@ import {
 } from './access-decision';
 import { normalizeChileanPlate } from '../common/utils/chilean-format.util';
 import { isRegisterOnly } from '../cameras/lpr-settings';
+import { VehiclePassage } from './entities/vehicle-passage.entity';
+import { VehiclePassagesService } from './vehicle-passages.service';
+import {
+  methodForDirection,
+  readDirection,
+  verifyReadingSource,
+} from './vehicle-passage-direction';
 
 /** Usuario de la sesión que responde una detección pendiente. */
 export interface PendingDetectionResponder {
@@ -65,6 +72,11 @@ export interface PendingDetectionResponder {
 /** Motivo con el que escala una visita cuyo anfitrión ya no está activo. */
 const INACTIVE_HOST_REASON =
   'Anfitrión de la visita inactivo o fuera del condominio - requiere aprobación';
+
+/** `method` de un intento de solo registro cuando no se conoce la dirección. */
+const REGISTER_UNKNOWN_METHOD = 'Patente - Registro';
+/** `method` de un intento de acceso de residente cuando no se conoce la dirección. */
+const ACCESS_UNKNOWN_METHOD = 'Patente - Entrada';
 
 interface AccessOutcome {
   decision: AccessDecision;
@@ -96,6 +108,7 @@ export class DetectionsService {
     @Inject(forwardRef(() => VisitsService))
     private readonly visitsService: VisitsService,
     configService: ConfigService,
+    private readonly passages: VehiclePassagesService,
   ) {
     this.exitCooldownMs =
       parseVisitExitCooldownMinutes(
@@ -178,32 +191,59 @@ export class DetectionsService {
    * notificación de acceso y sin `sendDoorOpen`. Es la única salida de
    * `createDetection` para estas cámaras y se evalúa antes de cualquier efecto.
    */
-  private async registerOnly(saved: PlateDetection) {
-    const direction = saved.meta?.direction;
+  private async registerOnly(saved: PlateDetection, passage: VehiclePassage) {
     const att = this.attemptsRepo.create({
       detection: saved,
       decision: REGISTERED_ACCESS_DECISION,
       reason: 'Cámara en modo solo registro: no se evalúa acceso',
-      method:
-        direction === 'exit'
-          ? 'Patente - Salida'
-          : direction === 'entry'
-            ? 'Patente - Entrada'
-            : 'Patente - Registro',
+      // La dirección es la de la PASADA (la mejor fuente de todas las cámaras).
+      method: methodForDirection(passage.direction, REGISTER_UNKNOWN_METHOD),
       residente: null,
       // No es una decisión de acceso: sin tiempo de respuesta, no cuenta en las
       // métricas de SLA del dashboard.
       responseTimeMs: null,
       organizationId: saved.organizationId,
     });
-    const savedAtt = await this.attemptsRepo.save(att);
+    const result = await this.passages.saveAttempt(att, passage, {
+      decidesAccess: false,
+      followsDirection: true,
+      unknownMethod: REGISTER_UNKNOWN_METHOD,
+    });
+    if (!result.written) {
+      return this.asEvidence(saved, result.attempt, passage);
+    }
+    const savedAtt = result.attempt;
     this.logger.log(
       `Detección ${saved.id} (${maskPlate(saved.plate)}) registrada en cámara de solo registro`,
     );
     return {
       detection: saved,
       attempt: savedAtt,
-      isExit: direction === 'exit',
+      isExit: passage.direction === 'exit',
+      passage: this.passages.summarize(passage),
+      deduplicated: false,
+    };
+  }
+
+  /**
+   * El llamador perdió el liderazgo de la pasada (otra lectura la tomó) o la
+   * pasada ya tiene una decisión de acceso: su lectura es evidencia. Responde
+   * como tal, SIN abrir, notificar ni tocar visitas o conserje.
+   */
+  private asEvidence(
+    detection: PlateDetection,
+    attempt: AccessAttempt | null,
+    passage: VehiclePassage,
+  ) {
+    this.logger.warn(
+      `Detección ${detection.id} (${maskPlate(detection.plate)}): la pasada ${passage.id} ya no la lidera esta petición o ya tiene decisión; queda como evidencia`,
+    );
+    return {
+      detection,
+      attempt,
+      isExit: passage.direction === 'exit',
+      passage: this.passages.summarize(passage),
+      deduplicated: true,
     };
   }
 
@@ -224,14 +264,96 @@ export class DetectionsService {
     // igual al de la API key.
     ent.organizationId = camera.organizationId;
 
-    // `create()` solo instancia la entidad; `save()` persiste en la BD.
-    const saved = await this.detectionsRepo.save(ent);
+    // Pasadas (E6): ANTES de cualquier efecto, bajo el advisory lock de
+    // (condominio, patente), se guarda la detección y se decide si es una
+    // pasada nueva (esta petición decide el acceso) o evidencia de una ya
+    // abierta (no crea intento, no notifica, no abre, no toca visitas).
+    // La fuente de la dirección que declara el worker se valida contra la
+    // configuración de la cámara (ver `verifyReadingSource`). Una cámara de
+    // solo registro no decide el acceso: otra de acceso puede promover su
+    // pasada (ver `VehiclePassagesService.claim`).
+    const reading = verifyReadingSource(
+      readDirection(dto.meta?.direction, dto.meta?.direction_source),
+      camera.lprSettings,
+    );
+    if (
+      reading.source !== dto.meta?.direction_source &&
+      dto.meta?.direction_source !== undefined &&
+      dto.meta.direction !== 'unknown'
+    ) {
+      this.logger.debug(
+        `direction_source '${dto.meta.direction_source}' no respaldada por la configuración de la cámara ${camera.id}: se usa '${reading.source}'`,
+      );
+    }
+    // La detección guarda la fuente EFECTIVA (la verificada): es la que ve la
+    // trazabilidad. Lo declarado por el worker se conserva aparte si difiere.
+    if (ent.meta && dto.meta?.direction !== undefined) {
+      const declared = dto.meta.direction_source;
+      ent.meta = {
+        ...ent.meta,
+        direction: reading.direction,
+        direction_source: reading.source,
+        ...(declared !== undefined && declared !== reading.source
+          ? { direction_source_declared: declared }
+          : {}),
+      };
+    }
+    const claim = await this.passages.claim(ent, reading, {
+      decidesAccess: !isRegisterOnly(camera.lprSettings),
+    });
+    if (claim.kind === 'sighting') {
+      this.logger.log(
+        `Detección ${claim.detection.id} (${maskPlate(dto.plate)}) agregada como evidencia de la pasada ${claim.passage.id}`,
+      );
+      return {
+        detection: claim.detection,
+        attempt: claim.attempt,
+        passage: this.passages.summarize(claim.passage),
+        deduplicated: true,
+      };
+    }
 
+    try {
+      return await this.decideAccess(
+        claim.detection,
+        claim.passage,
+        dto,
+        camera,
+        keyOrganizationId,
+      );
+    } catch (error) {
+      // Si falló antes de guardar el intento, la pasada no puede quedar
+      // "ocupada" sin intento: se descarta para que la próxima lectura decida.
+      // Una promoción fallida solo vuelve a "solo registro" (su intento
+      // Registrado se conserva).
+      if (claim.promoted) {
+        await this.passages.demote(claim.passage);
+      } else {
+        await this.passages.release(claim.passage);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Flujo de decisión del líder de la pasada (antes el cuerpo de
+   * `createDetection` tras guardar la detección). Corre FUERA del lock.
+   */
+  private async decideAccess(
+    saved: PlateDetection,
+    passage: VehiclePassage,
+    dto: CreatePlateDetectionDto,
+    camera: Camera,
+    keyOrganizationId: string,
+  ) {
     // D8: cámara de solo registro -> salida temprana y fail-closed (ver
     // `isRegisterOnly`), antes de cualquier búsqueda o efecto de acceso.
     if (isRegisterOnly(camera.lprSettings)) {
-      return this.registerOnly(saved);
+      return this.registerOnly(saved, passage);
     }
+
+    const pending = (reason: string) =>
+      this.createPendingDetectionForConcierge(saved, reason, passage);
 
     // FIX aislamiento cross-tenant en la apertura física autónoma del portón
     // (rama feature/cierre-fases-1-2, hallazgo reportado): hasta acá, la
@@ -271,6 +393,9 @@ export class DetectionsService {
     // 4. Denegado en cualquier otro caso
 
     let outcome: AccessOutcome;
+    // `true` solo si el `method` del intento sale de la dirección de la pasada
+    // (residentes). Las visitas fijan su método por estado + espera.
+    let followsDirection = false;
 
     // 1. Verificar si es un vehículo registrado (scopeado al condominio de la cámara)
     const vehicle = await this.vehiclesService.findByPlate(dto.plate, {
@@ -287,18 +412,20 @@ export class DetectionsService {
         // propietario sigue siendo miembro ACTIVO del condominio de la
         // cámara. Sin propietario, propietario deshabilitado o que dejó el
         // condominio -> lo decide el conserje (el portón no abre solo).
-        return await this.createPendingDetectionForConcierge(
-          saved,
+        return await pending(
           'Vehículo de residente sin propietario activo en el condominio - requiere aprobación',
         );
       }
       if (accessRule === 'allow') {
         // Vehículo con nivel de acceso de residente y propietario activo
+        // Los residentes no tienen estado dentro/fuera: la dirección es solo
+        // informativa y sale de la pasada.
+        followsDirection = true;
         outcome = {
           decision: 'Permitido',
           reason: 'Vehículo residente registrado y activo',
           residente: vehicle.owner,
-          isExit: false,
+          isExit: passage.direction === 'exit',
         };
       } else if (accessRule === 'requires-visit') {
         // Vehículo de visitante, verificar si tiene visita válida
@@ -325,10 +452,7 @@ export class DetectionsService {
               cameraOrganizationId,
             ))
           ) {
-            return await this.createPendingDetectionForConcierge(
-              saved,
-              INACTIVE_HOST_REASON,
-            );
+            return await pending(INACTIVE_HOST_REASON);
           }
           if (visitValidation.valid && visitValidation.visit) {
             outcome = await this.applyVisitPassage(
@@ -357,8 +481,7 @@ export class DetectionsService {
       } else {
         // D4: un vehículo activo de servicio o SIN nivel de acceso no se
         // permite por defecto (fail-closed): lo decide el conserje.
-        return await this.createPendingDetectionForConcierge(
-          saved,
+        return await pending(
           vehicle.accessLevel === VehicleAccessLevel.SERVICE
             ? 'Vehículo de servicio - requiere aprobación'
             : 'Vehículo registrado sin nivel de acceso - requiere aprobación',
@@ -385,10 +508,7 @@ export class DetectionsService {
             cameraOrganizationId,
           ))
         ) {
-          return await this.createPendingDetectionForConcierge(
-            saved,
-            INACTIVE_HOST_REASON,
-          );
+          return await pending(INACTIVE_HOST_REASON);
         }
         if (visitValidation.valid && visitValidation.visit) {
           outcome = await this.applyVisitPassage(
@@ -397,8 +517,7 @@ export class DetectionsService {
           );
         } else {
           // No hay visita válida, enviar a aprobación del conserje
-          return await this.createPendingDetectionForConcierge(
-            saved,
+          return await pending(
             visitValidation.message ||
               'Vehículo no registrado y sin visita autorizada',
           );
@@ -408,17 +527,11 @@ export class DetectionsService {
           `Error al validar visita para patente ${maskPlate(dto.plate)}: ${errorMessage(error)}`,
         );
         // En caso de error, enviar a aprobación del conserje
-        return await this.createPendingDetectionForConcierge(
-          saved,
-          'Error al validar - requiere aprobación manual',
-        );
+        return await pending('Error al validar - requiere aprobación manual');
       }
     } else {
       // Vehículo existe pero está inactivo, enviar a aprobación del conserje
-      return await this.createPendingDetectionForConcierge(
-        saved,
-        'Vehículo inactivo - requiere aprobación',
-      );
+      return await pending('Vehículo inactivo - requiere aprobación');
     }
 
     const { decision, reason, residente, isExit } = outcome;
@@ -433,13 +546,26 @@ export class DetectionsService {
       detection: saved,
       decision,
       reason,
-      method: isExit ? 'Patente - Salida' : 'Patente - Entrada',
+      method: followsDirection
+        ? methodForDirection(passage.direction, ACCESS_UNKNOWN_METHOD)
+        : isExit
+          ? 'Patente - Salida'
+          : 'Patente - Entrada',
       residente,
       responseTimeMs, // Guardar métrica de tiempo de respuesta
       organizationId: saved.organizationId, // Tarea #19: hereda de la detección
     });
 
-    const savedAtt = await this.attemptsRepo.save(att);
+    const result = await this.passages.saveAttempt(att, passage, {
+      decidesAccess: true,
+      followsDirection,
+      unknownMethod: ACCESS_UNKNOWN_METHOD,
+    });
+    // Solo quien ESCRIBIÓ la decisión notifica y abre el portón.
+    if (!result.written) {
+      return this.asEvidence(saved, result.attempt, passage);
+    }
+    const savedAtt = result.attempt;
 
     // Log de rendimiento si el tiempo supera el umbral de 5 segundos
     if (responseTimeMs > 5000) {
@@ -481,7 +607,13 @@ export class DetectionsService {
       );
     }
 
-    return { detection: saved, attempt: savedAtt, isExit };
+    return {
+      detection: saved,
+      attempt: savedAtt,
+      isExit,
+      passage: this.passages.summarize(passage),
+      deduplicated: false,
+    };
   }
 
   /**
@@ -782,6 +914,7 @@ export class DetectionsService {
     limit: number,
     tenantScope: TenantContext,
     familyScope: FamilyScope | null = null,
+    options: { withPassages?: boolean } = {},
   ) {
     const query = this.attemptsRepo
       .createQueryBuilder('attempt')
@@ -797,7 +930,15 @@ export class DetectionsService {
       return [];
     }
 
-    return query.getMany();
+    const attempts = await query.getMany();
+    // Sin pasadas (p. ej. la tool del agente, que solo lee la decisión): se
+    // evitan las dos consultas extra y `passage` va en `null`.
+    if (options.withPassages === false) {
+      return attempts.map((attempt) => ({ ...attempt, passage: null }));
+    }
+    // Cada intento expone su pasada (dirección, fuente y últimas lecturas de
+    // todas las cámaras); `passage: null` si es anterior a las pasadas.
+    return this.passages.attachPassages(attempts);
   }
 
   /**
@@ -904,6 +1045,7 @@ export class DetectionsService {
   private async createPendingDetectionForConcierge(
     detection: PlateDetection,
     reason: string,
+    passage: VehiclePassage,
   ) {
     // Fase 4 · P7.L: sin `reason` (puede traer el nombre del visitante) y con
     // la patente parcial.
@@ -932,7 +1074,16 @@ export class DetectionsService {
       organizationId: detection.organizationId, // Tarea #19: hereda de la detección
     });
 
-    const savedAttempt = await this.attemptsRepo.save(attempt);
+    // El `method` de un pendiente no depende de la dirección.
+    const result = await this.passages.saveAttempt(attempt, passage, {
+      decidesAccess: true,
+      followsDirection: false,
+      unknownMethod: 'Patente - Requiere Aprobación',
+    });
+    if (!result.written) {
+      return this.asEvidence(detection, result.attempt, passage);
+    }
+    const savedAttempt = result.attempt;
 
     // Log de rendimiento si el tiempo supera el umbral de 5 segundos
     if (responseTimeMs > 5000) {
@@ -980,6 +1131,8 @@ export class DetectionsService {
       detection,
       attempt: savedAttempt,
       requiresApproval: true,
+      passage: this.passages.summarize(passage),
+      deduplicated: false,
     };
   }
 

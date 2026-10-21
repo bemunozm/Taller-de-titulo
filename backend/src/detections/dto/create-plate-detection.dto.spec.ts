@@ -71,3 +71,67 @@ describe('CreatePlateDetectionDto (meta.direction / meta.track)', () => {
     );
   });
 });
+
+describe('CreatePlateDetectionDto (meta.direction_source / track.vehicle_id)', () => {
+  it.each(['camera', 'line', 'motion', 'width', 'none'])(
+    'acepta direction_source=%s',
+    async (source) => {
+      const dto = await validate({
+        ...BASE,
+        meta: { direction: 'entry', direction_source: source },
+      });
+
+      expect(dto.meta?.direction_source).toBe(source);
+    },
+  );
+
+  it('direction_source es opcional (workers anteriores)', async () => {
+    await expect(
+      validate({ ...BASE, meta: { direction: 'entry' } }),
+    ).resolves.toBeDefined();
+  });
+
+  it.each([['gps'], [''], [1]])(
+    'rechaza direction_source=%p',
+    async (source) => {
+      await expect(
+        validate({ ...BASE, meta: { direction_source: source } }),
+      ).rejects.toThrow(BadRequestException);
+    },
+  );
+
+  it('acepta track.vehicle_id entero >= 0 y es opcional', async () => {
+    const dto = await validate({
+      ...BASE,
+      meta: { track: { ...TRACK, vehicle_id: 7 } },
+    });
+
+    expect(dto.meta?.track?.vehicle_id).toBe(7);
+    await expect(
+      validate({ ...BASE, meta: { track: { ...TRACK, vehicle_id: 0 } } }),
+    ).resolves.toBeDefined();
+  });
+
+  it.each([
+    ['negativo', -1],
+    ['decimal', 1.5],
+    ['sobre 2^31-1', 2147483648],
+    ['texto', '7'],
+  ])('rechaza track.vehicle_id %s', async (_name, vehicleId) => {
+    await expect(
+      validate({
+        ...BASE,
+        meta: { track: { ...TRACK, vehicle_id: vehicleId } },
+      }),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('track sigue rechazando campos extra', async () => {
+    await expect(
+      validate({
+        ...BASE,
+        meta: { track: { ...TRACK, vehicle_id: 1, extra: 1 } },
+      }),
+    ).rejects.toThrow(BadRequestException);
+  });
+});

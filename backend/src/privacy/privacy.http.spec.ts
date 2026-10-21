@@ -118,6 +118,7 @@ describe('POST /privacy/erasure (Fase 4 · P7.R)', () => {
       anonymizeDetections: jest
         .fn()
         .mockResolvedValue({ detections: 0, accessAttempts: 0 }),
+      anonymizePassages: jest.fn().mockResolvedValue(0),
       findVisitorVehicles: jest.fn().mockResolvedValue([]),
       deleteVisitorVehicles: jest.fn().mockResolvedValue(0),
       deleteNotifications: jest.fn().mockResolvedValue(2),

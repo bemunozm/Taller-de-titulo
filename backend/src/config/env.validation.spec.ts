@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import {
+  DEFAULT_LPR_PASSAGE_WINDOW_SECONDS,
   DEFAULT_OPENAI_API_BASE_URL,
   DEFAULT_VISIT_APPROVAL_TTL_MINUTES,
   DEFAULT_VISIT_CONCIERGE_VALIDITY_HOURS,
@@ -9,6 +10,9 @@ import {
   LOG_LEVEL_VALUES,
   normalizeIp,
   parseBooleanFlag,
+  parseLprPassageOrphanSeconds,
+  parseLprPassageReverseMinSeconds,
+  parseLprPassageWindowSeconds,
   parseOpenAiApiBaseUrl,
   parseRetentionDays,
   parseMediamtxAuthAllowedIps,
@@ -581,6 +585,63 @@ describe('VISIT_EXIT_COOLDOWN_MINUTES (Fase 4 · P3)', () => {
       );
     },
   );
+});
+
+describe('LPR_PASSAGE_WINDOW_SECONDS', () => {
+  it.each(['1', '60', ' 90 ', '600', '', '   '])(
+    'acepta LPR_PASSAGE_WINDOW_SECONDS=%p',
+    (value) => {
+      expect(() =>
+        validateEnv(validEnv({ LPR_PASSAGE_WINDOW_SECONDS: value })),
+      ).not.toThrow();
+    },
+  );
+
+  it.each(['0', '601', '-5', '1.5', 'sesenta', '60s'])(
+    'rechaza LPR_PASSAGE_WINDOW_SECONDS=%p y nombra la variable',
+    (value) => {
+      expect(() =>
+        validateEnv(validEnv({ LPR_PASSAGE_WINDOW_SECONDS: value })),
+      ).toThrow(
+        /LPR_PASSAGE_WINDOW_SECONDS: debe ser un entero de segundos entre 1 y 600/,
+      );
+    },
+  );
+
+  it('parseLprPassageWindowSeconds: default 60, valor válido y fail-closed', () => {
+    expect(DEFAULT_LPR_PASSAGE_WINDOW_SECONDS).toBe(60);
+    expect(parseLprPassageWindowSeconds(undefined)).toBe(60);
+    expect(parseLprPassageWindowSeconds('  ')).toBe(60);
+    expect(parseLprPassageWindowSeconds(' 45 ')).toBe(45);
+    expect(() => parseLprPassageWindowSeconds('601')).toThrow(
+      /LPR_PASSAGE_WINDOW_SECONDS/,
+    );
+  });
+});
+
+describe.each([
+  ['LPR_PASSAGE_REVERSE_MIN_SECONDS', parseLprPassageReverseMinSeconds, 15],
+  ['LPR_PASSAGE_ORPHAN_SECONDS', parseLprPassageOrphanSeconds, 30],
+] as const)('%s', (name, parse, fallback) => {
+  it.each(['1', '45', ' 90 ', '600', '', '   '])('acepta %p', (value) => {
+    expect(() => validateEnv(validEnv({ [name]: value }))).not.toThrow();
+  });
+
+  it.each(['0', '601', '-5', '1.5', 'diez', '15s'])(
+    'rechaza %p y nombra la variable',
+    (value) => {
+      expect(() => validateEnv(validEnv({ [name]: value }))).toThrow(
+        new RegExp(`${name}: debe ser un entero de segundos entre 1 y 600`),
+      );
+    },
+  );
+
+  it('parse: default, valor válido y fail-closed', () => {
+    expect(parse(undefined)).toBe(fallback);
+    expect(parse('  ')).toBe(fallback);
+    expect(parse(' 45 ')).toBe(45);
+    expect(() => parse('601')).toThrow(new RegExp(name));
+  });
 });
 
 describe('VISIT_CONCIERGE_VALIDITY_HOURS (Fase 4 · P3, QA N1)', () => {

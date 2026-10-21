@@ -130,14 +130,18 @@ describe('ErasureRepository — SQL (Fase 4 · P7.R)', () => {
       erasable.tx.findDetections(BY_PLATE, 'erasable', 501),
     ).resolves.toEqual([{ id: 'd1', fullFramePath: '/f.jpg' }]);
     expect(erasable.calls[0].sql).toContain(
-      `AND NOT EXISTS (SELECT 1 FROM "access_attempts" a WHERE a."detectionId" = d."id" AND a."decision" = 'Pendiente')`,
+      `AND NOT (EXISTS (SELECT 1 FROM "access_attempts" a WHERE a."detectionId" = d."id" AND a."decision" = 'Pendiente')`,
+    );
+    // Las lecturas de otras cámaras de una pasada pendiente tampoco se suprimen.
+    expect(erasable.calls[0].sql).toContain(
+      `ap."passageId" = d."passageId" AND ap."decision" = 'Pendiente'`,
     );
     expect(erasable.calls[0].params).toEqual([ORG_A, 'BBCD12', 501]);
 
     const kept = recorder([]);
     await kept.tx.findDetections(BY_PLATE, 'kept', 500);
     expect(kept.calls[0].sql).toContain(
-      `AND EXISTS (SELECT 1 FROM "access_attempts" a`,
+      `AND (EXISTS (SELECT 1 FROM "access_attempts" a`,
     );
 
     const byRut = recorder([]);
@@ -158,7 +162,37 @@ describe('ErasureRepository — SQL (Fase 4 · P7.R)', () => {
     expect(sql).toContain('"plate_raw" = NULL');
     expect(sql).toContain(`"meta" - 'snapshot_jpeg_b64'`);
     expect(sql).toContain('SET "reason" = NULL, "residente_id" = NULL');
-    expect(params).toEqual([['d1', 'd2'], ['d1'], MASKED_PLATE]);
+    // La patente de la pasada (vehicle_passages) también se enmascara.
+    expect(sql).toContain('UPDATE "vehicle_passages" p SET "plate" = $3');
+    expect(sql).toContain('ap."passageId" = d."passageId"');
+    // 0 = sin excepción de ventana: la supresión enmascara la pasada siempre.
+    expect(params).toEqual([['d1', 'd2'], ['d1'], MASKED_PLATE, 0]);
+    expect(sql).toContain('$4::int = 0 OR');
+    // Una pasada dentro de su ventana deslizante no se enmascara.
+    expect(sql).toContain(
+      'p."lastSeenAt" < now() - make_interval(secs => $4::int)',
+    );
+  });
+
+  it('pasadas: enmascara las de esa patente en el condominio, sin ventana, salvo las pendientes', async () => {
+    const { calls, tx } = recorder([{ affected: 2 }]);
+
+    await expect(tx.anonymizePassages(BY_PLATE)).resolves.toBe(2);
+
+    const [{ sql, params }] = calls;
+    expect(sql).toContain('UPDATE "vehicle_passages" p SET "plate" = $3');
+    expect(sql).toContain('p."organizationId" = $1');
+    expect(sql).toContain('= $2');
+    expect(sql).not.toContain('lastSeenAt');
+    expect(sql).toContain(`a."decision" = 'Pendiente'`);
+    expect(params).toEqual([ORG_A, 'BBCD12', MASKED_PLATE]);
+  });
+
+  it('pasadas: una solicitud por RUT no toca nada', async () => {
+    const { calls, tx } = recorder([]);
+
+    await expect(tx.anonymizePassages(BY_RUT)).resolves.toBe(0);
+    expect(calls).toHaveLength(0);
   });
 
   it('vehículos de visita: huérfanos (borrables) o en uso (omitidos), por patente y condominio', async () => {

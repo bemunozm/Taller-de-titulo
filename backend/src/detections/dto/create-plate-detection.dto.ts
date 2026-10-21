@@ -2,8 +2,15 @@ import { IsString, IsOptional, IsNumber, IsArray, IsIn, IsInt, IsObject, Max, Ma
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 
-export const PLATE_DIRECTIONS = ['entry', 'exit', 'unknown'] as const;
-export type PlateDirection = (typeof PLATE_DIRECTIONS)[number];
+import {
+  PASSAGE_DIRECTION_SOURCES,
+  PASSAGE_DIRECTIONS,
+  type PassageDirection,
+  type PassageDirectionSource,
+} from '../vehicle-passage-direction';
+
+export const PLATE_DIRECTIONS = PASSAGE_DIRECTIONS;
+export type PlateDirection = PassageDirection;
 
 /** Resumen del seguimiento + voto que confirmó la lectura (worker LPR). */
 export class MetaTrackDto {
@@ -30,6 +37,13 @@ export class MetaTrackDto {
   @Max(1)
   @ApiProperty({ description: 'Fracción de votos del texto ganador (0-1)', example: 0.8 })
   winner_share: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(2147483647)
+  @ApiPropertyOptional({ description: 'Id del track del vehículo (ByteTrack) en el worker', example: 7 })
+  vehicle_id?: number;
 }
 
 class MetaPlateDto {
@@ -69,6 +83,14 @@ class MetaPlateDto {
   @IsIn(PLATE_DIRECTIONS)
   @ApiPropertyOptional({ description: 'Sentido inferido por el worker', enum: PLATE_DIRECTIONS })
   direction?: PlateDirection;
+
+  @IsOptional()
+  @IsIn(PASSAGE_DIRECTION_SOURCES)
+  @ApiPropertyOptional({
+    description: 'De dónde salió la dirección (prioridad: camera > line > motion > width > none)',
+    enum: PASSAGE_DIRECTION_SOURCES,
+  })
+  direction_source?: PassageDirectionSource;
 
   @IsOptional()
   @IsObject()

@@ -526,8 +526,16 @@ export class CamerasService {
       // notify worker manager about enableLpr changes
       try {
         if (this.workerNotifier) {
+          // E10: el manager responde 'already_running' a un register de una
+          // cámara viva y el worker seguiría leyendo la URL vieja; si la URL
+          // cambió, se da de baja el worker antes de registrarlo de nuevo.
+          const sourceChanged =
+            Boolean(data.sourceUrl) && oldDecrypted !== data.sourceUrl;
           if (saved.enableLpr) {
             const decrypted = this.decryptSourceOf(saved);
+            if (sourceChanged) {
+              await this.workerNotifier.unregisterCamera(saved.id);
+            }
             await this.workerNotifier.registerCamera(
               saved.id,
               decrypted || '',
@@ -540,6 +548,9 @@ export class CamerasService {
           // Notificar sobre cambios en Guardián Visual
           if (saved.enableGuardian) {
             const decrypted = this.decryptSourceOf(saved);
+            if (sourceChanged) {
+              await this.workerNotifier.unregisterCamera(`${saved.id}_guardia`);
+            }
             await this.workerNotifier.registerCamera(
               `${saved.id}_guardia`,
               decrypted || '',

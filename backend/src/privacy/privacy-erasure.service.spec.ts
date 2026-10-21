@@ -89,6 +89,7 @@ function fakeTransaction(matches: Matches) {
         accessAttempts: detectionIds.length,
       }),
     ),
+    anonymizePassages: jest.fn().mockResolvedValue(0),
     findVisitorVehicles: jest.fn(
       (_request: SubjectErasureRequest, scope: MatchScope, limit: number) =>
         take(matches.vehicles[scope], limit),

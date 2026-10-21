@@ -1,6 +1,7 @@
 import { ConsultarAccesosRecientesTool } from './consultar-accesos-recientes.tool';
 import { DetectionsService } from '../../detections/detections.service';
 import type { AccessAttempt } from '../../detections/entities/access-attempt.entity';
+import type { AttemptWithPassage } from '../../detections/vehicle-passages.service';
 import type { PlateDetection } from '../../detections/entities/plate-detection.entity';
 import type { User } from '../../users/entities/user.entity';
 import type { AuthorizedContext } from '../types/authorized-context.type';
@@ -35,7 +36,9 @@ describe('ConsultarAccesosRecientesTool', () => {
     };
   }
 
-  function makeAttempt(overrides: Partial<AccessAttempt> = {}): AccessAttempt {
+  function makeAttempt(
+    overrides: Partial<AccessAttempt> = {},
+  ): AttemptWithPassage {
     return {
       id: 'attempt-1',
       decision: 'Permitido',
@@ -43,8 +46,9 @@ describe('ConsultarAccesosRecientesTool', () => {
       createdAt: new Date('2026-07-12T10:00:00Z'),
       detection: { plate: 'ABCD12' } as unknown as PlateDetection,
       residente: { name: 'Juan Pérez' } as unknown as User,
+      passage: null,
       ...overrides,
-    } as AccessAttempt;
+    } as unknown as AttemptWithPassage;
   }
 
   beforeEach(() => {
@@ -60,19 +64,23 @@ describe('ConsultarAccesosRecientesTool', () => {
       {},
     );
 
-    expect(detectionsService.listAttempts).toHaveBeenCalledWith(10, {
-      organizationId: 'condo-A',
-      isSuperAdmin: false,
-    });
+    expect(detectionsService.listAttempts).toHaveBeenCalledWith(
+      10,
+      { organizationId: 'condo-A', isSuperAdmin: false },
+      null,
+      { withPassages: false },
+    );
   });
 
   it('respeta el límite explícito del input', async () => {
     await tool.execute(makeCtx(), { limite: 5 });
 
-    expect(detectionsService.listAttempts).toHaveBeenCalledWith(5, {
-      organizationId: 'condo-A',
-      isSuperAdmin: false,
-    });
+    expect(detectionsService.listAttempts).toHaveBeenCalledWith(
+      5,
+      { organizationId: 'condo-A', isSuperAdmin: false },
+      null,
+      { withPassages: false },
+    );
   });
 
   it('mapea los AccessAttempt a la forma de salida esperada', async () => {
@@ -109,9 +117,11 @@ describe('ConsultarAccesosRecientesTool', () => {
       {},
     );
 
-    expect(detectionsService.listAttempts).toHaveBeenCalledWith(10, {
-      organizationId: 'condo-A',
-      isSuperAdmin: true,
-    });
+    expect(detectionsService.listAttempts).toHaveBeenCalledWith(
+      10,
+      { organizationId: 'condo-A', isSuperAdmin: true },
+      null,
+      { withPassages: false },
+    );
   });
 });

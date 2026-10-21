@@ -263,3 +263,77 @@ describe('UpdateLprSettingsDto', () => {
     });
   });
 });
+
+describe('UpdateLprSettingsDto.directionLine', () => {
+  const LINE = {
+    from: { x: 0.2, y: 0.7 },
+    to: { x: 0.85, y: 0.75 },
+    exitSide: 'left',
+  };
+
+  it('acepta una línea válida y la persiste sin cambios', async () => {
+    const dto = await validate({ action: 'register', directionLine: LINE });
+
+    expect(toStoredLprSettings(dto)).toEqual({
+      action: 'register',
+      directionLine: LINE,
+    });
+  });
+
+  it('acepta coordenadas en los bordes exactos (0 y 1)', async () => {
+    const edge = {
+      from: { x: 0, y: 0 },
+      to: { x: 1, y: 1 },
+      exitSide: 'right',
+    };
+
+    await expect(validate({ directionLine: edge })).resolves.toBeDefined();
+  });
+
+  it('NO recorta una coordenada fuera de rango: la rechaza', async () => {
+    const message = await messagesFor({
+      directionLine: { ...LINE, from: { x: 1.05, y: 0.5 } },
+    });
+
+    expect(message).toMatch(/x must not be greater than 1/);
+  });
+
+  it('rechaza una línea más corta que 0.05', async () => {
+    const message = await messagesFor({
+      directionLine: {
+        from: { x: 0.5, y: 0.5 },
+        to: { x: 0.52, y: 0.51 },
+        exitSide: 'left',
+      },
+    });
+
+    expect(message).toMatch(/al menos 0\.05/);
+  });
+
+  it('acepta una línea de exactamente 0.05', async () => {
+    await expect(
+      validate({
+        directionLine: {
+          from: { x: 0.5, y: 0.5 },
+          to: { x: 0.55, y: 0.5 },
+          exitSide: 'left',
+        },
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it.each([
+    ['sin to', { from: LINE.from, exitSide: 'left' }],
+    ['sin from', { to: LINE.to, exitSide: 'left' }],
+    ['sin exitSide', { from: LINE.from, to: LINE.to }],
+    ['exitSide desconocido', { ...LINE, exitSide: 'up' }],
+    ['propiedad extra', { ...LINE, foo: 1 }],
+    ['punto con propiedad extra', { ...LINE, from: { x: 0.1, y: 0.1, z: 1 } }],
+    ['null', null],
+    ['no es un objeto', 'x'],
+  ])('rechaza %s', async (_name, directionLine) => {
+    await expect(validate({ directionLine })).rejects.toThrow(
+      BadRequestException,
+    );
+  });
+});

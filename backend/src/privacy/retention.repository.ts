@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { parseLprPassageWindowSeconds } from '../config/env.validation';
 import { MASKED_PLATE } from './privacy-identifiers';
 import {
   batchStatement,
@@ -47,10 +48,12 @@ const HAS_DETECTION_IMAGE_SQL = `("full_frame_path" IS NOT NULL OR (jsonb_typeof
 const META_WITHOUT_SNAPSHOT_SQL = `CASE WHEN jsonb_typeof("meta") = 'object' THEN "meta" - 'snapshot_jpeg_b64' ELSE "meta" END`;
 
 /**
- * Detección "vigente": tiene un intento esperando la decisión del conserje.
- * No se anonimiza hasta que se resuelva o expire (ExpirationService).
+ * Detección "vigente": tiene un intento esperando la decisión del conserje,
+ * propio o de su PASADA (las lecturas de otras cámaras son evidencia del mismo
+ * intento pendiente). No se anonimiza hasta que se resuelva o expire
+ * (ExpirationService).
  */
-const DETECTION_HAS_PENDING_ATTEMPT_SQL = `EXISTS (SELECT 1 FROM "access_attempts" a WHERE a."detectionId" = d."id" AND a."decision" = 'Pendiente')`;
+export const DETECTION_HAS_PENDING_ATTEMPT_SQL = `(EXISTS (SELECT 1 FROM "access_attempts" a WHERE a."detectionId" = d."id" AND a."decision" = 'Pendiente') OR (d."passageId" IS NOT NULL AND EXISTS (SELECT 1 FROM "access_attempts" ap WHERE ap."passageId" = d."passageId" AND ap."decision" = 'Pendiente')))`;
 
 /**
  * Imágenes por purgar: vencidas (plazo de imágenes) o de una detección ya
@@ -208,6 +211,33 @@ export class RetentionRepository {
     );
   }
 
+  /**
+   * Enmascara la patente de las pasadas que ya salieron de su ventana y cuyas
+   * detecciones ya están todas anonimizadas (o no tienen ninguna), para no
+   * dejar pasadas huérfanas en claro (p. ej. una supresión o una corrida que
+   * las pilló dentro de la ventana). Respeta las pasadas con un intento
+   * pendiente del conserje. Devuelve cuántas enmascaró.
+   */
+  async anonymizeStalePassages(): Promise<number> {
+    return this.number(
+      {
+        sql: `WITH affected AS (
+          UPDATE "vehicle_passages" p SET "plate" = $1, "anonymizedAt" = now()
+          WHERE p."anonymizedAt" IS NULL
+            AND p."lastSeenAt" < now() - make_interval(secs => $2::int)
+            AND NOT EXISTS (SELECT 1 FROM "plate_detections" d WHERE d."passageId" = p."id" AND d."anonymizedAt" IS NULL)
+            AND NOT EXISTS (SELECT 1 FROM "access_attempts" a WHERE a."passageId" = p."id" AND a."decision" = 'Pendiente')
+          RETURNING 1
+        ) SELECT count(*)::int AS "affected" FROM affected`,
+        params: [
+          MASKED_PLATE,
+          parseLprPassageWindowSeconds(process.env.LPR_PASSAGE_WINDOW_SECONDS),
+        ],
+      },
+      'affected',
+    );
+  }
+
   // --- Usuarios deshabilitados (RETENTION_DISABLED_USERS_DAYS) -------------
 
   async countDisabledUsersToAnonymize(days: number): Promise<number> {
@@ -251,12 +281,15 @@ export type SqlExecutor = (sql: string, params: unknown[]) => Promise<unknown>;
 /**
  * Anonimización de detecciones compartida por la retención y la supresión
  * (`ErasureRepository`, dentro de su transacción). Ver
- * `RetentionRepository.anonymizeDetections`.
+ * `RetentionRepository.anonymizeDetections`. Enmascara también la patente de
+ * las pasadas (`vehicle_passages`) de las detecciones anonimizadas, salvo las
+ * que siguen dentro de su ventana (`LPR_PASSAGE_WINDOW_SECONDS`).
  */
 export async function anonymizeDetectionsWith(
   execute: SqlExecutor,
   ids: readonly string[],
   clearedFrameIds: readonly string[],
+  options: { ignorePassageWindow?: boolean } = {},
 ): Promise<AnonymizedDetections> {
   const [row] = rowsOf(
     await execute(
@@ -266,14 +299,32 @@ export async function anonymizeDetectionsWith(
             "full_frame_path" = CASE WHEN d."id" = ANY($2::uuid[]) THEN NULL ELSE d."full_frame_path" END,
             "anonymizedAt" = now()
         WHERE d."id" = ANY($1::uuid[]) AND d."anonymizedAt" IS NULL AND NOT ${DETECTION_HAS_PENDING_ATTEMPT_SQL}
-        RETURNING d."id"
+        RETURNING d."id", d."passageId"
+      ), passages AS (
+        UPDATE "vehicle_passages" p SET "plate" = $3, "anonymizedAt" = now()
+        WHERE p."anonymizedAt" IS NULL
+          AND ($4::int = 0 OR p."lastSeenAt" < now() - make_interval(secs => $4::int))
+          AND p."id" IN (SELECT u."passageId" FROM updated u WHERE u."passageId" IS NOT NULL)
+        RETURNING 1
       ), attempts AS (
         UPDATE "access_attempts" a SET "reason" = NULL, "residente_id" = NULL
         FROM updated u WHERE a."detectionId" = u."id"
         RETURNING 1
       )
       SELECT (SELECT count(*) FROM updated)::int AS "detections", (SELECT count(*) FROM attempts)::int AS "accessAttempts"`,
-      [[...ids], [...clearedFrameIds], MASKED_PLATE],
+      [
+        [...ids],
+        [...clearedFrameIds],
+        MASKED_PLATE,
+        // Retención: una pasada aún dentro de su ventana puede recibir lecturas y
+        // no se enmascara. La SUPRESIÓN (derecho del titular) la enmascara
+        // siempre (0 = sin excepción de ventana).
+        options.ignorePassageWindow
+          ? 0
+          : parseLprPassageWindowSeconds(
+              process.env.LPR_PASSAGE_WINDOW_SECONDS,
+            ),
+      ],
     ),
   );
   return {

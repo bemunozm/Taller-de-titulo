@@ -8,6 +8,7 @@ import {
 } from './privacy-identifiers';
 import {
   anonymizeDetectionsWith,
+  DETECTION_HAS_PENDING_ATTEMPT_SQL,
   type AnonymizedDetections,
   type SqlExecutor,
 } from './retention.repository';
@@ -18,6 +19,7 @@ import {
   TERMINAL_SESSION_STATUSES,
   TERMINAL_VISIT_STATUSES,
 } from './retention-sql';
+import { MASKED_PLATE } from './privacy-identifiers';
 import { firstNumber, requiredString, rowsOf, stringOrNull } from './sql-rows';
 import type { SubjectErasureRequest } from './erasure-request';
 import { VehicleAccessLevel } from '../vehicles/vehicle-access';
@@ -76,6 +78,12 @@ export interface ErasureTransaction {
     ids: readonly string[],
     clearedFrameIds: readonly string[],
   ) => Promise<AnonymizedDetections>;
+  /**
+   * Enmascara SIEMPRE (sin la excepción de ventana de la retención) las
+   * pasadas (`vehicle_passages`) de esa patente, salvo las que esperan al
+   * conserje. Solo para solicitudes por patente.
+   */
+  anonymizePassages: (request: SubjectErasureRequest) => Promise<number>;
   findVisitorVehicles: (
     request: SubjectErasureRequest,
     scope: MatchScope,
@@ -119,8 +127,8 @@ const NOTIFICATION_MATCH_SQL: Record<SubjectErasureRequest['kind'], string> = {
   plate: `(${plateKeySql(`n."data" ->> 'plate'`)} = $5 OR ${plateKeySql(`n."data" -> 'visitor' ->> 'plate'`)} = $5)`,
 };
 
-/** Detección "vigente": un intento espera la decisión del conserje. */
-const DETECTION_PENDING_SQL = `EXISTS (SELECT 1 FROM "access_attempts" a WHERE a."detectionId" = d."id" AND a."decision" = 'Pendiente')`;
+/** Detección "vigente": un intento (propio o de su pasada) espera la decisión del conserje. */
+const DETECTION_PENDING_SQL = DETECTION_HAS_PENDING_ATTEMPT_SQL;
 
 /** `$n::text[]` de estados terminales: `= ANY` (erasable) o `<> ALL` (kept). */
 function statusFilter(
@@ -263,7 +271,27 @@ export function createErasureTransaction(
       if (detectionIds.length === 0) {
         return { detections: 0, accessAttempts: 0 };
       }
-      return anonymizeDetectionsWith(execute, detectionIds, clearedFrameIds);
+      // Supresión: las pasadas de las detecciones se enmascaran aunque estén
+      // dentro de su ventana (el derecho del titular no espera).
+      return anonymizeDetectionsWith(execute, detectionIds, clearedFrameIds, {
+        ignorePassageWindow: true,
+      });
+    },
+
+    async anonymizePassages(request) {
+      if (request.kind !== 'plate') {
+        return 0;
+      }
+      return affected(
+        `WITH affected AS (
+           UPDATE "vehicle_passages" p SET "plate" = $3, "anonymizedAt" = now()
+           WHERE p."organizationId" = $1 AND p."anonymizedAt" IS NULL
+             AND ${plateKeySql('p."plate"')} = $2
+             AND NOT EXISTS (SELECT 1 FROM "access_attempts" a WHERE a."passageId" = p."id" AND a."decision" = 'Pendiente')
+           RETURNING 1
+         ) SELECT count(*)::int AS "affected" FROM affected`,
+        [request.organizationId, request.key, MASKED_PLATE],
+      );
     },
 
     async findVisitorVehicles(request, scope, limit) {

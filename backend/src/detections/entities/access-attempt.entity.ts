@@ -1,8 +1,23 @@
-import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, CreateDateColumn, UpdateDateColumn, JoinColumn, Index } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  ManyToOne,
+  CreateDateColumn,
+  UpdateDateColumn,
+  JoinColumn,
+  Index,
+} from 'typeorm';
 import { PlateDetection } from './plate-detection.entity';
 import { User } from '../../users/entities/user.entity';
+import { VehiclePassage } from './vehicle-passage.entity';
 
 @Entity({ name: 'access_attempts' })
+// Una pasada tiene a lo sumo UN intento: lo garantiza la BD, no solo el código.
+@Index('UQ_access_attempts_passage', ['passageId'], {
+  unique: true,
+  where: '"passageId" IS NOT NULL',
+})
 export class AccessAttempt {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -39,8 +54,18 @@ export class AccessAttempt {
   @JoinColumn({ name: 'residente_id' })
   residente: User | null;
 
-  @ManyToOne(() => PlateDetection, (d) => d.accessAttempts, { onDelete: 'CASCADE' })
+  @ManyToOne(() => PlateDetection, (d) => d.accessAttempts, {
+    onDelete: 'CASCADE',
+  })
   detection: PlateDetection;
+
+  /** Pasada (`VehiclePassage`) de la que este intento es el único con efectos. */
+  @Column({ type: 'uuid', nullable: true })
+  passageId: string | null;
+
+  @ManyToOne(() => VehiclePassage, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'passageId' })
+  passage?: VehiclePassage | null;
 
   // Campos para decisiones pendientes que requieren aprobación del conserje
   @Column({ type: 'timestamptz', nullable: true })

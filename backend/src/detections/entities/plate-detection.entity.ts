@@ -4,9 +4,13 @@ import {
   Column,
   CreateDateColumn,
   OneToMany,
+  ManyToOne,
+  JoinColumn,
   Index,
 } from 'typeorm';
 import { AccessAttempt } from '../../detections/entities/access-attempt.entity';
+import { VehiclePassage } from './vehicle-passage.entity';
+import type { PassageDirectionSource } from '../vehicle-passage-direction';
 
 @Entity({ name: 'plate_detections' })
 // Fase 4 · P7.R: índices parciales del barrido de retención (filas sin
@@ -55,8 +59,18 @@ export class PlateDetection {
     char_conf_mean?: number | null;
     confirmed_by?: string | null;
     direction?: 'entry' | 'exit' | 'unknown';
+    /** De dónde salió `direction` (plan E5); ausente en workers anteriores. */
+    direction_source?: PassageDirectionSource;
+    /**
+     * Lo que DECLARÓ el worker cuando difiere de la fuente verificada en el
+     * servidor (`direction_source` guarda siempre la efectiva). Solo lo escribe
+     * el backend.
+     */
+    direction_source_declared?: PassageDirectionSource;
     track?: {
       id: number;
+      /** Id del track del VEHÍCULO (ByteTrack) en el worker; opcional. */
+      vehicle_id?: number;
       reads: number;
       votes: number;
       winner_share: number;
@@ -77,6 +91,18 @@ export class PlateDetection {
    */
   @Column({ type: 'timestamptz', nullable: true })
   anonymizedAt: Date | null;
+
+  /**
+   * Pasada a la que pertenece la lectura (`VehiclePassage`). `null` en datos
+   * previos a las pasadas o si la pasada se descartó (ON DELETE SET NULL).
+   */
+  @Index('IDX_plate_detections_passage')
+  @Column({ type: 'uuid', nullable: true })
+  passageId: string | null;
+
+  @ManyToOne(() => VehiclePassage, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'passageId' })
+  passage?: VehiclePassage | null;
 
   @OneToMany(() => AccessAttempt, (a) => a.detection, { cascade: true })
   accessAttempts: AccessAttempt[];
