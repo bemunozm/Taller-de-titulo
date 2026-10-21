@@ -87,7 +87,7 @@ class MetaPlateDto {
   @IsOptional()
   @IsIn(PASSAGE_DIRECTION_SOURCES)
   @ApiPropertyOptional({
-    description: 'De dónde salió la dirección (prioridad: camera > line > motion > width > none)',
+    description: 'De dónde salió la dirección (prioridad: line > motion > camera > width > none)',
     enum: PASSAGE_DIRECTION_SOURCES,
   })
   direction_source?: PassageDirectionSource;

@@ -20,8 +20,8 @@ const FRESH = 5_000;
 
 describe('vehicle-passage-direction', () => {
   describe('sourcePriority', () => {
-    it('camera > line > motion > width > none', () => {
-      const order = ['camera', 'line', 'motion', 'width', 'none'] as const;
+    it('line > motion > camera > width > none (lo medido gana a lo supuesto)', () => {
+      const order = ['line', 'motion', 'camera', 'width', 'none'] as const;
       const priorities = order.map(sourcePriority);
 
       expect(priorities).toEqual([...priorities].sort((a, b) => b - a));
@@ -170,6 +170,23 @@ describe('vehicle-passage-direction', () => {
       );
     });
 
+    it('una cámara con dirección fija Y línea puede declarar line (no se degrada) o camera', () => {
+      const both = {
+        direction: 'entry',
+        directionLine: { from: { x: 0, y: 0 }, to: { x: 1, y: 1 } },
+      };
+      expect(verifyReadingSource(reading('exit', 'line'), both)).toEqual(
+        reading('exit', 'line'),
+      );
+      expect(verifyReadingSource(reading('entry', 'camera'), both)).toEqual(
+        reading('entry', 'camera'),
+      );
+      // La dirección fija sigue sin respaldar una lectura contraria.
+      expect(verifyReadingSource(reading('exit', 'camera'), both)).toEqual(
+        reading('exit', 'width'),
+      );
+    });
+
     it('motion, width y none pasan; una dirección desconocida es none', () => {
       expect(verifyReadingSource(reading('entry', 'motion'), null)).toEqual(
         reading('entry', 'motion'),
@@ -199,10 +216,46 @@ describe('vehicle-passage-direction', () => {
       ).toBe(true);
       expect(
         shouldUpgradeDirection(
-          reading('exit', 'line'),
+          reading('exit', 'camera'),
+          reading('entry', 'line'),
+        ),
+      ).toBe(true);
+      expect(
+        shouldUpgradeDirection(
+          reading('entry', 'width'),
           reading('exit', 'camera'),
         ),
       ).toBe(true);
+      expect(
+        shouldUpgradeDirection(
+          reading('entry', 'camera'),
+          reading('exit', 'motion'),
+        ),
+      ).toBe(true);
+    });
+
+    it('camera NO baja una dirección medida por motion', () => {
+      expect(
+        shouldUpgradeDirection(
+          reading('exit', 'motion'),
+          reading('entry', 'camera'),
+        ),
+      ).toBe(false);
+    });
+
+    it('camera NO baja una dirección medida por línea', () => {
+      expect(
+        shouldUpgradeDirection(
+          reading('exit', 'line'),
+          reading('entry', 'camera'),
+        ),
+      ).toBe(false);
+      expect(
+        shouldUpgradeDirection(
+          reading('exit', 'line'),
+          reading('exit', 'camera'),
+        ),
+      ).toBe(false);
     });
 
     it('igual o menor prioridad no la pisa', () => {
