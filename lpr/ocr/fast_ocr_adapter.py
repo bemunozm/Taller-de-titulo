@@ -1,7 +1,9 @@
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Any, List
 import numpy as np
 import logging
+
+_PAD_CHARS = frozenset('_ ')
 
 
 @dataclass
@@ -9,6 +11,47 @@ class OCRResult:
     text: str
     confidence: float
     char_confidences: List[float]
+
+
+def _empty_result() -> OCRResult:
+    return OCRResult('', 0.0, [])
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def prediction_to_result(prediction: Any) -> OCRResult:
+    """Convert a fast-plate-ocr 1.x `PlatePrediction` into an `OCRResult`.
+
+    `prediction.plate` is the decoded text (it may carry `_` padding) and
+    `prediction.char_probs` holds one probability per plate slot (or None when
+    confidences were not requested). Padding never counts towards the text nor
+    towards the confidence, otherwise the mostly-empty slots of a short plate
+    would drag the mean around.
+    """
+    raw = str(getattr(prediction, 'plate', '') or '')
+    probs = getattr(prediction, 'char_probs', None)
+    row = np.asarray(probs, dtype=float).ravel() if probs is not None else np.empty(0)
+
+    chars: List[str] = []
+    char_conf: List[float] = []
+    for i, ch in enumerate(raw):
+        if ch in _PAD_CHARS:
+            continue
+        chars.append(ch)
+        if i < row.size:
+            char_conf.append(_clamp01(row[i]))
+
+    text = ''.join(chars)
+    # Without a confidence for every real character the mean would be
+    # misleading: report 0.0 instead of averaging a partial list.
+    if text and len(char_conf) == len(chars):
+        confidence = _clamp01(sum(char_conf) / len(char_conf))
+    else:
+        confidence = 0.0
+        char_conf = []
+    return OCRResult(text, confidence, char_conf)
 
 
 class FastPlateOCR:
@@ -25,44 +68,14 @@ class FastPlateOCR:
             self._inst = None
 
     def recognize(self, pil_arr) -> OCRResult:
+        """Read one plate crop. Requires fast-plate-ocr>=1.0 (list[PlatePrediction])."""
         if self._inst is None:
-            return OCRResult('', 0.0, [])
+            return _empty_result()
         try:
-            res = self._inst.run(pil_arr, return_confidence=True)
-            text = ''
-            conf = 0.0
-            char_conf = []
-            if isinstance(res, tuple) and len(res) == 2:
-                plates, conf_arr = res
-                text = plates[0] if plates else ''
-                try:
-                    carr = np.array(conf_arr)
-                    if carr.size == 0:
-                        conf = 0.0
-                    else:
-                        row = carr[0] if carr.ndim == 2 else carr.ravel()
-                        pad_chars = set(['_', ' '])
-                        vals = []
-                        for i, ch in enumerate(text):
-                            if i < row.size and (ch not in pad_chars):
-                                v = float(row[i])
-                                vv = max(0.0, min(1.0, v))
-                                vals.append(vv)
-                                char_conf.append(vv)
-                        conf = float(sum(vals) / len(vals)) if len(vals) > 0 else float(np.mean(row))
-                except Exception:
-                    logging.exception('Error parsing conf array')
-            elif isinstance(res, (list, tuple)):
-                plates = list(res)
-                text = plates[0] if plates else ''
-            else:
-                try:
-                    plates = list(res)
-                    text = plates[0] if plates else ''
-                except Exception:
-                    text = str(res)
-            conf = max(0.0, min(1.0, float(conf or 0.0)))
-            return OCRResult(text.strip(), conf, char_conf)
+            predictions = self._inst.run(pil_arr, return_confidence=True)
+            if not predictions:
+                return _empty_result()
+            return prediction_to_result(predictions[0])
         except Exception as e:
             logging.exception('Error fast-plate-ocr run: %s', e)
-            return OCRResult('', 0.0, [])
+            return _empty_result()
