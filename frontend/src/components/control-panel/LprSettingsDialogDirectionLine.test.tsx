@@ -29,7 +29,8 @@ const editor = vi.hoisted(() => ({
   last: null as null | {
     enableDirectionLine?: boolean
     initialTool?: string
-    initialDirectionLine?: unknown
+    initialDirectionLine?: { exitSide?: string } | null
+    cameraRole?: string
   },
   // Argumentos con los que el editor falso llama a onSave.
   applyArgs: [] as unknown[],
@@ -38,7 +39,8 @@ vi.mock('./ZoneEditor', () => ({
   ZoneEditor: (props: {
     enableDirectionLine?: boolean
     initialTool?: string
-    initialDirectionLine?: unknown
+    initialDirectionLine?: { exitSide?: string } | null
+    cameraRole?: string
     onSave: (...args: unknown[]) => Promise<void>
     onClose: () => void
   }) => {
@@ -90,11 +92,45 @@ describe('LprSettingsDialog: línea de dirección', () => {
     expect(screen.getByRole('button', { name: 'Dibujar línea de dirección' })).toBeInTheDocument()
   })
 
-  it('con línea guardada resume el lado de salida', async () => {
-    await renderDialog({ directionLine: { ...LINE, exitSide: 'right' } })
+  it('explica que la flecha es el sentido del evento de la cámara', async () => {
+    await renderDialog(null)
 
-    expect(screen.getByText(/Línea de dirección definida — salida hacia la derecha/)).toBeInTheDocument()
+    expect(screen.getByText(/La flecha indica hacia dónde se mueve el auto cuando ocurre el evento de esta cámara/)).toBeInTheDocument()
+    expect(screen.getByText(/se registran igual, con su sentido real/)).toBeInTheDocument()
+  })
+
+  it('con línea guardada resume el sentido de la flecha según el rol', async () => {
+    await renderDialog({ direction: 'entry', directionLine: { ...LINE, exitSide: 'right' } })
+
+    expect(screen.getByText(/Línea definida — sentido de la flecha: Entrando/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Editar línea de dirección' })).toBeInTheDocument()
+  })
+
+  it('cambiar el rol no mueve la flecha: recalcula exitSide y se guarda así', async () => {
+    editor.applyArgs = [ZONE]
+    const { user } = await renderDialog({ direction: 'exit', directionLine: { ...LINE, exitSide: 'left' } })
+
+    await user.selectOptions(screen.getByLabelText('Dirección'), 'entry')
+    expect(screen.getByText(/Línea definida — sentido de la flecha: Entrando/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Editar línea de dirección' }))
+    expect(editor.last).toMatchObject({ cameraRole: 'entry' })
+    expect(editor.last?.initialDirectionLine).toMatchObject({ exitSide: 'right' })
+    await user.click(screen.getByRole('button', { name: 'Aplicar (mock)' }))
+    await user.click(screen.getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(cameraApi.updateCameraLprSettings).toHaveBeenCalledTimes(1))
+    expect(lastSavedPayload()).toMatchObject({ direction: 'entry', directionLine: { ...LINE, exitSide: 'right' } })
+  })
+
+  it('volver al rol anterior devuelve exitSide (la flecha nunca se movió)', async () => {
+    const { user } = await renderDialog({ direction: 'exit', directionLine: LINE })
+
+    await user.selectOptions(screen.getByLabelText('Dirección'), 'entry')
+    await user.selectOptions(screen.getByLabelText('Dirección'), 'exit')
+    await user.click(screen.getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(cameraApi.updateCameraLprSettings).toHaveBeenCalledTimes(1))
+    expect(lastSavedPayload()).toMatchObject({ direction: 'exit', directionLine: LINE })
   })
 
   it('el botón de línea abre el editor con la herramienta de línea; el de zona, con la de zona', async () => {
@@ -116,7 +152,7 @@ describe('LprSettingsDialog: línea de dirección', () => {
     await user.click(screen.getByRole('button', { name: 'Dibujar línea de dirección' }))
     await user.click(screen.getByRole('button', { name: 'Aplicar (mock)' }))
 
-    expect(await screen.findByText(/salida hacia la derecha/)).toBeInTheDocument()
+    expect(await screen.findByText(/Línea definida — sentido de la flecha: Saliendo/)).toBeInTheDocument()
     expect(cameraApi.updateCameraLprSettings).not.toHaveBeenCalled()
 
     await user.click(screen.getByRole('button', { name: 'Guardar' }))
@@ -161,7 +197,7 @@ describe('LprSettingsDialog: línea de dirección', () => {
   it('en solo lectura muestra el resumen pero no ofrece dibujar la línea', async () => {
     await renderDialog({ directionLine: LINE }, false)
 
-    expect(screen.getByText(/Línea de dirección definida/)).toBeInTheDocument()
+    expect(screen.getByText(/Línea definida — sentido de la flecha/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /línea de dirección/i })).not.toBeInTheDocument()
   })
 })

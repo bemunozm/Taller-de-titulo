@@ -94,7 +94,7 @@ describe('ZoneEditor: línea de dirección', () => {
   it('explica qué es la línea de dirección y que sin ella se usa la dirección fija o el tamaño de la patente', () => {
     renderEditor()
 
-    expect(screen.getByText(/cuando un vehículo cruza esta línea/i)).toBeInTheDocument()
+    expect(screen.getByText(/La flecha indica hacia dónde se mueve el auto/)).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent(
       /Sin línea: se usa la dirección fija de la cámara y, si no tiene, se infiere por el tamaño de la patente/,
     )
@@ -134,8 +134,96 @@ describe('ZoneEditor: línea de dirección', () => {
     expect(lineGroup()).toHaveAttribute('data-exit-side', 'left')
     const { base, tip } = arrowYs()
     expect(tip).toBeLessThan(base)
-    expect(screen.getByText(/^Salida/)).toHaveTextContent('Salida →')
-    expect(screen.getByRole('status')).toHaveTextContent('salida hacia la izquierda')
+    expect(screen.getByTestId('direction-arrow-label')).toHaveTextContent('Saliendo →')
+    expect(screen.getByRole('status')).toHaveTextContent('sentido de la flecha: Saliendo')
+  })
+
+  it('explica que la flecha es el sentido del evento de la cámara y que lo contrario se registra igual', async () => {
+    renderEditor()
+    const user = userEvent.setup()
+    await findCanvas()
+    await user.click(screen.getByRole('button', { name: TOOL_LINE }))
+
+    expect(screen.getByText(/La flecha indica hacia dónde se mueve el auto cuando ocurre el evento de esta cámara/)).toBeInTheDocument()
+    expect(screen.getByText(/se registran igual, con su sentido real/)).toBeInTheDocument()
+  })
+
+  describe('rol de la cámara y significado de la flecha', () => {
+    const arrowSide = () => lineGroup()?.getAttribute('data-arrow-side')
+    const exitSide = () => lineGroup()?.getAttribute('data-exit-side')
+
+    it.each([
+      ['entry', 'Entrando →', 'right'],
+      ['exit', 'Saliendo →', 'left'],
+    ] as const)('rol %s: etiqueta "%s" y exitSide %s con la flecha hacia arriba', async (cameraRole, label, expectedExit) => {
+      const props = renderEditor({ cameraRole })
+      const user = userEvent.setup()
+      const canvas = await findCanvas()
+      await drawHorizontalLine(canvas, user)
+
+      expect(arrowSide()).toBe('left')
+      expect(exitSide()).toBe(expectedExit)
+      expect(screen.getByTestId('direction-arrow-label')).toHaveTextContent(label)
+      expect(screen.queryByRole('radiogroup')).not.toBeInTheDocument()
+
+      await user.click(screen.getByRole('button', { name: /Fijar Precisión/ }))
+      await waitFor(() => expect(props.onSave).toHaveBeenCalledTimes(1))
+      expect(props.onSave).toHaveBeenCalledWith([], expect.objectContaining({ exitSide: expectedExit }))
+    })
+
+    it.each([
+      ['entry', 'right', 'left'],
+      ['exit', 'right', 'right'],
+      ['both', 'right', 'right'],
+      ['entry', 'left', 'right'],
+    ] as const)('carga una línea guardada con rol %s y exitSide %s: la flecha apunta hacia %s', async (cameraRole, savedExit, expectedArrow) => {
+      renderEditor({
+        cameraRole,
+        initialDirectionLine: { from: { x: 0.2, y: 0.5 }, to: { x: 0.8, y: 0.5 }, exitSide: savedExit },
+      })
+
+      await findCanvas()
+      expect(arrowSide()).toBe(expectedArrow)
+      expect(exitSide()).toBe(savedExit)
+    })
+
+    it('rol "Ambas": el selector parte en Salida y elegir Entrada no mueve la flecha, solo recalcula exitSide', async () => {
+      const props = renderEditor({ cameraRole: 'both' })
+      const user = userEvent.setup()
+      const canvas = await findCanvas()
+      await drawHorizontalLine(canvas, user)
+
+      expect(screen.getByRole('radio', { name: 'Salida' })).toBeChecked()
+      expect(screen.getByTestId('direction-arrow-label')).toHaveTextContent('Saliendo →')
+      const before = arrowYs()
+
+      await user.click(screen.getByRole('radio', { name: 'Entrada' }))
+
+      expect(arrowYs()).toEqual(before)
+      expect(arrowSide()).toBe('left')
+      expect(exitSide()).toBe('right')
+      expect(screen.getByTestId('direction-arrow-label')).toHaveTextContent('Entrando →')
+      expect(screen.getByRole('status')).toHaveTextContent('sentido de la flecha: Entrando')
+
+      await user.click(screen.getByRole('button', { name: /Fijar Precisión/ }))
+      await waitFor(() => expect(props.onSave).toHaveBeenCalledTimes(1))
+      expect(props.onSave).toHaveBeenCalledWith([], expect.objectContaining({ exitSide: 'right' }))
+    })
+
+    it('"Invertir sentido" mueve la flecha y recalcula exitSide según el significado', async () => {
+      renderEditor({ cameraRole: 'entry' })
+      const user = userEvent.setup()
+      const canvas = await findCanvas()
+      await drawHorizontalLine(canvas, user)
+      expect([arrowSide(), exitSide()]).toEqual(['left', 'right'])
+
+      await user.click(screen.getByRole('button', { name: 'Invertir sentido' }))
+
+      expect([arrowSide(), exitSide()]).toEqual(['right', 'left'])
+      const { base, tip } = arrowYs()
+      expect(tip).toBeGreaterThan(base)
+      expect(screen.getByTestId('direction-arrow-label')).toHaveTextContent('Entrando →')
+    })
   })
 
   it('"Invertir sentido" cambia el lado de salida y gira la flecha', async () => {
@@ -149,7 +237,7 @@ describe('ZoneEditor: línea de dirección', () => {
     expect(lineGroup()).toHaveAttribute('data-exit-side', 'right')
     const { base, tip } = arrowYs()
     expect(tip).toBeGreaterThan(base)
-    expect(screen.getByRole('status')).toHaveTextContent('salida hacia la derecha')
+    expect(screen.getByRole('status')).toHaveTextContent('sentido de la flecha: Saliendo')
 
     await user.click(screen.getByRole('button', { name: /Fijar Precisión/ }))
     await waitFor(() => expect(props.onSave).toHaveBeenCalledTimes(1))

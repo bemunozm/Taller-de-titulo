@@ -39,7 +39,14 @@ import {
   type LprSettings,
   type ZonePoint,
 } from '@/types/index'
-import { describeDirectionLine } from '@/helpers/directionLine'
+import {
+  DIRECTION_ARROW_HELP,
+  arrowSideFor,
+  describeDirectionLine,
+  exitSideFor,
+  meaningForRole,
+  type CameraRole,
+} from '@/helpers/directionLine'
 import { ZoneEditor, type ZoneEditorTool } from './ZoneEditor'
 
 function SectionTitle({ children }: { children: ReactNode }) {
@@ -118,6 +125,7 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
     handleSubmit,
     control,
     watch,
+    getValues,
     setValue,
     formState: { errors },
   } = useForm<LprFormValues, unknown, LprFormOutput>({
@@ -128,6 +136,7 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
   const action = watch('action')
   const zone = watch('zone')
   const directionLine = watch('directionLine')
+  const cameraRole = watch('direction')
   const unlimitedMaxWidth = watch('unlimitedMaxWidth')
   const confirmReads = watch('confirmReads')
   // En control de acceso es un error de validación; en solo registrar queda como aviso.
@@ -164,6 +173,20 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
     setValue('minRatio', recommended.minRatio, options)
     setValue('maxRatio', recommended.maxRatio, options)
     setValue('confirmReads', recommended.confirmReads, options)
+  }
+
+  const directionField = register('direction')
+
+  // Cambiar el rol no mueve la flecha dibujada: cambia lo que significa, así que
+  // se recalcula `exitSide` para que la flecha siga apuntando hacia el mismo lado.
+  const recomputeExitSide = (nextRole: CameraRole) => {
+    const line = getValues('directionLine')
+    if (!line) return
+    const arrowSide = arrowSideFor(line.exitSide, meaningForRole(cameraRole) ?? 'exiting')
+    const exitSide = exitSideFor(arrowSide, meaningForRole(nextRole) ?? 'exiting')
+    if (exitSide !== line.exitSide) {
+      setValue('directionLine', { ...line, exitSide }, { shouldDirty: true, shouldValidate: true })
+    }
   }
 
   const afterChange = () => {
@@ -248,7 +271,13 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
 
             <Field>
               <Label>Dirección</Label>
-              <Select {...register('direction')}>
+              <Select
+                {...directionField}
+                onChange={(event) => {
+                  void directionField.onChange(event)
+                  recomputeExitSide(event.target.value as CameraRole)
+                }}
+              >
                 <option value="">Sin definir</option>
                 {LPR_DIRECTIONS.map((value) => (
                   <option key={value} value={value}>
@@ -454,11 +483,12 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
             Línea de dirección
           </h3>
           <p className="text-sm text-zinc-500 dark:text-zinc-400">
-            {describeDirectionLine(directionLine)}{' '}
+            {describeDirectionLine(directionLine, meaningForRole(cameraRole) ?? 'exiting')}{' '}
             {directionLine
               ? 'Si el vehículo cruza la línea, el cruce manda: define si entra o sale, aunque la dirección fija diga otra cosa. La dirección fija solo se usa cuando la línea no logra determinar el sentido.'
               : 'Si dibujas una línea, el cruce del vehículo manda sobre la dirección fija.'}
           </p>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">{DIRECTION_ARROW_HELP}</p>
           {errors.directionLine && (
             <p role="alert" className="text-sm text-red-600 dark:text-red-500">
               La línea de dirección no es válida: {errors.directionLine.message ?? 'vuelve a dibujarla (debe tener cierto largo y quedar dentro del cuadro).'}
@@ -523,6 +553,7 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
           tone="lpr"
           enableDirectionLine
           initialDirectionLine={directionLine}
+          cameraRole={cameraRole}
           initialTool={zoneEditorTool}
           title={
             <>

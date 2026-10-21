@@ -5,6 +5,11 @@ import {
   directionLineLength,
   flipExitSide,
   getExitArrow,
+  arrowSideFor,
+  exitSideFor,
+  getArrowTowards,
+  meaningForRole,
+  pointSide,
 } from './directionLine'
 
 const HORIZONTAL: DirectionLine = { from: { x: 0.2, y: 0.5 }, to: { x: 0.8, y: 0.5 }, exitSide: 'left' }
@@ -77,7 +82,37 @@ describe('helpers de la línea', () => {
 
   it('describeDirectionLine resume la línea o su ausencia', () => {
     expect(describeDirectionLine(null)).toMatch(/Sin línea: se usa la dirección fija de la cámara y, si no tiene, se infiere por el tamaño de la patente/)
-    expect(describeDirectionLine(HORIZONTAL)).toBe('Línea de dirección definida — salida hacia la izquierda.')
-    expect(describeDirectionLine({ ...HORIZONTAL, exitSide: 'right' })).toContain('salida hacia la derecha')
+    expect(describeDirectionLine(HORIZONTAL)).toContain('Saliendo')
+  })
+})
+
+describe('rol de la cámara, flecha y exitSide', () => {
+  it.each([
+    ['exiting', 'left', 'left'],
+    ['exiting', 'right', 'right'],
+    ['entering', 'left', 'right'],
+    ['entering', 'right', 'left'],
+  ] as const)('%s con la flecha hacia %s guarda exitSide %s', (meaning, arrowSide, exitSide) => {
+    expect(exitSideFor(arrowSide, meaning)).toBe(exitSide)
+    expect(arrowSideFor(exitSide, meaning)).toBe(arrowSide)
+  })
+
+  it('el rol fija el significado; "Ambas" y sin definir lo dejan a elección', () => {
+    expect(meaningForRole('entry')).toBe('entering')
+    expect(meaningForRole('exit')).toBe('exiting')
+    expect(meaningForRole('both')).toBeNull()
+    expect(meaningForRole('')).toBeNull()
+  })
+
+  it('getArrowTowards apunta hacia el lado pedido, aunque no sea el exitSide', () => {
+    const right = getArrowTowards(HORIZONTAL, 'right')
+    expect(right.tip.y).toBeGreaterThan(right.base.y)
+    expect(pointSide(HORIZONTAL, right.tip)).toBe('right')
+    expect(getArrowTowards(HORIZONTAL, 'left')).toEqual(getExitArrow(HORIZONTAL))
+  })
+
+  it('describeDirectionLine resume el sentido de la flecha', () => {
+    expect(describeDirectionLine(HORIZONTAL, 'entering')).toBe('Línea definida — sentido de la flecha: Entrando.')
+    expect(describeDirectionLine(HORIZONTAL)).toBe('Línea definida — sentido de la flecha: Saliendo.')
   })
 })
