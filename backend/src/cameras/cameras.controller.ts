@@ -13,6 +13,7 @@ import { CamerasService } from './cameras.service';
 import { CreateCameraDto } from './dto/create-camera.dto';
 import { UpdateCameraDto } from './dto/update-camera.dto';
 import { UpdateGuardianZonesDto } from './dto/update-guardian-zones.dto';
+import { UpdateLprSettingsDto } from './dto/lpr-settings.dto';
 import {
   ApiTags,
   ApiBearerAuth,
@@ -354,5 +355,50 @@ export class CamerasController {
     @Body() dto: UpdateGuardianZonesDto,
   ) {
     return this.camerasService.updateGuardianZones(id, dto.zones);
+  }
+
+  @Get(':id/lpr-settings')
+  @RequirePermissions('cameras.read')
+  @ApiOperation({
+    summary: 'Configuración de visión LPR de la cámara',
+    description:
+      'Devuelve action, direction, zone, detectorImgsz, sampleFps, crop y confirmReads (o null = defaults del worker). No incluye la URL de origen. Lectura: igual que el resto de las lecturas de cámara ("cameras.read").',
+  })
+  @ApiParam({ name: 'id', description: 'ID único de la cámara' })
+  @ApiNotFoundResponse({
+    description: 'Cámara inexistente o de otro condominio',
+  })
+  async getLprSettings(@Param('id', ParseUUIDPipe) id: string) {
+    return this.camerasService.getLprSettings(id);
+  }
+
+  @Patch(':id/lpr-settings')
+  @RequirePermissions('cameras.enable-ia')
+  @Auditable({
+    module: AuditModule.CAMERAS,
+    action: AuditAction.UPDATE,
+    entityType: 'Camera',
+    description: 'Configuración de visión LPR actualizada en cámara',
+    captureResponse: true,
+  })
+  @ApiOperation({
+    summary: 'Actualizar la configuración de visión LPR de la cámara',
+    description:
+      'Reemplaza la configuración (no hace merge); un body vacío {} la resetea a null (defaults del worker). El worker LPR la recoge por pull, sin reiniciar. Requiere "cameras.enable-ia": "action: register" cambia la política de apertura del portón.',
+  })
+  @ApiParam({ name: 'id', description: 'ID único de la cámara' })
+  @ApiBody({ type: UpdateLprSettingsDto })
+  @ApiBadRequestResponse({
+    description:
+      'Campo fuera de rango, enum inválido, propiedad desconocida, zona mal formada o id no UUID',
+  })
+  @ApiNotFoundResponse({
+    description: 'Cámara inexistente o de otro condominio',
+  })
+  async updateLprSettings(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateLprSettingsDto,
+  ) {
+    return this.camerasService.updateLprSettings(id, dto);
   }
 }

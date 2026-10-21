@@ -1,6 +1,6 @@
 from ultralytics import YOLO
 from huggingface_hub import hf_hub_download
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import numpy as np
 import logging
 
@@ -33,8 +33,16 @@ def load_detector(model_ref: str):
     return detector
 
 
-def detect(detector, frame: np.ndarray, min_conf: float = 0.3) -> List[Detection]:
-    results = detector(frame, verbose=False)
+def detect(detector, frame: np.ndarray, min_conf: float = 0.3,
+           imgsz: Optional[int] = None, device: Optional[str] = None) -> List[Detection]:
+    # imgsz/device are optional overrides for tools (preview, benchmarks); with
+    # both None the call is identical to the production one (ultralytics defaults).
+    kwargs = {}
+    if imgsz is not None:
+        kwargs['imgsz'] = int(imgsz)
+    if device is not None:
+        kwargs['device'] = device
+    results = detector(frame, verbose=False, **kwargs)
     boxes: List[Detection] = []
     for res in results:
         if hasattr(res, 'boxes'):

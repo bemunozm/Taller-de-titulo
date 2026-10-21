@@ -1,8 +1,13 @@
-"""Reglas y utilidades para procesado de detecciones (plausibilidad, confirmación, scoring)."""
+"""Reglas puras de lectura de patentes: normalización, formato y estadísticas de caracteres.
+
+La confirmación (antes `should_confirm`, por conteo de textos) y el gate de
+confianza (`should_save_or_emit`) se reemplazaron por el seguimiento + voto de
+`plate_tracker.py`; la evidencia está en `tools/replay_eval.py`.
+"""
 import re
-import time
+from lpr.processor.plate_format import correct_plate, is_valid_chilean_plate
 from lpr.settings import settings
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Sequence, Tuple
 import logging
 
 
@@ -14,11 +19,34 @@ def normalize_plate(text: str) -> str:
 
 
 def plausible_plate(plate_clean: str) -> bool:
-    plate_regex = settings.LPR_PLATE_REGEX or r'^[A-Z0-9]{3,8}$'
-    try:
-        return bool(re.match(plate_regex, plate_clean)) if plate_clean else False
-    except Exception:
+    """Is `plate_clean` an acceptable plate as read (no correction)?
+
+    Default: the Chilean format (`plate_format.is_valid_chilean_plate`). A
+    non-empty `LPR_PLATE_REGEX` overrides it (e.g. to accept another country).
+    """
+    if not plate_clean:
         return False
+    plate_regex = settings.LPR_PLATE_REGEX
+    if not plate_regex:
+        return is_valid_chilean_plate(plate_clean)
+    try:
+        return bool(re.match(plate_regex, plate_clean))
+    except re.error:
+        return False
+
+
+def resolve_plate(plate_clean: str, char_confidences: Optional[Sequence[float]] = None) -> Optional[str]:
+    """Final plate text for a normalized reading, or None if it is not a plate.
+
+    With the default (Chilean) format the reading goes through the positional
+    correction (0/O/D, 1/I/L, 2/Z, 5/S, 8/B...). With a `LPR_PLATE_REGEX`
+    override the text is used as read (the override owns the format).
+    """
+    if not plate_clean:
+        return None
+    if settings.LPR_PLATE_REGEX:
+        return plate_clean if plausible_plate(plate_clean) else None
+    return correct_plate(plate_clean, char_confidences)
 
 
 def analyze_char_confidences(char_confidences: List[float]) -> Dict[str, Any]:
@@ -32,29 +60,3 @@ def analyze_char_confidences(char_confidences: List[float]) -> Dict[str, Any]:
     above = sum(1 for v in vals if v >= thresh)
     ratio = float(above) / float(len(vals))
     return {'num_chars': len(vals), 'min': min_v, 'mean': mean_v, 'ratio_above': ratio}
-
-
-def should_confirm(sightings: Dict[str, Dict[str, Any]], plate: str) -> Tuple[bool, Dict[str, Any]]:
-    now_ts = time.time()
-    entry = sightings.get(plate)
-    if entry is None:
-        return False, {'reason': 'no_sightings'}
-    confirm_frames = int(settings.LPR_CONFIRM_FRAMES)
-    confirm_seconds = float(settings.LPR_CONFIRM_SECONDS)
-    if entry.get('count', 0) >= confirm_frames:
-        return True, {'confirmed_by': 'frames'}
-    if (now_ts - float(entry.get('first_seen', now_ts))) >= confirm_seconds and entry.get('count', 0) >= 1:
-        return True, {'confirmed_by': 'seconds'}
-    return False, {'reason': 'waiting', 'count': entry.get('count', 0)}
-
-
-def should_save_or_emit(det_conf: float, ocr_conf: float, cfg_combined_threshold: float, det_thresh: float, ocr_thresh: float) -> bool:
-    alpha = float(settings.LPR_COMBINED_ALPHA)
-    combined = alpha * float(ocr_conf) + (1.0 - alpha) * float(det_conf)
-    if float(ocr_conf) >= ocr_thresh:
-        return True
-    if float(det_conf) >= det_thresh and float(ocr_conf) >= 0.5:
-        return True
-    if combined >= float(settings.LPR_COMBINED_THRESHOLD or cfg_combined_threshold):
-        return True
-    return False

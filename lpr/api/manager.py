@@ -533,7 +533,7 @@ def reconcile_with_backend():
     try:
         url_base = BACKEND_URL.rstrip('/')
 
-        resp = requests.get(f'{url_base}/workers/cameras', timeout=5, headers=headers)
+        resp = requests.get(f'{url_base}/workers/cameras', timeout=5, headers=headers, allow_redirects=False)
         if resp.status_code != 200:
             logger.error(
                 'Reconciliación de cámaras falló: GET /workers/cameras -> %s '
@@ -558,7 +558,8 @@ def reconcile_with_backend():
                     continue
 
                 # Intentar obtener source desencriptada
-                sresp = requests.get(f"{url_base}/workers/cameras/{cam_id}/source", timeout=5, headers=headers)
+                sresp = requests.get(f"{url_base}/workers/cameras/{cam_id}/source", timeout=5, headers=headers,
+                                 allow_redirects=False)
                 if sresp.status_code != 200:
                     logger.warning('Sin source para la cámara %s: GET /workers/cameras/:id/source -> %s', cam_id, sresp.status_code)
                     continue

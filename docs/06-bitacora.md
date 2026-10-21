@@ -4,6 +4,97 @@ Registro cronológico de conversaciones, decisiones y avances. Lo más reciente 
 
 ---
 
+## 2026-10-20 — LPR sobre la cámara real del portón: de 0/8 a 8/8
+
+**Prueba en terreno**
+- El LPR corrió en vivo sobre `porton-hd` (1920x1080 HEVC, por el relay de la Pi) y **no leyó ninguna patente**.
+- Se grabaron 9 clips por evento desde el preview, una tarde de día: ~870 s y 6 960 cuadros a 8 fps.
+- Nova verificó a ojo la patente de cada pasada. Quedaron **8 pasadas legibles**, anonimizadas como P1…P8 en los docs, más 6 falsos positivos del detector y 1 ilegible.
+- Benchmark de detección CPU vs GPU sobre capturas del mismo portón, en un Ryzen 5 7600X y una RTX 5060 Ti.
+
+**Hallazgos**
+- **Causa raíz del 0/8:**
+  - la patente se ve inclinada ~20–25°, así que su caja es casi cuadrada (ratio mediana ~1.33), y el filtro `ratio ≥ 2.0` (hardcodeado) la botaba;
+  - el detector corría a 640, porque `cli.py` no pasaba `imgsz`, y el worker a 1 fps;
+  - `plausible_plate` aceptaba cualquier `[A-Z0-9]{3,8}`;
+  - la confirmación contaba textos, no vehículos, y aceptaba una lectura suelta tras 5 s.
+- **Configuración recomendada:** 1920, 8 fps, recorte de 60–250 px con ratio 0.8–6, formato chileno con corrección posicional, y seguimiento + voto con N=3 y `winner_share` ≥ 0.6. Con ella, el harness con el código final dio **8/8 correctas y 0 incorrectas**, con latencia mediana de 4.2–4.3 s (máximo 6.2 s) y 13–15 ms por cuadro en GPU. Con zona, igual 8/8 y ~12–13 ms.
+- **Bajar N mete errores:** N=2 da 7/8 con 1 incorrecta y N=1 da 5/8 con 4 incorrectas. Los errores del OCR se repiten en cuadros casi idénticos.
+- **La dirección inferida** acertó en 5/8. El resto quedó `unknown`, ninguna equivocada.
+- **CPU vs GPU:** a cuadro completo y 1920, la CPU tarda 153 ms y la GPU 11.5 ms. Una ROI x1.66 @1280 baja a 73 ms en CPU y 12 ms en GPU. Sin GPU, la zona es obligatoria.
+- **El límite es físico:** el OCR es confiable desde ~55–60 px de ancho de patente y la cámara entrega entre ~40 y ~94 px. Para abrir el portón hace falta una cámara dedicada (DS-2CD2643G2-IZS, ≥ 100–130 px de patente).
+- **Limitación:** 8 pasadas, de día y con un solo ángulo. Por la regla del 3, 0 errores en 8 es compatible con una tasa real de hasta ~37 %. Antes del piloto falta muestra de noche, con motos y con lluvia.
+
+**Decisiones de Benjamin**
+- **`porton-hd` solo registra.** No abre el portón ni escala al conserje, porque mira desde adentro (D6). El modo vive por cámara (`action = register | access`) y lo aplica el backend.
+- **Dirección por cámara** (`entry`, `exit` o `both`). Con `both`, el worker la infiere por la tendencia del ancho de la caja.
+- **UI con lienzo.** La configuración LPR de cada cámara se edita en "Configurar LPR", con la zona de detección dibujada sobre el video en vivo. Reutiliza el editor de zonas del Guardián, ahora generalizado como `ZoneEditor`.
+
+**Implementación** (plan D1–D11, decisión [D7](05-decisiones-tecnicas.md#d7--lpr-robusto-por-cámara--implementado-2026-10-20-falta-gate-completo-y-pr))
+- **Worker:**
+  - módulos puros `plate_format`, `plate_tracker` y `pipeline`, más `utils/zones` (compartido con el Guardián) y `utils/pii` (enmascarado en logs);
+  - config por cámara por pull, con refetch en caliente y la zona fail-closed;
+  - dedupe que solo se consume si el POST se aceptó o pudo haber llegado.
+- **Backend:**
+  - `Camera.lprSettings` jsonb y su migración;
+  - endpoints `PATCH /cameras/:id/lpr-settings` y `GET /workers/cameras/:id/lpr-settings`;
+  - rama `Registrado` fail-closed en `createDetection` y normalización de la patente en la ingesta.
+- **Contrato compartido** de validación en `contracts/lpr-settings.cases.json`, probado en las tres capas.
+- **Harness reproducible:** `lpr/tools/replay_eval.py`. Los datos quedan fuera del repo, en `lpr/eval-data/` (privacidad §7.2).
+- **Detalle:** [modulos/vision.md](modulos/vision.md#evaluación-lpr-sobre-cámara-real-porton-hd).
+
+**Pendientes**
+- Revisión de ciberseguridad y QA, gate completo con e2e, commits y PR (los dispara Benjamin).
+- Configurar `porton-hd` con la zona dibujada y verificar end-to-end que no haya `door-open`.
+- Borrar los datos de evaluación al cerrar la calibración.
+
+---
+
+## 2026-10-16 — Fase 4 en GitHub, cámaras reales y relay de borde
+
+**Fase 4 en GitHub**
+- Gate completo en verde, con 12 de 12 pasos OK.
+- Quedó en 9 commits, uno por subsistema, más un fix de un test del hub que dependía del reloj y fallaba en CI.
+- Se abrió el **PR #57**, sin mergear. Su CI pasó completo.
+
+**Cámaras reales**
+- **Acceso:** Benjamin obtuvo acceso a las cámaras del condominio: un NVR Hikvision DS-7616NI-K2/16P con 11 cámaras. La administración no abrió puertos ni dio VPN.
+- **Cobertura:** ninguna cámara mira hacia afuera del portón. Sin una cámara exterior, el LPR solo sirve para registrar entradas y salidas, no para abrir.
+
+**Arquitectura** (D5 y D6 actualizadas)
+- **Esquema híbrido:**
+  - en la nube, lo liviano: backend, Postgres y el MediaMTX central, en el Hetzner CAX21 que Benjamin ya tiene;
+  - en la conserjería, la inferencia.
+- **Equipo edge recomendado:** un mini PC reacondicionado i5-12500T de ~CLP 400 mil, en vez de una Pi 5 con Hailo (que supera los CLP 460 mil). Se compra después del benchmark de la Fase 5.
+- **Frigate:** se evaluará en ese mismo benchmark.
+- **Dirección del proyecto:** kiosko en lugar del citófono, ESP32 con relés para la puerta y el portón, y la Raspberry Pi 3B solo como relay.
+
+**Relay de cámaras**
+- Kit nuevo en [`edge/camera-relay/`](../edge/camera-relay/README.md), versión 0.2.1, para la Raspberry Pi 3B:
+  - MediaMTX v1.15.2 on-demand;
+  - Tailscale con ACL por tags;
+  - systemd endurecido (exposición 1.0) y salida de red limitada a la IP del NVR;
+  - netwatch basado en `Self.Online`;
+  - `apply` con lock y rollback;
+  - ffprobe como usuario sin privilegios con `no-new-privs`;
+  - SSH solo por clave y sudo con clave;
+  - runbook de 3 fases.
+- Verificación:
+  - 301 tests;
+  - contract test con el binario real, que incluye un fuzz inverso de 417 URLs;
+  - E2E con un NVR falso, 16 de 16;
+  - 50 mutaciones detectadas;
+  - `install.sh` idempotente probado con systemd real.
+- Revisión en 3 rondas:
+  - ciberseguridad, APROBADO CON OBSERVACIONES;
+  - QA rechazó la primera versión por un falso verde en la comparación de IPs y después lo dejó APROBADO CON OBSERVACIONES.
+- Decisiones de Benjamin: **Tailscale** y la SD flasheada limpia.
+- Diferido para la etapa del VPS: subir MediaMTX a la v1.21 o superior. Tiene avisos publicados que no son alcanzables con esta config.
+
+**Privacidad:** se agregó la sección 7.1 al documento de la Ley 21.719, sobre el relay, Tailscale como encargado y los requisitos de un dataset de entrenamiento.
+
+---
+
 ## 2026-10-08 → 2026-10-09 — Fase 4: hardening pre-piloto ✅ (código + gate)
 
 **Metodología de Benjamin.** Todas las fases siguieron estos pasos:

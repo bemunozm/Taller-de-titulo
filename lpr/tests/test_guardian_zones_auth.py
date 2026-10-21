@@ -42,7 +42,7 @@ class FakeBackend:
         self.calls = []
         self.payload = payload
 
-    def get(self, url, headers=None, timeout=None):
+    def get(self, url, headers=None, timeout=None, allow_redirects=True):
         sent = dict(headers or {})
         self.calls.append({'url': url, 'headers': sent})
         if sent.get('x-api-key') != API_KEY:

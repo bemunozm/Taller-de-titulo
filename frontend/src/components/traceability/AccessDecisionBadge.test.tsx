@@ -26,6 +26,16 @@ describe('AccessDecisionBadge', () => {
     expect(screen.getByText('Denegado')).toHaveClass('text-red-700')
   })
 
+  it('Registrado: informativo (azul cielo), no verde, con ícono y aclara que no abre el portón', () => {
+    renderWithProviders(<AccessDecisionBadge decision="Registrado" />)
+
+    const badge = screen.getByText('Registrado')
+    expect(badge).toHaveClass('text-sky-700')
+    expect(badge).not.toHaveClass('text-green-700')
+    expect(badge).toHaveAttribute('title', expect.stringMatching(/no abre el portón/))
+    expect(badge.querySelector('svg')).not.toBeNull()
+  })
+
   it('una decisión desconocida muestra su valor en gris y sin ícono', () => {
     renderWithProviders(<AccessDecisionBadge decision="Revisión manual" />)
 

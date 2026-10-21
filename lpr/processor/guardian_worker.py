@@ -11,8 +11,9 @@ from ultralytics import YOLO
 
 from lpr.utils.images import frame_to_pil, pil_to_base64
 from lpr.utils.capture import reconnect_capture
-from lpr.api.client import post_event, post_anomaly, service_headers
+from lpr.api.client import fetch_camera_json, post_event, post_anomaly
 from lpr.settings import settings
+from lpr.utils.zones import point_in_polygon, polygon_mask, polygon_to_pixels, valid_polygons
 import requests
 
 class GuardianWorker:
@@ -66,21 +67,20 @@ class GuardianWorker:
 
     def _fetch_zones(self):
         try:
-            # Backend url normally ends with /api/v1... We need /anomalies/cameras/:id/zones
-            base = self.cfg.backend_url.replace('/detections', '').rstrip('/')
-            url = f"{base}/anomalies/cameras/{self.cfg.camera_id}/zones"
             # Fase 4 · P5.B/P5.C: la ruta exige la API key de servicio
-            # (ServiceApiKeyGuard, acotada al condominio de la key). Sin el
-            # header respondía 401 y el Guardián corría SIN zonas (todo el
-            # cuadro). Misma credencial que la ingesta (`service_headers`).
-            resp = requests.get(url, headers=service_headers(), timeout=5)
-            if resp.status_code != 200:
+            # (ServiceApiKeyGuard, acotada al condominio de la key); el helper
+            # manda `service_headers`. Sin el header respondía 401 y el Guardián
+            # corría SIN zonas (todo el cuadro).
+            data = fetch_camera_json(
+                self.cfg.backend_url, f"/anomalies/cameras/{self.cfg.camera_id}/zones", timeout=5,
+            )
+            if data is None:
+                # El helper ya logueó el motivo (4xx/5xx/red/cuerpo inválido).
                 logging.warning(
-                    'GET de zonas del Guardián para %s respondió %s: se mantienen las zonas anteriores',
-                    self.cfg.camera_id, resp.status_code,
+                    'GET de zonas del Guardián para %s falló: se mantienen las zonas anteriores',
+                    self.cfg.camera_id,
                 )
-            if resp.status_code == 200:
-                data = resp.json()
+            else:
                 logging.info(f"[VIGILIA-DEBUG] [ZONE-FETCH] Raw data received: {json.dumps(data)}")
                 # Solo un `false` explícito deshabilita; ausente o true => habilitado.
                 self.guardian_enabled = data.get('enableGuardian') is not False
@@ -89,10 +89,7 @@ class GuardianWorker:
 
                 # list of polygons (lists of dicts {x: float, y: float})
                 zones = data.get('guardianZones', [])
-                valid_zones = []
-                for z in zones:
-                    if len(z) >= 3:
-                        valid_zones.append(z)
+                valid_zones = valid_polygons(zones)
                 self.guardian_zones = valid_zones
                 logging.info('Descargadas %d zonas de intrusión para %s', len(valid_zones), self.cfg.camera_id)
         except Exception as e:
@@ -229,9 +226,7 @@ class GuardianWorker:
             # Solo buscar movimiento dentro de las zonas definidas
             for zone in self.guardian_zones:
                 # Crear máscara para la zona
-                zone_mask = np.zeros_like(fg_mask)
-                poly_pts = np.array([[p['x'] * w, p['y'] * h] for p in zone], dtype=np.int32)
-                cv2.fillPoly(zone_mask, [poly_pts], 255)
+                zone_mask = polygon_mask(fg_mask.shape[:2], polygon_to_pixels(zone, w, h))
                 
                 # Intersección: movimiento dentro de la zona
                 motion_in_zone = cv2.bitwise_and(fg_mask, zone_mask)
@@ -298,11 +293,10 @@ class GuardianWorker:
                 ]
 
                 for idx, zone in enumerate(self.guardian_zones):
-                    poly_pts = np.array([[p['x'] * w, p['y'] * h] for p in zone], dtype=np.int32)
+                    poly_pts = polygon_to_pixels(zone, w, h)
                     
                     for p_idx, pt in enumerate(points_to_check):
-                        dist = cv2.pointPolygonTest(poly_pts, pt, True)
-                        inside = dist >= 0
+                        inside = point_in_polygon(pt, poly_pts)
                         
                         if inside:
                             p_name = ["Cabeza", "Centro", "Pies"][p_idx]

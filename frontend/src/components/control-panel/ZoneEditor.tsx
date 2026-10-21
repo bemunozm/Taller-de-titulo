@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import type { Camera } from '@/types/index'
-import api from '@/lib/axios'
+import type { ReactNode } from 'react'
+import { ZONE_LIMITS, type Camera, type ZonePoint } from '@/types/index'
+import { getUserFacingErrorMessage } from '@/helpers/httpErrors'
 import { toast } from 'react-toastify'
 import { 
   TrashIcon, 
@@ -21,16 +22,71 @@ import {
 import { Button } from '@/components/ui/Button'
 import { motion, AnimatePresence } from 'motion/react'
 
-type Point = { x: number; y: number }
+type Point = ZonePoint
 
-type GuardianZoneEditorProps = {
-  camera: Camera
-  onClose: () => void
-  onSaved: () => void
+/** Paleta del lienzo: `guardian` (rojo, zonas de alarma) o `lpr` (verde, zona de detección). */
+export type ZoneEditorTone = 'guardian' | 'lpr'
+
+interface ToneClasses {
+  polygon: string
+  halo: string
+  point: string
+  glow: string
 }
 
-export default function GuardianZoneEditor({ camera, onClose, onSaved }: GuardianZoneEditorProps) {
-  const [zones, setZones] = useState<Point[][]>(camera.guardianZones || [])
+// Clases literales (no interpoladas) para que Tailwind las detecte.
+const TONES: Record<ZoneEditorTone, ToneClasses> = {
+  guardian: {
+    polygon: 'fill-red-500/10 stroke-red-500/40 hover:fill-red-500/20',
+    halo: 'fill-red-500/10',
+    point: 'stroke-red-500',
+    glow: 'rgba(239, 68, 68, 0.6)',
+  },
+  lpr: {
+    polygon: 'fill-emerald-500/10 stroke-emerald-400/60 hover:fill-emerald-500/20',
+    halo: 'fill-emerald-500/10',
+    point: 'stroke-emerald-500',
+    glow: 'rgba(16, 185, 129, 0.6)',
+  },
+}
+
+export interface ZoneEditorProps {
+  /** Cámara cuyo video en vivo se muestra de fondo. */
+  camera: Pick<Camera, 'id' | 'name' | 'mountPath'>
+  /** Polígonos normalizados (0 a 1) con los que arranca el lienzo. */
+  initialZones: Point[][]
+  title: ReactNode
+  description: ReactNode
+  /** Texto del botón de guardado. */
+  saveLabel?: string
+  /** Mensaje de éxito tras `onSave`. */
+  successMessage?: string
+  tone?: ZoneEditorTone
+  /**
+   * Persiste (o encola) las zonas. Si rechaza, el editor sigue abierto y avisa
+   * con un toast; si resuelve, avisa y se cierra con `onClose`.
+   */
+  onSave: (zones: Point[][]) => Promise<void>
+  onClose: () => void
+}
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value))
+}
+
+export function ZoneEditor({
+  camera,
+  initialZones,
+  title,
+  description,
+  saveLabel = 'Fijar Precisión',
+  successMessage = 'Cambios sincronizados correctamente',
+  tone = 'guardian',
+  onSave,
+  onClose,
+}: ZoneEditorProps) {
+  const toneClasses = TONES[tone]
+  const [zones, setZones] = useState<Point[][]>(initialZones)
   const [currentZone, setCurrentZone] = useState<Point[]>([])
   const [isSaving, setIsSaving] = useState(false)
   const [hoveredPoint, setHoveredPoint] = useState<{ zoneIndex: number, pointIndex: number } | null>(null)
@@ -107,9 +163,10 @@ export default function GuardianZoneEditor({ camera, onClose, onSaved }: Guardia
     const svgPoint = pt.matrixTransform(matrix.inverse())
     
     // Convert back to normalized 0-1 based on expected 1000x1000 viewBox
+    // Arrastrar fuera del video daría valores fuera de 0..1, que el backend/zod rechazan.
     return {
-      x: svgPoint.x / 1000,
-      y: svgPoint.y / 1000
+      x: clamp01(svgPoint.x / 1000),
+      y: clamp01(svgPoint.y / 1000)
     }
   }
 
@@ -228,12 +285,20 @@ export default function GuardianZoneEditor({ camera, onClose, onSaved }: Guardia
 
     const pt = getRelativeCoords(e)
     if (!pt) return
+    if (currentZone.length >= ZONE_LIMITS.maxPoints) {
+      toast.warning(`Una zona admite como máximo ${ZONE_LIMITS.maxPoints} puntos`)
+      return
+    }
     setCurrentZone(prev => [...prev, pt])
   }
 
   const handleSvgContextMenu = (e: React.MouseEvent<SVGSVGElement>) => {
     e.preventDefault()
-    if (currentZone.length >= 3) {
+    if (currentZone.length >= ZONE_LIMITS.minPoints) {
+      if (zones.length >= ZONE_LIMITS.maxZones) {
+        toast.warning(`Se admiten como máximo ${ZONE_LIMITS.maxZones} zonas`)
+        return
+      }
       saveToHistory()
       setZones(prev => [...prev, currentZone])
       setCurrentZone([])
@@ -250,11 +315,11 @@ export default function GuardianZoneEditor({ camera, onClose, onSaved }: Guardia
   const handleSave = async () => {
     setIsSaving(true)
     try {
-      await api.patch(`/cameras/${camera.id}/zones`, { zones })
-      toast.success('Cambios sincronizados correctamente')
-      onSaved()
+      await onSave(zones)
+      toast.success(successMessage)
+      onClose()
     } catch (err) {
-      toast.error('Error al guardar')
+      toast.error(getUserFacingErrorMessage(err, 'Error al guardar'))
     } finally {
       setIsSaving(false)
     }
@@ -278,10 +343,10 @@ export default function GuardianZoneEditor({ camera, onClose, onSaved }: Guardia
             </div>
             <div>
               <DialogTitle className="text-xl font-bold text-white uppercase tracking-tighter">
-                Perímetro de Seguridad <span className="text-indigo-500 ml-2 font-black">AI</span>
+                {title}
               </DialogTitle>
               <DialogDescription className="text-zinc-400">
-                Ajustando precisión visual para <span className="text-indigo-400 font-bold">{camera.name}</span>
+                {description}
               </DialogDescription>
             </div>
           </div>
@@ -300,7 +365,7 @@ export default function GuardianZoneEditor({ camera, onClose, onSaved }: Guardia
                     </motion.button>
                 )}
             </AnimatePresence>
-            <Button plain onClick={onClose} className="p-2 text-zinc-400 hover:text-white transition-all">
+            <Button plain onClick={onClose} aria-label="Cerrar editor de zonas" className="p-2 text-zinc-400 hover:text-white transition-all">
                 <XMarkIcon className="h-6 w-6" />
             </Button>
           </div>
@@ -334,7 +399,7 @@ export default function GuardianZoneEditor({ camera, onClose, onSaved }: Guardia
                   <g key={`gz-${zIdx}`}>
                     <polygon
                       points={zone.map(p => `${p.x * vw},${p.y * vh}`).join(' ')}
-                      className="fill-red-500/10 stroke-red-500/40 hover:fill-red-500/20 transition-all duration-300 cursor-pointer"
+                      className={`${toneClasses.polygon} transition-all duration-300 cursor-pointer`}
                       strokeWidth="2"
                     />
                     {zone.map((p, pIdx) => {
@@ -351,14 +416,14 @@ export default function GuardianZoneEditor({ camera, onClose, onSaved }: Guardia
                         >
                           <circle cx={p.x * vw} cy={p.y * vh} r="25" fill="transparent" />
                           {(isHovered || isDragging) && (
-                            <circle cx={p.x * vw} cy={p.y * vh} r="18" className="fill-red-500/10 animate-pulse" />
+                            <circle cx={p.x * vw} cy={p.y * vh} r="18" className={`${toneClasses.halo} animate-pulse`} />
                           )}
                           <circle
                             cx={p.x * vw}
                             cy={p.y * vh}
                             r={isDragging ? "10" : isHovered ? "9" : "6"}
-                            className={`fill-white stroke-red-500 stroke-[3] transition-all duration-200 ${isDragging ? 'shadow-2xl' : ''}`}
-                            style={{ filter: isHovered || isDragging ? 'drop-shadow(0 0 12px rgba(239, 68, 68, 0.6))' : 'none' }}
+                            className={`fill-white ${toneClasses.point} stroke-[3] transition-all duration-200 ${isDragging ? 'shadow-2xl' : ''}`}
+                            style={{ filter: isHovered || isDragging ? `drop-shadow(0 0 12px ${toneClasses.glow})` : 'none' }}
                           />
                         </g>
                       )
@@ -495,6 +560,8 @@ export default function GuardianZoneEditor({ camera, onClose, onSaved }: Guardia
                             </div>
                           </div>
                           <button
+                            type="button"
+                            aria-label={`Eliminar zona ${i + 1}`}
                             onClick={() => deleteZoneWithHistory(i)}
                             className="p-2.5 text-zinc-700 hover:text-red-500 hover:bg-red-500/10 rounded-xl transition-all"
                           >
@@ -535,7 +602,7 @@ export default function GuardianZoneEditor({ camera, onClose, onSaved }: Guardia
                   className="w-full bg-indigo-600 hover:bg-indigo-500 shadow-[0_20px_40px_-10px_rgba(79,70,229,0.3)] rounded-[20px] py-4 transition-all active:scale-95"
                 >
                   {isSaving ? <ArrowPathIcon className="h-6 w-6 animate-spin text-white" /> : <CheckCircleIcon className="h-6 w-6 text-white" />}
-                  <span className="font-black uppercase tracking-widest ml-2 text-[10px]">{isSaving ? 'Aplicando...' : 'Fijar Precisión'}</span>
+                  <span className="font-black uppercase tracking-widest ml-2 text-[10px]">{isSaving ? 'Aplicando...' : saveLabel}</span>
                 </Button>
               </div>
             </div>

@@ -15,6 +15,7 @@ import { VisitsService } from '../visits/visits.service';
 import type { Vehicle } from '../vehicles/entities/vehicle.entity';
 import type { Notification } from '../notifications/entities/notification.entity';
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   NotFoundException,
@@ -1826,5 +1827,231 @@ describe('DetectionsService — LPR fail-closed (Fase 4 · P3, D4)', () => {
     expect(lastDecision()).toBe('Pendiente');
     expect(visitsService.validateAccess).not.toHaveBeenCalled();
     expect(hubGateway.sendDoorOpen).not.toHaveBeenCalled();
+  });
+
+  describe('plan LPR por cámara (F2): modo solo registro (D8) y normalización (D11)', () => {
+    const REGISTER_META = { direction: 'exit' as const };
+
+    function activeResident(): Vehicle {
+      return {
+        id: 'vehicle-1',
+        plate: PLATE,
+        active: true,
+        vehicleType: 'auto',
+        accessLevel: 'residente',
+        owner: { id: 'owner-1' },
+      } as unknown as Vehicle;
+    }
+
+    function cameraWith(lprSettings: unknown): void {
+      cameraRepository.findOne.mockResolvedValue({
+        id: CAMERA_ID,
+        organizationId: ORG,
+        lprSettings,
+      } as unknown as Camera);
+    }
+
+    function visitsSpy() {
+      return {
+        validateAccess: jest.fn().mockResolvedValue({
+          valid: true,
+          visit: makeVisit(),
+          message: 'ok',
+        }),
+        checkIn: jest.fn(),
+        checkOut: jest.fn(),
+        findByPlate: jest.fn(),
+      };
+    }
+
+    function expectNoAccessEffects(visits: ReturnType<typeof visitsSpy>): void {
+      expect(hubGateway.sendDoorOpen).not.toHaveBeenCalled();
+      expect(
+        notificationsService.notifyByRoleForOrganization,
+      ).not.toHaveBeenCalled();
+      expect(notificationsService.create).not.toHaveBeenCalled();
+      expect(visits.validateAccess).not.toHaveBeenCalled();
+      expect(visits.checkIn).not.toHaveBeenCalled();
+      expect(visits.checkOut).not.toHaveBeenCalled();
+      expect(vehiclesService.findByPlate).not.toHaveBeenCalled();
+    }
+
+    it.each([
+      ['residente activo', activeResident()],
+      ['patente sin vehículo (visita válida)', null],
+    ])(
+      'register: %s -> guarda detección + intento Registrado, y NUNCA abre, escala, notifica ni toca visitas',
+      async (_name, vehicle) => {
+        cameraWith({ action: 'register', direction: 'both' });
+        vehiclesService.findByPlate.mockResolvedValue(vehicle);
+        const visits = visitsSpy();
+
+        const result = await buildService(visits).createDetection(
+          { ...dto, meta: REGISTER_META },
+          ORG,
+        );
+
+        expect(detectionsRepo.save).toHaveBeenCalledTimes(1);
+        expect(attemptsRepo.create).toHaveBeenCalledTimes(1);
+        expect(lastDecision()).toBe('Registrado');
+        expect(attemptsRepo.create.mock.calls[0][0]).toEqual(
+          expect.objectContaining({
+            decision: 'Registrado',
+            method: 'Patente - Salida',
+            residente: null,
+            responseTimeMs: null,
+            organizationId: ORG,
+          }),
+        );
+        expect(result).toEqual(
+          expect.objectContaining({
+            isExit: true,
+            attempt: expect.objectContaining({
+              decision: 'Registrado',
+            }) as unknown,
+          }),
+        );
+        expect(result).not.toHaveProperty('requiresApproval');
+        expectNoAccessEffects(visits);
+      },
+    );
+
+    it('register sin dirección en meta -> método neutro y isExit false', async () => {
+      cameraWith({ action: 'register' });
+
+      const result = await buildService(visitsSpy()).createDetection(dto, ORG);
+
+      expect(attemptsRepo.create.mock.calls[0][0]).toEqual(
+        expect.objectContaining({ method: 'Patente - Registro' }),
+      );
+      expect(result).toEqual(expect.objectContaining({ isExit: false }));
+    });
+
+    it('register con dirección entry -> Patente - Entrada', async () => {
+      cameraWith({ action: 'register' });
+
+      await buildService(visitsSpy()).createDetection(
+        { ...dto, meta: { direction: 'entry' } },
+        ORG,
+      );
+
+      expect(attemptsRepo.create.mock.calls[0][0]).toEqual(
+        expect.objectContaining({ method: 'Patente - Entrada' }),
+      );
+    });
+
+    it.each([
+      ['un valor desconocido', { action: 'otro' }],
+      ['un valor corrupto no objeto', 'register'],
+      ['un arreglo', []],
+    ])(
+      'fail-closed: lprSettings con %s tampoco abre el portón',
+      async (_name, settings) => {
+        cameraWith(settings);
+        vehiclesService.findByPlate.mockResolvedValue(activeResident());
+        const visits = visitsSpy();
+
+        await buildService(visits).createDetection(dto, ORG);
+
+        expect(lastDecision()).toBe('Registrado');
+        expectNoAccessEffects(visits);
+      },
+    );
+
+    it.each([
+      ['null', null],
+      ['sin la propiedad', undefined],
+      ['action access', { action: 'access', direction: 'both' }],
+      ['solo zona', { zone: [] }],
+    ])(
+      'access (%s): residente activo -> Permitido y abre el portón, como hoy',
+      async (_name, settings) => {
+        cameraWith(settings);
+        vehiclesService.findByPlate.mockResolvedValue(activeResident());
+
+        await buildService(visitsSpy()).createDetection(dto, ORG);
+
+        expect(lastDecision()).toBe('Permitido');
+        expect(hubGateway.sendDoorOpen).toHaveBeenCalledTimes(1);
+        expect(vehiclesService.findByPlate).toHaveBeenCalledWith(PLATE, {
+          organizationId: ORG,
+        });
+      },
+    );
+
+    it('access: patente sin vehículo ni visita sigue escalando al conserje', async () => {
+      cameraWith({ action: 'access' });
+      const visits = {
+        validateAccess: jest
+          .fn()
+          .mockResolvedValue({ valid: false, message: 'sin visita' }),
+      };
+
+      const result = await buildService(visits).createDetection(dto, ORG);
+
+      expect(result).toEqual(
+        expect.objectContaining({ requiresApproval: true }),
+      );
+      expect(hubGateway.sendDoorOpen).not.toHaveBeenCalled();
+    });
+
+    describe('D11: normalización de la patente', () => {
+      it("'bc-df12' se busca como 'BCDF12', se persiste normalizada y conserva lo recibido en plate_raw", async () => {
+        const vehicle = {
+          ...activeResident(),
+          plate: 'BCDF12',
+        };
+        vehiclesService.findByPlate.mockImplementation((plate: string) =>
+          Promise.resolve(plate === 'BCDF12' ? vehicle : null),
+        );
+
+        await buildService(visitsSpy()).createDetection(
+          { cameraId: CAMERA_ID, plate: 'bc-df12' },
+          ORG,
+        );
+
+        expect(vehiclesService.findByPlate).toHaveBeenCalledWith('BCDF12', {
+          organizationId: ORG,
+        });
+        expect(detectionsRepo.create).toHaveBeenCalledWith(
+          expect.objectContaining({ plate: 'BCDF12', plate_raw: 'bc-df12' }),
+        );
+        expect(lastDecision()).toBe('Permitido');
+        expect(hubGateway.sendDoorOpen).toHaveBeenCalledWith(
+          expect.anything(),
+          { type: 'vehicular', plate: 'BCDF12' },
+        );
+      });
+
+      it('respeta un plate_raw que ya manda el worker', async () => {
+        await buildService(visitsSpy()).createDetection(
+          { cameraId: CAMERA_ID, plate: 'bc df12', plate_raw: 'BCDF1A' },
+          ORG,
+        );
+
+        expect(detectionsRepo.create).toHaveBeenCalledWith(
+          expect.objectContaining({ plate: 'BCDF12', plate_raw: 'BCDF1A' }),
+        );
+      });
+
+      it('una patente ya normalizada no se toca (sin plate_raw inventado)', async () => {
+        await buildService(visitsSpy()).createDetection(dto, ORG);
+
+        const created = detectionsRepo.create.mock.calls[0][0] as {
+          plate_raw?: string;
+        };
+        expect(created.plate_raw).toBeUndefined();
+      });
+
+      it('una patente sin caracteres válidos -> 400 antes de guardar nada', async () => {
+        await expect(
+          buildService(visitsSpy()).createDetection(
+            { cameraId: CAMERA_ID, plate: '---' },
+            ORG,
+          ),
+        ).rejects.toThrow(BadRequestException);
+        expect(detectionsRepo.save).not.toHaveBeenCalled();
+      });
+    });
   });
 });

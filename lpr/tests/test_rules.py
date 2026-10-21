@@ -1,11 +1,8 @@
-"""Tests de `lpr.processor.rules` — la lógica pura que decide si una detección
-se confirma y se emite (y por lo tanto si se abre un portón).
+"""Tests de `lpr.processor.rules` — normalización y plausibilidad de patentes.
 
-Antes de Fase 3 el único test del subproyecto era `assert 1 + 1 == 2`. Estos
-tests fijan el comportamiento de las reglas tras las correcciones de 3.A.
+La confirmación y el gate de confianza que vivían acá se reemplazaron por el
+seguimiento + voto (ver `test_plate_tracker.py`).
 """
-import time
-
 import pytest
 
 from lpr.processor import rules
@@ -46,54 +43,46 @@ def test_plausible_plate_charset_chileno(chile_regex, plate, esperado):
     assert rules.plausible_plate(plate) is esperado
 
 
-def test_plausible_plate_default_permisivo(monkeypatch):
-    # Sin regex configurado corre el fallback laxo `^[A-Z0-9]{3,8}$`.
+def test_plausible_plate_default_es_el_formato_chileno(monkeypatch):
+    # Sin regex configurado rige el formato chileno (LLLL## / LL####), no el laxo anterior.
     monkeypatch.setattr(settings, 'LPR_PLATE_REGEX', None)
-    assert rules.plausible_plate('TURBO') is True
-    assert rules.plausible_plate('AB') is False  # < 3 chars
+    assert rules.plausible_plate('BBCD12') is True
+    assert rules.plausible_plate('LP1234') is True
+    assert rules.plausible_plate('TURBO') is False
+    assert rules.plausible_plate('ABC123') is False
+    assert rules.plausible_plate('AB') is False
+    assert rules.plausible_plate('') is False
 
 
-# --- should_confirm --------------------------------------------------------
-
-def test_no_confirma_con_una_sola_aparicion(monkeypatch):
-    monkeypatch.setattr(settings, 'LPR_CONFIRM_FRAMES', 3)
-    monkeypatch.setattr(settings, 'LPR_CONFIRM_SECONDS', 5.0)
-    now = time.time()
-    sightings = {'BBCD12': {'first_seen': now, 'count': 1, 'last_seen': now}}
-    confirmado, _ = rules.should_confirm(sightings, 'BBCD12')
-    assert confirmado is False
+def test_plausible_plate_regex_vacio_es_como_no_configurado(monkeypatch):
+    monkeypatch.setattr(settings, 'LPR_PLATE_REGEX', '')
+    assert rules.plausible_plate('BBCD12') is True and rules.plausible_plate('TURBO') is False
 
 
-def test_confirma_al_alcanzar_confirm_frames(monkeypatch):
-    monkeypatch.setattr(settings, 'LPR_CONFIRM_FRAMES', 3)
-    monkeypatch.setattr(settings, 'LPR_CONFIRM_SECONDS', 5.0)
-    now = time.time()
-    sightings = {'BBCD12': {'first_seen': now, 'count': 3, 'last_seen': now}}
-    confirmado, info = rules.should_confirm(sightings, 'BBCD12')
-    assert confirmado is True
-    assert info.get('confirmed_by') == 'frames'
+def test_regex_configurado_sigue_siendo_override(monkeypatch):
+    monkeypatch.setattr(settings, 'LPR_PLATE_REGEX', r'^[A-Z]{2}[0-9]{3}[A-Z]{2}$')  # formato argentino
+    assert rules.plausible_plate('AB123CD') is True
+    assert rules.plausible_plate('BBCD12') is False
 
 
-def test_no_confirma_patente_desconocida():
-    confirmado, info = rules.should_confirm({}, 'NOEXISTE')
-    assert confirmado is False
-    assert info.get('reason') == 'no_sightings'
+def test_regex_invalido_no_acepta_nada(monkeypatch):
+    monkeypatch.setattr(settings, 'LPR_PLATE_REGEX', '[')
+    assert rules.plausible_plate('BBCD12') is False
 
 
-# --- should_save_or_emit ---------------------------------------------------
+# --- resolve_plate ---------------------------------------------------------
 
-def test_emite_con_ocr_altisimo(monkeypatch):
-    monkeypatch.setattr(settings, 'LPR_COMBINED_ALPHA', 0.75)
-    monkeypatch.setattr(settings, 'LPR_COMBINED_THRESHOLD', 0.3)
-    # ocr_conf >= ocr_thresh → True por la primera regla
-    assert rules.should_save_or_emit(0.4, 0.99, 0.3, 0.55, 0.98) is True
+def test_resolve_plate_corrige_por_posicion(monkeypatch):
+    monkeypatch.setattr(settings, 'LPR_PLATE_REGEX', None)
+    assert rules.resolve_plate('BBCDI2') == 'BBCD12'
+    assert rules.resolve_plate('TURBO') is None
+    assert rules.resolve_plate('') is None
 
 
-def test_no_emite_con_ambas_confianzas_bajas(monkeypatch):
-    monkeypatch.setattr(settings, 'LPR_COMBINED_ALPHA', 0.75)
-    monkeypatch.setattr(settings, 'LPR_COMBINED_THRESHOLD', 0.3)
-    # det y ocr bajos → combined < threshold → no emite
-    assert rules.should_save_or_emit(0.1, 0.05, 0.3, 0.55, 0.98) is False
+def test_resolve_plate_con_override_usa_el_texto_tal_cual(monkeypatch):
+    monkeypatch.setattr(settings, 'LPR_PLATE_REGEX', r'^[A-Z0-9]{3,8}$')
+    assert rules.resolve_plate('BBCDI2') == 'BBCDI2'  # el override manda: sin correccion
+    assert rules.resolve_plate('AB') is None
 
 
 # --- analyze_char_confidences ----------------------------------------------

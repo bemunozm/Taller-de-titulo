@@ -1,6 +1,7 @@
 import {
   CheckCircleIcon,
   ClockIcon,
+  ClipboardDocumentListIcon,
   NoSymbolIcon,
   Square2StackIcon,
   XCircleIcon,
@@ -14,6 +15,7 @@ const DECISION_ICONS: Record<AccessDecision, typeof CheckCircleIcon> = {
   Duplicado: Square2StackIcon,
   Pendiente: ClockIcon,
   Expirado: NoSymbolIcon,
+  Registrado: ClipboardDocumentListIcon,
 }
 
 interface AccessDecisionBadgeProps {

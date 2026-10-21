@@ -1,6 +1,8 @@
 import api from '@/lib/axios'
 import { isAxiosError } from 'axios'
-import type { Camera, CreateCameraPayload, UpdateCameraFormData } from '@/types/index'
+import type { Camera, CameraLprSettingsResponse, CreateCameraPayload, LprSettings, UpdateCameraFormData, ZonePoint } from '@/types/index'
+import { cameraLprSettingsResponseSchema } from '@/types/index'
+import { toApiError } from '@/helpers/httpErrors'
 
 export async function enableCameraGuardian(id: string, enableGuardian: boolean): Promise<{ id: string; name: string; enableGuardian: boolean }> {
   try {
@@ -132,4 +134,41 @@ export async function enableCameraLpr(id: string, enableLpr: boolean): Promise<{
     }
     throw error
   }
+}
+
+/** Zonas de intrusión del Guardián (reemplaza todas las zonas de la cámara). */
+export async function updateCameraGuardianZones(id: string, zones: ZonePoint[][]): Promise<void> {
+  try {
+    await api.patch(`/cameras/${id}/zones`, { zones })
+  } catch (error) {
+    throw toApiError(error, 'Error al guardar las zonas')
+  }
+}
+
+/** Configuración de visión LPR de la cámara; `lprSettings: null` = defaults del worker. */
+export async function getCameraLprSettings(id: string): Promise<CameraLprSettingsResponse> {
+  try {
+    const { data } = await api.get<unknown>(`/cameras/${id}/lpr-settings`)
+    return cameraLprSettingsResponseSchema.parse(data)
+  } catch (error) {
+    throw toApiError(error, 'No se pudo cargar la configuración LPR')
+  }
+}
+
+/** Reemplaza (no mezcla) la configuración LPR: hay que enviar el objeto completo. */
+export async function updateCameraLprSettings(
+  id: string,
+  settings: LprSettings,
+): Promise<CameraLprSettingsResponse> {
+  try {
+    const { data } = await api.patch<unknown>(`/cameras/${id}/lpr-settings`, settings)
+    return cameraLprSettingsResponseSchema.parse(data)
+  } catch (error) {
+    throw toApiError(error, 'No se pudo guardar la configuración LPR')
+  }
+}
+
+/** Vuelve a los defaults del worker (el backend interpreta `{}` como `null`). */
+export async function resetCameraLprSettings(id: string): Promise<CameraLprSettingsResponse> {
+  return updateCameraLprSettings(id, {})
 }

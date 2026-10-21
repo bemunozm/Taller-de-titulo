@@ -8,6 +8,9 @@ import { GUARDS_METADATA, ROUTE_ARGS_METADATA } from '@nestjs/common/constants';
 import { ParseUUIDPipe } from '@nestjs/common';
 import { classMetadata, handlerMetadata } from '../test-utils/handler-metadata';
 import { UpdateGuardianZonesDto } from './dto/update-guardian-zones.dto';
+import { UpdateLprSettingsDto } from './dto/lpr-settings.dto';
+import { AUDITABLE_KEY } from '../audit/decorators/auditable.decorator';
+import { AuditModule, AuditAction } from '../audit/entities/audit-log.entity';
 
 const CAMERA_ID = '0f8fad5b-d9cb-469f-a165-70867728950e';
 
@@ -124,6 +127,69 @@ describe('CamerasController', () => {
       await zonesController.updateZones(CAMERA_ID, dto);
 
       expect(updateGuardianZones).toHaveBeenCalledWith(CAMERA_ID, dto.zones);
+    });
+  });
+
+  describe('/cameras/:id/lpr-settings (plan LPR por cámara, F2)', () => {
+    it('PATCH exige cameras.enable-ia y valida id (UUID) y body (UpdateLprSettingsDto)', () => {
+      expect(
+        handlerMetadata(
+          CamerasController,
+          'updateLprSettings',
+          PERMISSIONS_KEY,
+        ),
+      ).toEqual(['cameras.enable-ia']);
+      const args = Reflect.getMetadata(
+        ROUTE_ARGS_METADATA,
+        CamerasController,
+        'updateLprSettings',
+      ) as Record<string, { index: number; data?: string; pipes?: unknown[] }>;
+      const idArg = Object.values(args).find((arg) => arg.data === 'id');
+      expect(idArg?.pipes).toEqual([ParseUUIDPipe]);
+      const paramTypes = Reflect.getMetadata(
+        'design:paramtypes',
+        CamerasController.prototype,
+        'updateLprSettings',
+      ) as unknown[];
+      expect(paramTypes[1]).toBe(UpdateLprSettingsDto);
+    });
+
+    it('PATCH está auditado', () => {
+      expect(
+        handlerMetadata(CamerasController, 'updateLprSettings', AUDITABLE_KEY),
+      ).toEqual(
+        expect.objectContaining({
+          module: AuditModule.CAMERAS,
+          action: AuditAction.UPDATE,
+        }),
+      );
+    });
+
+    it('GET es una lectura: cameras.read', () => {
+      expect(
+        handlerMetadata(CamerasController, 'getLprSettings', PERMISSIONS_KEY),
+      ).toEqual(['cameras.read']);
+    });
+
+    it('delegan en el servicio (acotado al tenant) y no registran la cámara en el worker', async () => {
+      const updateLprSettings = jest.fn().mockResolvedValue({ id: CAMERA_ID });
+      const getLprSettings = jest.fn().mockResolvedValue({ id: CAMERA_ID });
+      const registerCamera = jest.fn();
+      const lprController = new CamerasController({
+        updateLprSettings,
+        getLprSettings,
+        registerCamera,
+      } as unknown as CamerasService);
+      const dto = Object.assign(new UpdateLprSettingsDto(), {
+        action: 'register' as const,
+      });
+
+      await lprController.updateLprSettings(CAMERA_ID, dto);
+      await lprController.getLprSettings(CAMERA_ID);
+
+      expect(updateLprSettings).toHaveBeenCalledWith(CAMERA_ID, dto);
+      expect(getLprSettings).toHaveBeenCalledWith(CAMERA_ID);
+      expect(registerCamera).not.toHaveBeenCalled();
     });
   });
 

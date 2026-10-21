@@ -10,6 +10,11 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { CreateCameraDto } from './dto/create-camera.dto';
 import { UpdateCameraDto } from './dto/update-camera.dto';
+import {
+  toStoredLprSettings,
+  type LprSettingsDto,
+} from './dto/lpr-settings.dto';
+import type { LprSettings, WorkerLprSettingsView } from './lpr-settings';
 import { Camera, type GuardianZone } from './entities/camera.entity';
 import { Role } from 'src/roles/entities/role.entity';
 import { encryptString, decryptString } from 'src/utils/crypto.util';
@@ -1014,6 +1019,74 @@ export class CamerasService {
         'Error al guardar las zonas de intrusión',
       );
     }
+  }
+
+  /**
+   * Reemplaza la configuración de visión LPR de una cámara del condominio del
+   * actor. `dto` llega validado por `UpdateLprSettingsDto`; `{}` la resetea
+   * a `null` (= defaults del worker). NO notifica al worker manager: el
+   * worker hace pull de `GET /workers/cameras/:id/lpr-settings`.
+   */
+  async updateLprSettings(cameraId: string, dto: LprSettingsDto) {
+    const camera = await this.loadScopedOrFail(cameraId);
+    camera.lprSettings = toStoredLprSettings(dto);
+    try {
+      const updated = await this.cameraRepository.save(camera);
+      this.logger.log(
+        `Configuración LPR actualizada para la cámara ${camera.name} (${camera.id})`,
+      );
+      return {
+        id: updated.id,
+        name: updated.name,
+        enableLpr: updated.enableLpr,
+        lprSettings: updated.lprSettings,
+      };
+    } catch (error) {
+      this.logger.error(
+        `Error al guardar la configuración LPR de la cámara ${cameraId}:`,
+        error,
+      );
+      throw new InternalServerErrorException(
+        'Error al guardar la configuración LPR',
+      );
+    }
+  }
+
+  /** Configuración de visión LPR de una cámara del condominio del actor. */
+  async getLprSettings(cameraId: string): Promise<{
+    id: string;
+    name: string;
+    enableLpr: boolean;
+    lprSettings: LprSettings | null;
+  }> {
+    const camera = await this.loadScopedOrFail(cameraId);
+    return {
+      id: camera.id,
+      name: camera.name,
+      enableLpr: camera.enableLpr,
+      lprSettings: camera.lprSettings ?? null,
+    };
+  }
+
+  /**
+   * Igual que `getLprSettings` pero acotado a un condominio EXPLÍCITO (el de
+   * la API key de servicio, sin actor humano): una cámara de otra
+   * organización responde como inexistente (404). `cameraId` puede ser id o
+   * mountPath. Solo devuelve la configuración: nunca la URL de origen ni roles.
+   */
+  async getLprSettingsForOrganization(
+    cameraId: string,
+    organizationId: string,
+  ): Promise<WorkerLprSettingsView> {
+    const camera = await this.resolveCameraByIdOrMount(cameraId);
+    if (!camera || camera.organizationId !== organizationId) {
+      throw new NotFoundException(`Cámara '${cameraId}' no encontrada`);
+    }
+    return {
+      cameraId: camera.id,
+      enableLpr: camera.enableLpr,
+      lprSettings: camera.lprSettings ?? null,
+    };
   }
 
   /**

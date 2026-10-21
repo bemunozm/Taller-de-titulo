@@ -1,6 +1,7 @@
+import logging
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Mapping, Optional
 from types import SimpleNamespace
 from pydantic import BaseModel, Field, field_validator
 try:
@@ -73,7 +74,40 @@ class Settings(BaseSettings):
     LPR_RTSP_URL: Optional[str] = None
     LPR_CAMERA_ID: Optional[str] = None
     LPR_BACKEND_URL: Optional[str] = None
-    LPR_POLL_INTERVAL: float = Field(1.0, gt=0)
+    # Frecuencia de muestreo del stream (fotogramas por segundo que se envían
+    # al detector). Precedencia de la fuente (ver `resolve_sample_fps`):
+    #   1. `lprSettings.sampleFps` de la cámara (se fusiona en `apply_camera_settings`),
+    #   2. LPR_SAMPLE_FPS,
+    #   3. LPR_POLL_INTERVAL (obsoleto, en segundos: fps = 1 / valor),
+    #   4. el argv `poll_interval` que pasa el manager,
+    #   5. 1 fps.
+    # Antes `LPR_POLL_INTERVAL` tenía default 1.0 y `x or y` hacía que el argv
+    # NUNCA se usara. Ahora ambos son None si no se configuran.
+    LPR_SAMPLE_FPS: Optional[float] = Field(None, gt=0, le=30)
+    LPR_POLL_INTERVAL: Optional[float] = Field(None, gt=0)
+    # Resolución de entrada del detector (YOLO `imgsz`). 640 es el default de
+    # ultralytics y lo que corría en producción; el portón 1920x1080 necesita
+    # 1920 para ver patentes de ~40-80 px (evaluación 2026-10-20).
+    LPR_DETECTOR_IMGSZ: int = Field(640, ge=32, le=4096)
+    # Dispositivo del detector ("cpu", "cuda:0"...). None = automático de
+    # ultralytics. Es del HOST (hardware), por eso es global y no por cámara.
+    LPR_DEVICE: Optional[str] = None
+    LPR_OCR_DEVICE: str = Field('cpu', min_length=1)
+    # Filtro de forma del recorte de la patente (antes hardcodeado). `MAX_W`
+    # vacío = sin tope. Defaults conservadores = el comportamiento previo.
+    LPR_CROP_MIN_W: int = Field(30, ge=0)
+    LPR_CROP_MAX_W: Optional[int] = Field(None, ge=1)
+    LPR_CROP_MIN_H: int = Field(10, ge=0)
+    LPR_CROP_MIN_AREA: int = Field(300, ge=0)
+    LPR_CROP_MIN_RATIO: float = Field(2.0, gt=0)
+    LPR_CROP_MAX_RATIO: float = Field(12.0, gt=0)
+    # Seguimiento + voto (reemplaza `plate_sightings`/`should_confirm`): lecturas
+    # concordantes de UN mismo vehículo necesarias para emitir, y segundos sin
+    # ver la patente tras los cuales el seguimiento se cierra.
+    LPR_CONFIRM_READS: int = Field(3, ge=1, le=10)
+    LPR_TRACK_MAX_GAP_SECONDS: float = Field(1.5, gt=0)
+    # Participación mínima del texto ganador (ponderada por confianza OCR) para emitir.
+    LPR_MIN_WINNER_SHARE: float = Field(0.6, ge=0, le=1)
     LPR_DRY_RUN: bool = False
     LPR_DETECTOR_MODEL: str = 'morsetechlab/yolov11-license-plate-detection'
     LPR_OCR_MODEL: str = 'cct-s-v1-global-model'
@@ -81,6 +115,12 @@ class Settings(BaseSettings):
     LPR_DETECTIONS_DIR: str = './lpr/detecciones'
     LPR_SAVE_CROPS_DIR: str = './lpr/detecciones/crops'
     LPR_SAVE_FRAMES_DIR: str = './lpr/detecciones/frames'
+    # OBSOLETOS desde el seguimiento + voto (sin efecto en el worker): LPR_DET_HIGH_CONF,
+    # LPR_OCR_HIGH_CONF, LPR_MIN_CHAR_CONF_RATIO, LPR_DET_CONF_THRESHOLD,
+    # LPR_OCR_CONF_THRESHOLD, LPR_CONFIRM_FRAMES, LPR_CONFIRM_SECONDS,
+    # LPR_SIGHTING_TTL_SECONDS, LPR_COMBINED_ALPHA, LPR_COMBINED_THRESHOLD y
+    # LPR_MIN_EVENT_INTERVAL. Se declaran igual porque Settings rechaza variables
+    # extra: quitarlas rompería el arranque de un .env existente.
     LPR_DET_HIGH_CONF: float = 0.55
     LPR_OCR_HIGH_CONF: float = 0.98
     LPR_MIN_EVENT_INTERVAL: float = 2.0
@@ -167,6 +207,14 @@ class Settings(BaseSettings):
         # inválido no debe terminar en logs.
         hide_input_in_errors = True
 
+    @field_validator('LPR_SAMPLE_FPS', 'LPR_POLL_INTERVAL', 'LPR_DEVICE', 'LPR_CROP_MAX_W', mode='before')
+    @classmethod
+    def _empty_is_unset(cls, value: object) -> object:
+        # Un `.env` con `LPR_CROP_MAX_W=` (vacío) significa "sin configurar".
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator('WORKER_MANAGER_SECRET', mode='before')
     @classmethod
     def _validate_manager_secret(cls, value: object) -> Optional[str]:
@@ -232,25 +280,59 @@ class WorkerConfig(BaseModel):
     rtsp_url: Optional[str] = Field(None)
     camera_id: Optional[str] = Field(None, min_length=1)
     backend_url: Optional[str] = Field(None, min_length=1)
+    # Segundos entre fotogramas muestreados (= 1 / sample_fps). Lo usa el bucle
+    # de captura; se mantiene derivado de `sample_fps` en un solo lugar.
     poll_interval: float = Field(1.0, gt=0)
+    sample_fps: float = Field(1.0, gt=0, le=30)
     ocr_device: str = Field('cpu', min_length=1)
+    # Dispositivo del detector; None = automático de ultralytics.
+    device: Optional[str] = None
+    detector_imgsz: int = Field(640, ge=32, le=4096)
     detector_model: str = Field('morsetechlab/yolov11-license-plate-detection', min_length=1)
     ocr_model: str = Field('cct-s-v1-global-model', min_length=1)
     min_det_conf: float = Field(0.3, ge=0, le=1)
     dry_run: bool = True
     save_crops_dir: Optional[str] = Field('', description='path to save crop images')
     save_frames_dir: Optional[str] = Field('', description='path to save frames')
-    min_event_interval: float = Field(2.0, gt=0)
     detections_dir: str = Field('detecciones', min_length=1)
-    det_high_conf: float = Field(0.55, ge=0, le=1)
-    ocr_high_conf: float = Field(0.98, ge=0, le=1)
     min_crop_w: int = Field(30, ge=0)
+    max_crop_w: Optional[int] = Field(None, ge=1)
     min_crop_h: int = Field(10, ge=0)
     min_crop_area: int = Field(300, ge=0)
     min_crop_ratio: float = Field(2.0, gt=0)
     max_crop_ratio: float = Field(12.0, gt=0)
-    force_save_on_ocr: bool = True
-    combined_threshold: float = Field(0.3, ge=0, le=1)
+    # --- Configuración por cámara (lprSettings del backend, ver
+    # `apply_camera_settings`). Los defaults equivalen a "sin configuración".
+    # `action` solo viaja para que el worker sepa el modo: la política de
+    # apertura vive en el backend, que es quien abre el portón.
+    action: str = Field('access', pattern='^(register|access)$')
+    # entry/exit fijan la dirección; 'both' la infiere por la tendencia del
+    # ancho de la caja; 'unknown' (default sin config) no infiere nada.
+    direction: str = Field('unknown', pattern='^(entry|exit|both|unknown)$')
+    # Polígonos normalizados 0-1 (misma forma que las zonas del Guardián).
+    zone: Optional[List[List[Dict[str, float]]]] = None
+    confirm_reads: int = Field(3, ge=1, le=10)
+    track_max_gap_seconds: float = Field(1.5, gt=0)
+    # Participación mínima (ponderada por confianza OCR) del texto ganador para
+    # emitir: un track con lecturas muy divididas no se emite aunque llegue a N.
+    min_winner_share: float = Field(0.6, ge=0, le=1)
+    # Fail-closed: zona de detección inválida y sin una válida previa. La cámara
+    # no detecta nada (ver `apply_camera_settings`).
+    detection_blocked: bool = False
+
+
+def resolve_sample_fps(poll_interval_arg: Optional[float] = None) -> float:
+    """Fuente de la frecuencia de muestreo, en fps, con precedencia explícita:
+    LPR_SAMPLE_FPS > LPR_POLL_INTERVAL (obsoleto, 1/s) > argv `poll_interval` > 1 fps.
+    La fuente por cámara (`lprSettings.sampleFps`) se aplica DESPUÉS, encima del
+    resultado, en `apply_camera_settings`."""
+    if settings.LPR_SAMPLE_FPS:
+        return float(settings.LPR_SAMPLE_FPS)
+    if settings.LPR_POLL_INTERVAL:
+        return 1.0 / float(settings.LPR_POLL_INTERVAL)
+    if poll_interval_arg:
+        return 1.0 / float(poll_interval_arg)
+    return 1.0
 
 
 def build_worker_config(rtsp_url: Optional[str], camera_id: Optional[str], backend_url: Optional[str], poll_interval: Optional[float], mode: str = 'patente') -> WorkerConfig:
@@ -268,7 +350,7 @@ def build_worker_config(rtsp_url: Optional[str], camera_id: Optional[str], backe
     # el validador del manager). Un UUID / UUID_guardia legítimo no se altera.
     cam = re.sub(r'[^A-Za-z0-9_-]', '_', str(cam))
     backend = settings.LPR_BACKEND_URL or backend_url or settings.WORKER_BACKEND_URL or 'http://127.0.0.1:3000/lpr/events'
-    poll = float(settings.LPR_POLL_INTERVAL or (poll_interval or 1.0))
+    fps = resolve_sample_fps(poll_interval)
     dry = bool(settings.LPR_DRY_RUN)
     # build a WorkerConfig pydantic model with the expected attributes
     cfg = WorkerConfig(
@@ -276,25 +358,27 @@ def build_worker_config(rtsp_url: Optional[str], camera_id: Optional[str], backe
         rtsp_url=rtsp,
         camera_id=cam,
         backend_url=backend,
-        poll_interval=poll,
-        ocr_device='cpu',
+        poll_interval=1.0 / fps,
+        sample_fps=fps,
+        ocr_device=settings.LPR_OCR_DEVICE,
+        device=settings.LPR_DEVICE,
+        detector_imgsz=settings.LPR_DETECTOR_IMGSZ,
+        confirm_reads=settings.LPR_CONFIRM_READS,
+        track_max_gap_seconds=settings.LPR_TRACK_MAX_GAP_SECONDS,
+        min_winner_share=settings.LPR_MIN_WINNER_SHARE,
         detector_model=(settings.LPR_DETECTOR_MODEL or 'morsetechlab/yolov11-license-plate-detection'),
         ocr_model=(settings.LPR_OCR_MODEL or 'cct-s-v1-global-model'),
         min_det_conf=settings.LPR_MIN_DET_CONF or 0.3,
         dry_run=dry,
         save_crops_dir=(settings.LPR_SAVE_CROPS_DIR or ''),
         save_frames_dir=(settings.LPR_SAVE_FRAMES_DIR or ''),
-        min_event_interval=settings.LPR_MIN_EVENT_INTERVAL,
         detections_dir=(settings.LPR_DETECTIONS_DIR or 'detecciones'),
-        det_high_conf=settings.LPR_DET_HIGH_CONF,
-        ocr_high_conf=settings.LPR_OCR_HIGH_CONF,
-        min_crop_w=30,
-        min_crop_h=10,
-        min_crop_area=300,
-        min_crop_ratio=2.0,
-        max_crop_ratio=12.0,
-        force_save_on_ocr=settings.LPR_FORCE_SAVE_ON_OCR,
-        combined_threshold=settings.LPR_COMBINED_THRESHOLD,
+        min_crop_w=settings.LPR_CROP_MIN_W,
+        max_crop_w=settings.LPR_CROP_MAX_W,
+        min_crop_h=settings.LPR_CROP_MIN_H,
+        min_crop_area=settings.LPR_CROP_MIN_AREA,
+        min_crop_ratio=settings.LPR_CROP_MIN_RATIO,
+        max_crop_ratio=settings.LPR_CROP_MAX_RATIO,
     )
 
     pkg_dir = Path(__file__).parent
@@ -316,3 +400,216 @@ def build_worker_config(rtsp_url: Optional[str], camera_id: Optional[str], backe
     cfg.save_crops_dir = _resolve_path(settings.LPR_SAVE_CROPS_DIR or cfg.save_crops_dir)
     cfg.save_frames_dir = _resolve_path(settings.LPR_SAVE_FRAMES_DIR or cfg.save_frames_dir)
     return cfg
+
+
+# --------------------------------------------------------------------------
+# Configuración por cámara (contrato con el backend, `lprSettings`)
+# --------------------------------------------------------------------------
+# Las reglas de validación están en `contracts/lpr-settings.cases.json` (raíz del
+# repo), que comparten backend, frontend y este worker: si cambias una, cambia el
+# archivo (ver `tests/test_lpr_settings_contract.py`).
+ALLOWED_DETECTOR_IMGSZ = (640, 960, 1280, 1920)
+# En modo acceso (el que puede abrir el portón) menos de 3 lecturas concordantes
+# por vehículo no es aceptable (la evaluación con N=2 dio una patente incorrecta).
+# Solo `action='register'` puede bajar de ahí.
+MIN_CONFIRM_READS_ACCESS = 3
+MAX_ZONE_POLYGONS = 20
+MAX_ZONE_POINTS = 100
+# Clave interna que `camera_settings_updates` agrega cuando la zona vino rota.
+ZONE_INVALID_KEY = '_zone_invalid'
+
+
+def _as_int(value: Any) -> Optional[int]:
+    # bool es subclase de int: `True` no es un entero válido acá.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value) if float(value).is_integer() else None
+
+
+def _as_number(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _clean_zone(raw: Any) -> Optional[List[List[Dict[str, float]]]]:
+    """Polígonos válidos (3-100 puntos con x, y en 0-1), o None si no hay ninguno
+    (o si hay más de MAX_ZONE_POLYGONS)."""
+    if not isinstance(raw, list) or len(raw) > MAX_ZONE_POLYGONS:
+        return None
+    polygons: List[List[Dict[str, float]]] = []
+    for polygon in raw:
+        if not isinstance(polygon, list) or not 3 <= len(polygon) <= MAX_ZONE_POINTS:
+            continue
+        points: List[Dict[str, float]] = []
+        for point in polygon:
+            x = _as_number(point.get('x')) if isinstance(point, dict) else None
+            y = _as_number(point.get('y')) if isinstance(point, dict) else None
+            if x is None or y is None or not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+                points = []
+                break
+            points.append({'x': x, 'y': y})
+        if points:
+            polygons.append(points)
+    return polygons or None
+
+
+def _crop_updates(crop: Mapping[str, Any], warn: Any) -> Dict[str, Any]:
+    """Pares de recorte. Cada par va completo o no va: ancho (`minWidth` +
+    `maxWidth`, este puede ser null = sin tope) y razón (`minRatio` + `maxRatio`),
+    con min <= max. Un par incoherente se descarta SOLO él (vuelve al env); el otro
+    par y el resto de la config no se tocan."""
+    updates: Dict[str, Any] = {}
+    if 'minWidth' in crop or 'maxWidth' in crop:
+        min_w = _as_int(crop.get('minWidth'))
+        has_max = 'maxWidth' in crop
+        max_raw = crop.get('maxWidth')
+        max_w = _as_int(max_raw)
+        valid = (min_w is not None and 0 <= min_w <= 2000 and has_max
+                 and (max_raw is None or (max_w is not None and 1 <= max_w <= 4000 and min_w <= max_w)))
+        if valid:
+            updates['min_crop_w'] = min_w
+            updates['max_crop_w'] = None if max_raw is None else max_w
+        else:
+            warn('crop.minWidth/maxWidth', {'minWidth': crop.get('minWidth'), 'maxWidth': max_raw})
+    if 'minRatio' in crop or 'maxRatio' in crop:
+        min_r = _as_number(crop.get('minRatio'))
+        max_r = _as_number(crop.get('maxRatio'))
+        if (min_r is not None and max_r is not None and 0.1 <= min_r <= 20
+                and 0.1 <= max_r <= 20 and min_r <= max_r):
+            updates['min_crop_ratio'] = min_r
+            updates['max_crop_ratio'] = max_r
+        else:
+            warn('crop.minRatio/maxRatio', {'minRatio': crop.get('minRatio'), 'maxRatio': crop.get('maxRatio')})
+    return updates
+
+
+def camera_settings_updates(settings_dict: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Traduce `lprSettings` (contrato del backend) a campos de `WorkerConfig`.
+
+    Un campo ausente o `null` no aparece en el resultado (= default del env).
+    Excepciones: `crop.maxWidth` y `zone` son opcionales por naturaleza, así
+    que `maxWidth: null` (clave presente) quita el tope y `zone: []` quita la
+    zona. Un valor inválido se ignora con un warning (nunca lanza): una config
+    corrupta no debe tumbar al worker. Una zona que viene pero no es válida NO
+    se ignora en silencio: se marca con `ZONE_INVALID_KEY` para que
+    `apply_camera_settings` decida (conservar la anterior o no detectar).
+    """
+    updates: Dict[str, Any] = {}
+    if not isinstance(settings_dict, Mapping):
+        return updates
+
+    def warn(name: str, value: Any) -> None:
+        logging.warning('lprSettings.%s inválido (%r): se ignora', name, value)
+
+    action = settings_dict.get('action')
+    if action is not None:
+        if action in ('register', 'access'):
+            updates['action'] = action
+        else:
+            warn('action', action)
+    # `action` ausente = access (la política segura).
+    effective_action = updates.get('action', 'access')
+
+    direction = settings_dict.get('direction')
+    if direction is not None:
+        if direction in ('entry', 'exit', 'both'):
+            updates['direction'] = direction
+        else:
+            warn('direction', direction)
+
+    raw_zone = settings_dict.get('zone')
+    if raw_zone is not None:
+        if raw_zone == []:
+            updates['zone'] = None  # limpieza explícita
+        else:
+            zone = _clean_zone(raw_zone)
+            if zone is None:
+                warn('zone', raw_zone)
+                updates[ZONE_INVALID_KEY] = True
+            else:
+                updates['zone'] = zone
+
+    imgsz = settings_dict.get('detectorImgsz')
+    if imgsz is not None:
+        if _as_int(imgsz) in ALLOWED_DETECTOR_IMGSZ:
+            updates['detector_imgsz'] = _as_int(imgsz)
+        else:
+            warn('detectorImgsz', imgsz)
+
+    fps = settings_dict.get('sampleFps')
+    if fps is not None:
+        value = _as_number(fps)
+        if value is not None and 1.0 <= value <= 15.0:
+            updates['sample_fps'] = value
+            updates['poll_interval'] = 1.0 / value
+        else:
+            warn('sampleFps', fps)
+
+    reads = settings_dict.get('confirmReads')
+    if reads is not None:
+        value_i = _as_int(reads)
+        if value_i is None or not 1 <= value_i <= 10:
+            warn('confirmReads', reads)
+        elif value_i < MIN_CONFIRM_READS_ACCESS and effective_action != 'register':
+            logging.warning('lprSettings.confirmReads=%d no se aplica en modo acceso (mínimo %d)',
+                            value_i, MIN_CONFIRM_READS_ACCESS)
+        else:
+            updates['confirm_reads'] = value_i
+
+    crop = settings_dict.get('crop')
+    if isinstance(crop, Mapping):
+        updates.update(_crop_updates(crop, warn))
+    elif crop is not None:
+        warn('crop', crop)
+    return updates
+
+
+_CROP_FIELDS = ('min_crop_w', 'max_crop_w', 'min_crop_ratio', 'max_crop_ratio')
+
+
+def apply_camera_settings(
+    cfg: WorkerConfig,
+    settings_dict: Optional[Mapping[str, Any]],
+    previous: Optional[WorkerConfig] = None,
+) -> WorkerConfig:
+    """Fusiona los `lprSettings` de una cámara sobre una config base (env).
+
+    Punto ÚNICO de fusión (lo usa el refetch en caliente). Pura: no muta `cfg` ni
+    `previous` y devuelve una `WorkerConfig` nueva. Pasar siempre la config BASE
+    (la que sale de `build_worker_config`), no la ya fusionada: así una clave que
+    desaparece del backend vuelve al default del env.
+
+    `previous` es la config que el worker tiene vigente. Solo sirve para la zona:
+    la zona NUNCA se pierde por un dato roto.
+    * zona válida -> se aplica;
+    * `zone: []` o ausente -> sin zona (cuadro completo, configurado a propósito);
+    * zona presente pero inválida -> se conserva la zona válida de `previous`; si
+      nunca hubo una, FAIL-CLOSED: `detection_blocked=True` y la cámara no
+      detecta (con log de error) en vez de ensanchar la detección a todo el cuadro.
+    Un recorte incoherente descarta solo sus claves en conflicto.
+    """
+    updates = camera_settings_updates(settings_dict)
+    zone_invalid = bool(updates.pop(ZONE_INVALID_KEY, False))
+    if zone_invalid:
+        if previous is not None and previous.zone:
+            updates['zone'] = previous.zone
+            logging.warning('lprSettings.zone inválida: se conserva la última zona válida')
+        else:
+            updates['detection_blocked'] = True
+            logging.error('lprSettings.zone inválida y sin zona válida previa: la cámara %s NO detectará '
+                          'patentes hasta recibir una zona válida (fail-closed)', cfg.camera_id)
+    if not updates:
+        return cfg
+    merged = cfg
+    for name, value in updates.items():
+        try:
+            merged = WorkerConfig.model_validate({**merged.model_dump(), name: value})
+        except Exception:
+            logging.warning('lprSettings: %s=%r rechazado por la validación de WorkerConfig', name, value)
+    if merged.min_crop_ratio > merged.max_crop_ratio or (
+            merged.max_crop_w is not None and merged.max_crop_w < merged.min_crop_w):
+        # Solo posible si el propio env es incoherente: se revierte el recorte, no la config.
+        logging.warning('Recorte incoherente tras la fusión: se vuelve a los valores base del recorte')
+        merged = merged.model_copy(update={f: getattr(cfg, f) for f in _CROP_FIELDS})
+    return merged
