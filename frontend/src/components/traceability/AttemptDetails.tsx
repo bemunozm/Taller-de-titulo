@@ -1,5 +1,7 @@
 import type { AccessAttempt, PlateDetection } from '@/api/DetectionsAPI'
 import { Button } from '@/components/ui/Button'
+import { AccessDecisionBadge } from './AccessDecisionBadge'
+import { getAttemptDirectionLabel } from '@/helpers/accessDecision'
 
 type Props = {
   attempt: AccessAttempt | null
@@ -28,11 +30,15 @@ export default function AttemptDetails({ attempt, onClose }: Props) {
       <dl className="mt-4 grid grid-cols-2 gap-3 text-sm text-zinc-800 dark:text-zinc-200">
         <div>
           <dt className="font-medium">Decisión</dt>
-          <dd>{attempt.decision}</dd>
+          <dd><AccessDecisionBadge decision={attempt.decision} /></dd>
         </div>
         <div>
           <dt className="font-medium">Método</dt>
           <dd>{attempt.method ?? '-'}</dd>
+        </div>
+        <div>
+          <dt className="font-medium">Dirección</dt>
+          <dd>{getAttemptDirectionLabel(attempt) ?? '-'}</dd>
         </div>
         <div>
           <dt className="font-medium">Residente</dt>

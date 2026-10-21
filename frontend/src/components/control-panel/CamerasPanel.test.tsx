@@ -29,6 +29,7 @@ const cameraApi = vi.hoisted(() => ({
   getMediamtxHealth: vi.fn(),
   enableCameraLpr: vi.fn(),
   enableCameraGuardian: vi.fn(),
+  updateCameraGuardianZones: vi.fn(),
 }))
 vi.mock('@/api/CameraAPI', () => cameraApi)
 
@@ -38,8 +39,45 @@ vi.mock('@/api/RoleAPI', () => ({ listRoles: async () => [] }))
 const onboardingApi = vi.hoisted(() => ({ listCondominiums: vi.fn(async () => [] as CondominiumOption[]) }))
 vi.mock('@/api/OnboardingAPI', () => onboardingApi)
 
-// El editor de zonas monta un reproductor de video: fuera de estos tests.
-vi.mock('./GuardianZoneEditor', () => ({ default: () => null }))
+// El lienzo de zonas monta un reproductor de video: se sustituye por un botón
+// que "dibuja" ZONES y llama a onSave, como haría el editor real.
+const ZONES = [
+  [
+    { x: 0.1, y: 0.1 },
+    { x: 0.9, y: 0.1 },
+    { x: 0.9, y: 0.9 },
+  ],
+]
+const zoneEditorProps = vi.hoisted(() => ({ last: null as null | { initialZones: unknown[]; tone?: string } }))
+vi.mock('./ZoneEditor', () => ({
+  ZoneEditor: (props: {
+    initialZones: unknown[]
+    tone?: string
+    onSave: (zones: unknown[]) => Promise<void>
+    onClose: () => void
+  }) => {
+    zoneEditorProps.last = props
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          void props.onSave(ZONES).then(props.onClose)
+        }}
+      >
+        Guardar zonas (mock)
+      </button>
+    )
+  },
+}))
+
+// El diálogo LPR tiene su propia suite: aquí solo se comprueba cómo se abre.
+vi.mock('./LprSettingsDialog', () => ({
+  LprSettingsDialog: (props: { canEdit: boolean; camera: { name: string } }) => (
+    <div role="dialog" aria-label="Visión LPR (mock)">
+      {props.camera.name} · {props.canEdit ? 'edita' : 'solo lectura'}
+    </div>
+  ),
+}))
 
 vi.mock('react-toastify', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }))
 
@@ -177,5 +215,87 @@ describe('CamerasPanel: salud del motor IA (GET /workers/ia-health)', () => {
 
     expect(await screen.findByText('Activo')).toBeInTheDocument()
     expect(screen.getByText('mtx caído')).toBeInTheDocument()
+  })
+})
+
+async function openMenu(user: ReturnType<typeof userEvent.setup>) {
+  renderWithProviders(<CamerasPanel />)
+  await user.click(await screen.findByRole('button', { name: 'Más opciones' }))
+}
+
+describe('CamerasPanel: zonas del Guardián', () => {
+  beforeEach(() => {
+    permissionsState.permissions = ['cameras.read', 'cameras.update']
+    cameraApi.updateCameraGuardianZones.mockResolvedValue(undefined)
+  })
+
+  it('guarda con PATCH /cameras/:id/zones vía CameraAPI y refresca la lista', async () => {
+    cameraApi.listCameras.mockResolvedValue([{ ...CAMERA, guardianZones: ZONES }])
+    const user = userEvent.setup()
+    await openMenu(user)
+
+    await user.click(await screen.findByRole('menuitem', { name: 'Configurar Zonas Alarmas' }))
+    await user.click(await screen.findByRole('button', { name: 'Guardar zonas (mock)' }))
+
+    await waitFor(() => expect(cameraApi.updateCameraGuardianZones).toHaveBeenCalledWith(CAMERA.id, ZONES))
+    expect(zoneEditorProps.last).toMatchObject({ tone: 'guardian', initialZones: ZONES })
+    // Tras guardar se vuelve a pedir la lista de cámaras.
+    await waitFor(() => expect(cameraApi.listCameras.mock.calls.length).toBeGreaterThan(1))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Guardar zonas (mock)' })).not.toBeInTheDocument())
+  })
+
+  it('una cámara sin zonas abre el editor vacío', async () => {
+    const user = userEvent.setup()
+    await openMenu(user)
+
+    await user.click(await screen.findByRole('menuitem', { name: 'Configurar Zonas Alarmas' }))
+    await screen.findByRole('button', { name: 'Guardar zonas (mock)' })
+
+    expect(zoneEditorProps.last?.initialZones).toEqual([])
+  })
+})
+
+describe('CamerasPanel: visión LPR', () => {
+  it('con cameras.enable-ia ofrece "Configurar LPR" y abre el diálogo editable', async () => {
+    permissionsState.permissions = ['cameras.read', 'cameras.enable-ia']
+    const user = userEvent.setup()
+    await openMenu(user)
+
+    await user.click(await screen.findByRole('menuitem', { name: 'Configurar LPR' }))
+
+    expect(await screen.findByRole('dialog', { name: 'Visión LPR (mock)' })).toHaveTextContent('Portón principal · edita')
+  })
+
+  it('sin cameras.enable-ia solo ofrece verla (solo lectura)', async () => {
+    permissionsState.permissions = ['cameras.read']
+    const user = userEvent.setup()
+    await openMenu(user)
+
+    expect(screen.queryByRole('menuitem', { name: 'Configurar LPR' })).not.toBeInTheDocument()
+    await user.click(await screen.findByRole('menuitem', { name: 'Ver configuración LPR' }))
+
+    expect(await screen.findByRole('dialog', { name: 'Visión LPR (mock)' })).toHaveTextContent('solo lectura')
+  })
+
+  it('el super-admin edita aunque no tenga el permiso listado', async () => {
+    permissionsState.permissions = ['cameras.read']
+    permissionsState.isSuperAdmin = true
+    const user = userEvent.setup()
+    await openMenu(user)
+
+    await user.click(await screen.findByRole('menuitem', { name: 'Configurar LPR' }))
+
+    expect(await screen.findByRole('dialog', { name: 'Visión LPR (mock)' })).toHaveTextContent('edita')
+  })
+
+  it('una cámara sin LPR habilitado no muestra la configuración LPR', async () => {
+    permissionsState.permissions = ['cameras.read', 'cameras.enable-ia']
+    cameraApi.listCameras.mockResolvedValue([{ ...CAMERA, enableLpr: false }])
+    const user = userEvent.setup()
+    await openMenu(user)
+
+    await screen.findByRole('menuitem', { name: 'Habilitar LPR' })
+    expect(screen.queryByRole('menuitem', { name: 'Configurar LPR' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Ver configuración LPR' })).not.toBeInTheDocument()
   })
 })

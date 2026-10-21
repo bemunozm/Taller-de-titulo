@@ -3,11 +3,12 @@ import {
   ACCESS_DECISIONS,
   countAccessDecisions,
   getAccessDecisionMeta,
+  getAttemptDirectionLabel,
   isAccessDecision,
 } from './accessDecision'
 
 describe('isAccessDecision', () => {
-  it.each(['Permitido', 'Denegado', 'Duplicado', 'Pendiente', 'Expirado'])('reconoce %s', (value) => {
+  it.each(['Permitido', 'Denegado', 'Duplicado', 'Pendiente', 'Expirado', 'Registrado'])('reconoce %s', (value) => {
     expect(isAccessDecision(value)).toBe(true)
   })
 
@@ -25,6 +26,15 @@ describe('getAccessDecisionMeta', () => {
     expect(duplicate.color).toBe('zinc')
     expect(duplicate.color).not.toBe(getAccessDecisionMeta('Permitido').color)
     expect(duplicate.description).toMatch(/no abre el portón/)
+  })
+
+  it('Registrado es informativo (azul cielo), distinto de Permitido y aclara que no abre el portón', () => {
+    const registered = getAccessDecisionMeta('Registrado')
+
+    expect(registered.label).toBe('Registrado')
+    expect(registered.color).toBe('sky')
+    expect(registered.color).not.toBe(getAccessDecisionMeta('Permitido').color)
+    expect(registered.description).toMatch(/no abre el portón/)
   })
 
   it('cada decisión conocida tiene un color distinto', () => {
@@ -53,10 +63,38 @@ describe('countAccessDecisions', () => {
       { decision: 'Aprovado' },
     ])
 
-    expect(counts).toEqual({ Permitido: 2, Denegado: 1, Duplicado: 1, Pendiente: 0, Expirado: 0 })
+    expect(counts).toEqual({
+      Permitido: 2,
+      Denegado: 1,
+      Duplicado: 1,
+      Pendiente: 0,
+      Expirado: 0,
+      Registrado: 0,
+    })
   })
 
   it('una lista vacía da todo en cero', () => {
-    expect(Object.values(countAccessDecisions([]))).toEqual([0, 0, 0, 0, 0])
+    expect(Object.values(countAccessDecisions([]))).toEqual([0, 0, 0, 0, 0, 0])
+  })
+})
+
+describe('getAttemptDirectionLabel', () => {
+  it('prefiere meta.direction que reporta el worker', () => {
+    expect(getAttemptDirectionLabel({ method: 'Patente - Registro', detection: { meta: { direction: 'entry' } } })).toBe(
+      'Entrada',
+    )
+    expect(getAttemptDirectionLabel({ detection: { meta: { direction: 'exit' } } })).toBe('Salida')
+    expect(getAttemptDirectionLabel({ detection: { meta: { direction: 'both' } } })).toBe('Ambas')
+  })
+
+  it('sin meta la deduce del sufijo de method', () => {
+    expect(getAttemptDirectionLabel({ method: 'Patente - Entrada', detection: { meta: null } })).toBe('Entrada')
+    expect(getAttemptDirectionLabel({ method: 'Patente - Salida' })).toBe('Salida')
+  })
+
+  it('devuelve null si no hay dirección conocida', () => {
+    expect(getAttemptDirectionLabel({ method: 'Patente - Registro' })).toBeNull()
+    expect(getAttemptDirectionLabel({ method: 'Patente', detection: { meta: { direction: 'unknown' } } })).toBeNull()
+    expect(getAttemptDirectionLabel({ method: null, detection: { meta: 'texto' } })).toBeNull()
   })
 })

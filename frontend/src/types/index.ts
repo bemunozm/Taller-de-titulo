@@ -229,6 +229,107 @@ export interface CreateUserByAdminPayload {
 
 // Camera schemas and types
 
+// Zonas de dibujo (Guardián y LPR): polígonos en coordenadas normalizadas 0-1.
+// Límites iguales a los del backend (zone-point.dto.ts, update-guardian-zones.dto.ts).
+export const ZONE_LIMITS = { maxZones: 20, minPoints: 3, maxPoints: 100 } as const
+
+export const zonePointSchema = z.object({
+    x: z.number().min(0).max(1),
+    y: z.number().min(0).max(1),
+})
+
+export const zonePolygonsSchema = z
+    .array(z.array(zonePointSchema).min(ZONE_LIMITS.minPoints).max(ZONE_LIMITS.maxPoints))
+    .max(ZONE_LIMITS.maxZones)
+
+export type ZonePoint = z.infer<typeof zonePointSchema>
+
+// Configuración de visión LPR por cámara (backend/src/cameras/lpr-settings.ts).
+// Todos los campos son opcionales: el worker mezcla lo presente sobre sus defaults.
+export const LPR_ACTIONS = ['register', 'access'] as const
+export const LPR_DIRECTIONS = ['entry', 'exit', 'both'] as const
+export const LPR_DETECTOR_IMGSZ_VALUES = [640, 960, 1280, 1920] as const
+
+export const lprCropSettingsSchema = z.object({
+    minWidth: z.number().int().min(0).max(2000).optional(),
+    // null = sin tope superior
+    maxWidth: z.number().int().min(1).max(4000).nullable().optional(),
+    minRatio: z.number().min(0.1).max(20).optional(),
+    maxRatio: z.number().min(0.1).max(20).optional(),
+})
+
+const lprSettingsShape = {
+    action: z.enum(LPR_ACTIONS).optional(),
+    direction: z.enum(LPR_DIRECTIONS).optional(),
+    zone: zonePolygonsSchema.optional(),
+    detectorImgsz: z
+        .union([z.literal(640), z.literal(960), z.literal(1280), z.literal(1920)])
+        .optional(),
+    sampleFps: z.number().min(1).max(15).optional(),
+    crop: lprCropSettingsSchema.optional(),
+    confirmReads: z.number().int().min(1).max(10).optional(),
+}
+
+/** Lectura (respuestas del backend): tolerante con claves extra. */
+export const lprSettingsSchema = z.object(lprSettingsShape)
+
+/** Mínimo de lecturas con control de acceso (action ausente = access). */
+export const LPR_MIN_CONFIRM_READS_ACCESS = 3
+
+/**
+ * Escritura (lo que se envía en el PATCH): las reglas del contrato compartido
+ * (contracts/lpr-settings.cases.json). Rechaza claves desconocidas, exige los
+ * pares de recorte y N >= 3 en control de acceso.
+ */
+export const lprSettingsRequestSchema = z
+    .object({ ...lprSettingsShape, crop: lprCropSettingsSchema.strict().optional() })
+    .strict()
+    .superRefine((value, ctx) => {
+        const crop = value.crop
+        if (crop) {
+            const hasMinW = crop.minWidth !== undefined
+            const hasMaxW = crop.maxWidth !== undefined
+            if (hasMinW !== hasMaxW) {
+                ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['crop'], message: 'minWidth y maxWidth van juntos' })
+            } else if (typeof crop.minWidth === 'number' && typeof crop.maxWidth === 'number' && crop.maxWidth < crop.minWidth) {
+                ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['crop', 'maxWidth'], message: 'maxWidth < minWidth' })
+            }
+            const hasMinR = crop.minRatio !== undefined
+            const hasMaxR = crop.maxRatio !== undefined
+            if (hasMinR !== hasMaxR) {
+                ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['crop'], message: 'minRatio y maxRatio van juntos' })
+            } else if (typeof crop.minRatio === 'number' && typeof crop.maxRatio === 'number' && crop.maxRatio < crop.minRatio) {
+                ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['crop', 'maxRatio'], message: 'maxRatio < minRatio' })
+            }
+        }
+        if (
+            (value.action ?? 'access') === 'access' &&
+            value.confirmReads !== undefined &&
+            value.confirmReads < LPR_MIN_CONFIRM_READS_ACCESS
+        ) {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ['confirmReads'],
+                message: 'Con control de acceso se requieren al menos 3 lecturas',
+            })
+        }
+    })
+
+export type LprAction = (typeof LPR_ACTIONS)[number]
+export type LprDirection = (typeof LPR_DIRECTIONS)[number]
+export type LprCropSettings = z.infer<typeof lprCropSettingsSchema>
+export type LprSettings = z.infer<typeof lprSettingsSchema>
+
+/** Respuesta de GET/PATCH /cameras/:id/lpr-settings (null = defaults del worker). */
+export const cameraLprSettingsResponseSchema = z.object({
+    id: z.string(),
+    name: z.string(),
+    enableLpr: z.boolean(),
+    lprSettings: lprSettingsSchema.nullable(),
+})
+
+export type CameraLprSettingsResponse = z.infer<typeof cameraLprSettingsResponseSchema>
+
 // Camera schema based on backend entity (backend/src/cameras/entities/camera.entity.ts)
 export const cameraSchema = z.object({
     id: z.string().uuid(),
@@ -242,7 +343,7 @@ export const cameraSchema = z.object({
     active: z.boolean().optional(),
     // roles may be present in populated responses
     roles: z.array(roleSchema).optional(),
-    guardianZones: z.array(z.array(z.object({ x: z.number(), y: z.number() }))).optional(),
+    guardianZones: z.array(z.array(zonePointSchema)).optional(),
 })
 
 export type Camera = z.infer<typeof cameraSchema>

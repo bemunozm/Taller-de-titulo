@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Dialog, DialogTitle, DialogDescription, DialogActions, DialogBody } from '@/components/ui/Dialog'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { listCameras, createCamera, updateCamera, deleteCamera, registerCamera, getCameraSourceUrl, getCameraHasSource, getIAHealth, getMediamtxHealth, enableCameraLpr, enableCameraGuardian } from '@/api/CameraAPI'
+import { listCameras, createCamera, updateCamera, deleteCamera, registerCamera, getCameraSourceUrl, getCameraHasSource, getIAHealth, getMediamtxHealth, enableCameraLpr, enableCameraGuardian, updateCameraGuardianZones } from '@/api/CameraAPI'
 import { listRoles } from '@/api/RoleAPI'
 import type { Role } from '@/types/index'
 import MultiSelectCombobox from '@/components/ui/MultiSelectCombobox'
@@ -26,7 +26,8 @@ import {
   BoltIcon,
   ServerIcon
 } from '@heroicons/react/24/outline'
-import GuardianZoneEditor from './GuardianZoneEditor'
+import { ZoneEditor } from './ZoneEditor'
+import { LprSettingsDialog } from './LprSettingsDialog'
 
 type CameraFormValues = CreateCameraFormData & OrganizationScoped
 
@@ -40,6 +41,7 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
   const [showForm, setShowForm] = useState(false)
   const [showDelete, setShowDelete] = useState<Camera | null>(null)
   const [showZoneEditor, setShowZoneEditor] = useState<Camera | null>(null)
+  const [showLprSettings, setShowLprSettings] = useState<Camera | null>(null)
 
   // Responder al trigger para abrir formulario de nueva cámara
   useEffect(() => {
@@ -50,8 +52,10 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
   }, [triggerNew])
 
   // `GET /cameras/:id/source` revela una credencial (la URL RTSP): exige cameras.update.
-  const { hasPermission } = usePermissions()
+  const { hasPermission, isSuperAdmin } = usePermissions()
   const canRevealSource = hasPermission('cameras.update')
+  // `PATCH /cameras/:id/lpr-settings` exige cameras.enable-ia (cambia la política de apertura del portón).
+  const canConfigureLpr = isSuperAdmin || hasPermission('cameras.enable-ia')
 
   const { data: cameras = [], isLoading } = useQuery<Camera[], Error>({ queryKey: ['cameras'], queryFn: () => listCameras() })
   const { data: iaHealth } = useQuery({ queryKey: ['ia-health'], queryFn: () => getIAHealth(), staleTime: 30_000, refetchOnWindowFocus: false, retry: false })
@@ -271,6 +275,11 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
                 <DropdownItem onClick={() => toggleGuardianMut.mutate({ id: cam.id, enableGuardian: false })}>Deshabilitar Guardián</DropdownItem>
               ) : (
                 <DropdownItem onClick={() => toggleGuardianMut.mutate({ id: cam.id, enableGuardian: true })}>Habilitar Guardián</DropdownItem>
+              )}
+              {cam.enableLpr && (
+                <DropdownItem onClick={() => setShowLprSettings(cam)}>
+                  {canConfigureLpr ? 'Configurar LPR' : 'Ver configuración LPR'}
+                </DropdownItem>
               )}
               <DropdownItem onClick={() => setShowZoneEditor(cam)}>Configurar Zonas Alarmas</DropdownItem>
               <DropdownItem onClick={() => setShowDelete(cam)}>Eliminar</DropdownItem>
@@ -599,13 +608,34 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
 
       {/* Editor de Zonas de Intrusión (Guardián) */}
       {showZoneEditor && (
-        <GuardianZoneEditor 
-          camera={showZoneEditor} 
-          onClose={() => setShowZoneEditor(null)} 
-          onSaved={() => {
-            setShowZoneEditor(null)
-            queryClient.invalidateQueries({ queryKey: ['cameras'] })
-          }} 
+        <ZoneEditor
+          camera={showZoneEditor}
+          initialZones={showZoneEditor.guardianZones ?? []}
+          tone="guardian"
+          title={
+            <>
+              Perímetro de Seguridad <span className="text-indigo-500 ml-2 font-black">AI</span>
+            </>
+          }
+          description={
+            <>
+              Ajustando precisión visual para <span className="text-indigo-400 font-bold">{showZoneEditor.name}</span>
+            </>
+          }
+          onSave={async (zones) => {
+            await updateCameraGuardianZones(showZoneEditor.id, zones)
+            await queryClient.invalidateQueries({ queryKey: ['cameras'] })
+          }}
+          onClose={() => setShowZoneEditor(null)}
+        />
+      )}
+
+      {/* Visión LPR por cámara */}
+      {showLprSettings && (
+        <LprSettingsDialog
+          camera={showLprSettings}
+          canEdit={canConfigureLpr}
+          onClose={() => setShowLprSettings(null)}
         />
       )}
     </div>
