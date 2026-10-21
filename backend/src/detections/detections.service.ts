@@ -50,8 +50,11 @@ import { maskPlate } from '../common/privacy/pii-mask';
 import { parseVisitExitCooldownMinutes } from '../config/env.validation';
 import {
   DUPLICATE_ACCESS_DECISION,
+  REGISTERED_ACCESS_DECISION,
   type AccessDecision,
 } from './access-decision';
+import { normalizeChileanPlate } from '../common/utils/chilean-format.util';
+import { isRegisterOnly } from '../cameras/lpr-settings';
 
 /** Usuario de la sesión que responde una detección pendiente. */
 export interface PendingDetectionResponder {
@@ -144,14 +147,75 @@ export class DetectionsService {
     return camera;
   }
 
+  /**
+   * D11: la patente se normaliza (mayúsculas, sin espacios ni símbolos) antes
+   * de persistir y de buscar el vehículo/visita (la búsqueda es por igualdad
+   * exacta). Si la normalización cambia el texto y el worker no mandó
+   * `plate_raw`, se conserva lo recibido ahí. Una patente que queda vacía se
+   * rechaza (400): no puede coincidir con nada.
+   */
+  private normalizeIncomingPlate(
+    input: CreatePlateDetectionDto,
+  ): CreatePlateDetectionDto {
+    const plate = normalizeChileanPlate(input.plate);
+    if (plate.length === 0) {
+      throw new BadRequestException(
+        'La patente no contiene caracteres válidos',
+      );
+    }
+    if (plate === input.plate) return input;
+    return {
+      ...input,
+      plate,
+      plate_raw: input.plate_raw ?? input.plate.slice(0, 64),
+    };
+  }
+
+  /**
+   * D8 — cámara en modo "solo registrar" (`lprSettings.action = 'register'`).
+   * Guarda la detección y un intento `Registrado` y NADA más: sin búsqueda de
+   * vehículo/visita, sin aprobación del conserje, sin check-in/out, sin
+   * notificación de acceso y sin `sendDoorOpen`. Es la única salida de
+   * `createDetection` para estas cámaras y se evalúa antes de cualquier efecto.
+   */
+  private async registerOnly(saved: PlateDetection) {
+    const direction = saved.meta?.direction;
+    const att = this.attemptsRepo.create({
+      detection: saved,
+      decision: REGISTERED_ACCESS_DECISION,
+      reason: 'Cámara en modo solo registro: no se evalúa acceso',
+      method:
+        direction === 'exit'
+          ? 'Patente - Salida'
+          : direction === 'entry'
+            ? 'Patente - Entrada'
+            : 'Patente - Registro',
+      residente: null,
+      // No es una decisión de acceso: sin tiempo de respuesta, no cuenta en las
+      // métricas de SLA del dashboard.
+      responseTimeMs: null,
+      organizationId: saved.organizationId,
+    });
+    const savedAtt = await this.attemptsRepo.save(att);
+    this.logger.log(
+      `Detección ${saved.id} (${maskPlate(saved.plate)}) registrada en cámara de solo registro`,
+    );
+    return {
+      detection: saved,
+      attempt: savedAtt,
+      isExit: direction === 'exit',
+    };
+  }
+
   async createDetection(
-    dto: CreatePlateDetectionDto,
+    input: CreatePlateDetectionDto,
     keyOrganizationId: string,
   ) {
     const camera = await this.requireCameraOfOrganization(
-      dto.cameraId,
+      input.cameraId,
       keyOrganizationId,
     );
+    const dto = this.normalizeIncomingPlate(input);
 
     // Mapear DTO a la entidad PlateDetection. Usamos el campo `meta` como JSONB
     // para guardar bbox, snapshot y estadísticas de caracteres.
@@ -162,6 +226,12 @@ export class DetectionsService {
 
     // `create()` solo instancia la entidad; `save()` persiste en la BD.
     const saved = await this.detectionsRepo.save(ent);
+
+    // D8: cámara de solo registro -> salida temprana y fail-closed (ver
+    // `isRegisterOnly`), antes de cualquier búsqueda o efecto de acceso.
+    if (isRegisterOnly(camera.lprSettings)) {
+      return this.registerOnly(saved);
+    }
 
     // FIX aislamiento cross-tenant en la apertura física autónoma del portón
     // (rama feature/cierre-fases-1-2, hallazgo reportado): hasta acá, la

@@ -8,6 +8,7 @@ import {
 import { DataSource, FindOperator, type Repository } from 'typeorm';
 import { CamerasService } from './cameras.service';
 import { Camera } from './entities/camera.entity';
+import { UpdateLprSettingsDto } from './dto/lpr-settings.dto';
 import { Role } from '../roles/entities/role.entity';
 import { TenantContextService } from '../common/tenant/tenant-context.service';
 import type { TenantContext } from '../common/tenant/tenant-context.types';
@@ -116,6 +117,7 @@ describe('CamerasService — aislamiento por condominio (P5.B)', () => {
       enableLpr: false,
       enableGuardian: false,
       guardianZones: [],
+      lprSettings: null,
       active: true,
       roles: [],
       ...overrides,
@@ -341,6 +343,91 @@ describe('CamerasService — aislamiento por condominio (P5.B)', () => {
       id: CAM_A,
       name: 'Cámara',
       guardianZones: saved.guardianZones,
+    });
+  });
+
+  describe('lprSettings (plan LPR por cámara, F2)', () => {
+    const SETTINGS = {
+      action: 'register',
+      direction: 'both',
+      detectorImgsz: 1920,
+      sampleFps: 8,
+    } as const;
+
+    it('updateLprSettings: guarda en SU cámara, devuelve lo guardado y NO toca al worker manager ni a MediaMTX', async () => {
+      const result = await service.updateLprSettings(
+        CAM_A,
+        Object.assign(new UpdateLprSettingsDto(), SETTINGS),
+      );
+
+      const saved = (repo.save.mock.calls[0] as [Camera])[0];
+      expect(saved.id).toBe(CAM_A);
+      expect(saved.lprSettings).toEqual(SETTINGS);
+      expect(result).toEqual({
+        id: CAM_A,
+        name: 'Cámara',
+        enableLpr: false,
+        lprSettings: SETTINGS,
+      });
+      expect(workerNotifier.registerCamera).not.toHaveBeenCalled();
+      expect(workerNotifier.unregisterCamera).not.toHaveBeenCalled();
+      expect(mediamtx.registerSource).not.toHaveBeenCalled();
+    });
+
+    it('updateLprSettings con {} resetea a null', async () => {
+      rows[0].lprSettings = { ...SETTINGS };
+
+      const result = await service.updateLprSettings(
+        CAM_A,
+        new UpdateLprSettingsDto(),
+      );
+
+      expect((repo.save.mock.calls[0] as [Camera])[0].lprSettings).toBeNull();
+      expect(result.lprSettings).toBeNull();
+    });
+
+    it('cámara de otro condominio -> 404 sin guardar (update y get)', async () => {
+      await expect(
+        service.updateLprSettings(CAM_B, new UpdateLprSettingsDto()),
+      ).rejects.toThrow(NotFoundException);
+      await expect(service.getLprSettings(CAM_B)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('getLprSettings: devuelve la configuración (null si no hay) sin la URL de origen', async () => {
+      const empty = await service.getLprSettings(CAM_A);
+      expect(empty).toEqual({
+        id: CAM_A,
+        name: 'Cámara',
+        enableLpr: false,
+        lprSettings: null,
+      });
+
+      rows[0].lprSettings = { ...SETTINGS };
+      const set = await service.getLprSettings(CAM_A);
+      expect(set.lprSettings).toEqual(SETTINGS);
+      expect(JSON.stringify(set)).not.toContain('rtsp');
+    });
+
+    it('getLprSettingsForOrganization: contrato exacto y 404 para otra organización', async () => {
+      rows[0].lprSettings = { ...SETTINGS };
+      rows[0].enableLpr = true;
+
+      await expect(
+        service.getLprSettingsForOrganization('cam-a', ORG_A),
+      ).resolves.toEqual({
+        cameraId: CAM_A,
+        enableLpr: true,
+        lprSettings: SETTINGS,
+      });
+      await expect(
+        service.getLprSettingsForOrganization(CAM_A, ORG_B),
+      ).rejects.toThrow(NotFoundException);
+      await expect(
+        service.getLprSettingsForOrganization(CAM_B, ORG_A),
+      ).rejects.toThrow(NotFoundException);
     });
   });
 

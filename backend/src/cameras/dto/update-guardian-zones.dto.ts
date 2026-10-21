@@ -1,14 +1,17 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { Transform, Type } from 'class-transformer';
+import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
-  IsNumber,
-  Max,
-  Min,
   ValidateNested,
 } from 'class-validator';
+import {
+  clampNormalizedCoordinate,
+  MAX_POINTS_PER_ZONE,
+  MIN_POINTS_PER_ZONE,
+  ZonePointDto,
+} from './zone-point.dto';
 
 /**
  * Body de `PATCH /cameras/:id/zones` (Fase 4 · P9, QA MEDIO). Antes era
@@ -29,52 +32,15 @@ import {
  */
 
 export const MAX_GUARDIAN_ZONES = 20;
-export const MIN_POINTS_PER_ZONE = 3;
-export const MAX_POINTS_PER_ZONE = 100;
 
-/**
- * Recorta un número finito al rango normalizado [0, 1]. Cualquier otro valor
- * pasa sin cambios para que `@IsNumber` lo rechace.
- */
-export function clampNormalizedCoordinate(value: unknown): unknown {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return value;
-  }
-  return Math.min(1, Math.max(0, value));
-}
-
-const COORDINATE_NUMBER = { allowNaN: false, allowInfinity: false } as const;
-
-/** Vértice de una zona, en coordenadas normalizadas al cuadro. */
-export class GuardianZonePointDto {
-  @ApiProperty({
-    description: 'Coordenada horizontal normalizada (0 = borde izquierdo)',
-    minimum: 0,
-    maximum: 1,
-    example: 0.25,
-  })
-  @Transform(({ value }: { value: unknown }) =>
-    clampNormalizedCoordinate(value),
-  )
-  @IsNumber(COORDINATE_NUMBER, { message: 'x debe ser un número' })
-  @Min(0)
-  @Max(1)
-  x: number;
-
-  @ApiProperty({
-    description: 'Coordenada vertical normalizada (0 = borde superior)',
-    minimum: 0,
-    maximum: 1,
-    example: 0.75,
-  })
-  @Transform(({ value }: { value: unknown }) =>
-    clampNormalizedCoordinate(value),
-  )
-  @IsNumber(COORDINATE_NUMBER, { message: 'y debe ser un número' })
-  @Min(0)
-  @Max(1)
-  y: number;
-}
+// El vértice y sus límites viven en un archivo común (lo comparte la zona de
+// detección LPR). Se reexportan con los nombres históricos.
+export {
+  clampNormalizedCoordinate,
+  MAX_POINTS_PER_ZONE,
+  MIN_POINTS_PER_ZONE,
+  ZonePointDto as GuardianZonePointDto,
+};
 
 export class UpdateGuardianZonesDto {
   @ApiProperty({
@@ -116,6 +82,6 @@ export class UpdateGuardianZonesDto {
     message: `cada zona admite como máximo ${MAX_POINTS_PER_ZONE} puntos`,
   })
   @ValidateNested({ each: true })
-  @Type(() => GuardianZonePointDto)
-  zones: GuardianZonePointDto[][];
+  @Type(() => ZonePointDto)
+  zones: ZonePointDto[][];
 }

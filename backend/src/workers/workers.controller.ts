@@ -17,6 +17,7 @@ import {
 } from '../auth/guards/service-api-key.guard';
 import type { ServiceKeyRequest } from '../auth/guards/service-api-key.guard';
 import { CamerasService } from '../cameras/cameras.service';
+import type { WorkerLprSettingsView } from '../cameras/lpr-settings';
 import { CurrentTenant } from '../common/tenant/tenant-actor';
 import type { TenantContext } from '../common/tenant/tenant-context.types';
 
@@ -144,6 +145,40 @@ export class WorkersController {
         organizationId,
       );
     return { sourceUrl };
+  }
+
+  /**
+   * Configuración de visión LPR de una cámara DEL CONDOMINIO de la key (el
+   * worker la pide al arrancar y la refresca). Contrato exacto:
+   * `{ cameraId, enableLpr, lprSettings | null }`. Sin URL cifrada ni roles.
+   */
+  @Get('cameras/:id/lpr-settings')
+  @UseGuards(ServiceApiKeyGuard)
+  @ApiSecurity('x-api-key')
+  @ApiOperation({
+    summary: 'Configuración LPR de una cámara del condominio de la API key',
+    description:
+      'Para el worker LPR (pull). Una cámara de otro condominio responde 404.',
+  })
+  @ApiResponse({ status: 200, description: 'Configuración LPR de la cámara' })
+  @ApiUnauthorizedResponse({
+    description: 'API key ausente, inválida o expirada',
+  })
+  @ApiForbiddenResponse({
+    description: 'La API key no tiene organización asociada',
+  })
+  @ApiNotFoundResponse({
+    description: 'Cámara inexistente o de otro condominio',
+  })
+  async getCameraLprSettings(
+    @Req() req: ServiceKeyRequest,
+    @Param('id') id: string,
+  ): Promise<WorkerLprSettingsView> {
+    const organizationId = requireServiceKeyOrganizationId(req);
+    return this.camerasService.getLprSettingsForOrganization(
+      id,
+      organizationId,
+    );
   }
 
   /**

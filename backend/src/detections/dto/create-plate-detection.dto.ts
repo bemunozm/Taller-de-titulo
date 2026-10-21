@@ -1,6 +1,36 @@
-import { IsString, IsOptional, IsNumber, IsArray, IsObject, ValidateNested } from 'class-validator';
+import { IsString, IsOptional, IsNumber, IsArray, IsIn, IsInt, IsObject, Max, MaxLength, Min, ValidateNested } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
+
+export const PLATE_DIRECTIONS = ['entry', 'exit', 'unknown'] as const;
+export type PlateDirection = (typeof PLATE_DIRECTIONS)[number];
+
+/** Resumen del seguimiento + voto que confirmó la lectura (worker LPR). */
+export class MetaTrackDto {
+  @IsInt()
+  @Min(0)
+  @Max(2147483647)
+  @ApiProperty({ description: 'Id del track dentro del worker', example: 3 })
+  id: number;
+
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  @ApiProperty({ description: 'Lecturas válidas acumuladas por el track', example: 5 })
+  reads: number;
+
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  @ApiProperty({ description: 'Votos del texto ganador', example: 4 })
+  votes: number;
+
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
+  @Max(1)
+  @ApiProperty({ description: 'Fracción de votos del texto ganador (0-1)', example: 0.8 })
+  winner_share: number;
+}
 
 class MetaPlateDto {
   @IsOptional()
@@ -34,6 +64,18 @@ class MetaPlateDto {
   @IsString()
   @ApiPropertyOptional({ description: 'Como se realizo la confirmación por frames o segundos en imagen', example: 'frames' })
   confirmed_by?: string;
+
+  @IsOptional()
+  @IsIn(PLATE_DIRECTIONS)
+  @ApiPropertyOptional({ description: 'Sentido inferido por el worker', enum: PLATE_DIRECTIONS })
+  direction?: PlateDirection;
+
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => MetaTrackDto)
+  @ApiPropertyOptional({ description: 'Seguimiento + voto que confirmó la lectura', type: MetaTrackDto })
+  track?: MetaTrackDto;
 }
 
 
@@ -43,11 +85,13 @@ export class CreatePlateDetectionDto {
   cameraId: string;
 
   @IsString()
+  @MaxLength(16)
   @ApiProperty({ description: 'Patente detectada (normalizada)', example: 'ABC123' })
   plate: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   @ApiPropertyOptional({ description: 'Texto de la patente tal como salió del OCR', example: 'A8C123' })
   plate_raw?: string;
 
@@ -75,6 +119,7 @@ export class CreatePlateDetectionDto {
   detectionTimestamp?: number;
 
   @IsOptional()
+  @IsObject()
   @ValidateNested()
   @Type(() => MetaPlateDto)
   @ApiPropertyOptional({ description: 'Campo libre para meta/información adicional', type: MetaPlateDto })

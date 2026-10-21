@@ -9,6 +9,7 @@ import { WorkersController } from './workers.controller';
 import { WorkerNotifierService } from './worker-notifier.service';
 import { CamerasService } from '../cameras/cameras.service';
 import { Camera } from '../cameras/entities/camera.entity';
+import type { LprSettings } from '../cameras/lpr-settings';
 import { Role } from '../roles/entities/role.entity';
 import {
   ServiceApiKeyGuard,
@@ -37,6 +38,7 @@ function camera(overrides: Partial<Camera>): Camera {
     enableLpr: true,
     enableGuardian: false,
     guardianZones: [],
+    lprSettings: null,
     active: true,
     roles: [],
     ...overrides,
@@ -190,6 +192,90 @@ describe('WorkersController (camaras acotadas por service key)', () => {
       await expect(controller.listCameras({})).rejects.toThrow(
         ForbiddenException,
       );
+    });
+  });
+
+  describe('GET /workers/cameras/:id/lpr-settings', () => {
+    const SETTINGS: LprSettings = {
+      action: 'register',
+      direction: 'both',
+      zone: [
+        [
+          { x: 0.1, y: 0.1 },
+          { x: 0.9, y: 0.1 },
+          { x: 0.5, y: 0.9 },
+        ],
+      ],
+      detectorImgsz: 1920,
+      sampleFps: 8,
+      crop: { minWidth: 60, maxWidth: 250, minRatio: 0.8, maxRatio: 6 },
+      confirmReads: 3,
+    };
+
+    afterEach(() => {
+      store[0].lprSettings = null;
+    });
+
+    it('cámara sin configuración -> { cameraId, enableLpr, lprSettings: null }', async () => {
+      await expect(
+        controller.getCameraLprSettings(requestFor(ORG_A), CAM_A),
+      ).resolves.toEqual({
+        cameraId: CAM_A,
+        enableLpr: true,
+        lprSettings: null,
+      });
+    });
+
+    it('con configuración: contrato exacto, por id o mountPath, sin URL cifrada ni roles', async () => {
+      store[0].lprSettings = { ...SETTINGS };
+
+      const byId = await controller.getCameraLprSettings(
+        requestFor(ORG_A),
+        CAM_A,
+      );
+      const byMount = await controller.getCameraLprSettings(
+        requestFor(ORG_A),
+        'porton-a',
+      );
+
+      expect(byId).toEqual({
+        cameraId: CAM_A,
+        enableLpr: true,
+        lprSettings: SETTINGS,
+      });
+      expect(byMount).toEqual(byId);
+      expect(Object.keys(byId).sort()).toEqual([
+        'cameraId',
+        'enableLpr',
+        'lprSettings',
+      ]);
+      expect(JSON.stringify(byId)).not.toContain('rtsp');
+      expect(JSON.stringify(byId)).not.toContain('encryptedSourceUrl');
+    });
+
+    it('una camara de otro condominio responde 404 (por id y por mountPath)', async () => {
+      await expect(
+        controller.getCameraLprSettings(requestFor(ORG_A), CAM_B),
+      ).rejects.toThrow(NotFoundException);
+      await expect(
+        controller.getCameraLprSettings(requestFor(ORG_A), 'porton-b'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('key sin organizacion -> 403', async () => {
+      await expect(
+        controller.getCameraLprSettings(requestFor(''), CAM_A),
+      ).rejects.toThrow(ForbiddenException);
+      await expect(controller.getCameraLprSettings({}, CAM_A)).rejects.toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('la ruta exige ServiceApiKeyGuard', () => {
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- solo se lee la metadata del handler
+      const handler = WorkersController.prototype.getCameraLprSettings;
+      const guards = Reflect.getMetadata(GUARDS_METADATA, handler) as unknown[];
+      expect(guards).toEqual([ServiceApiKeyGuard]);
     });
   });
 

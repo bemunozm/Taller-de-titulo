@@ -1,4 +1,5 @@
 import { Role } from 'src/roles/entities/role.entity';
+import type { LprSettings } from '../lpr-settings';
 import { Column, Entity, Index, JoinTable, ManyToMany, PrimaryGeneratedColumn } from 'typeorm';
 
 /** Vértice de una zona del Guardián, normalizado al cuadro (0 a 1). */
@@ -53,6 +54,12 @@ export class Camera {
 	// 4 · P9: los valida `UpdateGuardianZonesDto`; los lee el LPR.
 	@Column({ type: 'jsonb', nullable: true, default: [] })
 	guardianZones: GuardianZone[] | null;
+
+	// Configuración de visión LPR por cámara (acción, dirección, zona, recorte,
+	// etc.). `null` = defaults del worker. La valida `UpdateLprSettingsDto` y la
+	// lee el worker por pull (`GET /workers/cameras/:id/lpr-settings`).
+	@Column({ type: 'jsonb', nullable: true })
+	lprSettings: LprSettings | null;
 
 	@Column({ type: 'boolean', default: true })
 	active: boolean;

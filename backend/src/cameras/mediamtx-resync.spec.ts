@@ -78,6 +78,7 @@ function camera(overrides: Partial<Camera>): Camera {
     enableLpr: true,
     enableGuardian: false,
     guardianZones: [],
+    lprSettings: null,
     active: true,
     roles: [],
     ...overrides,

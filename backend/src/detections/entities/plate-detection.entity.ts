@@ -54,6 +54,13 @@ export class PlateDetection {
     char_conf_min?: number | null;
     char_conf_mean?: number | null;
     confirmed_by?: string | null;
+    direction?: 'entry' | 'exit' | 'unknown';
+    track?: {
+      id: number;
+      reads: number;
+      votes: number;
+      winner_share: number;
+    };
   } | null;
 
   @Column({ type: 'bigint', nullable: true })

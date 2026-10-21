@@ -132,6 +132,78 @@ describe('POST /detections/plates — apertura según la visita (e2e)', () => {
     );
   });
 
+  describe('cámara en modo solo registro (lprSettings.action = register)', () => {
+    let registerCamera: E2eCamera;
+
+    beforeAll(async () => {
+      registerCamera = await scenario.createCamera(
+        condominium.admin,
+        'LPR registro',
+      );
+      ensureStatus(
+        await condominium.admin.http.patch(
+          `${API}/cameras/${registerCamera.id}/lpr-settings`,
+          { action: 'register', direction: 'both', sampleFps: 8 },
+        ),
+        [200],
+        'configurar la cámara en modo solo registro',
+      );
+    });
+
+    it('una propiedad desconocida en la configuración responde 400', async () => {
+      const response = await condominium.admin.http.patch(
+        `${API}/cameras/${registerCamera.id}/lpr-settings`,
+        { action: 'register', abrirPorton: true },
+      );
+
+      expect(response.status).toBe(400);
+    });
+
+    it('el worker lee la configuración con el contrato { cameraId, enableLpr, lprSettings }', async () => {
+      const response = ensureStatus(
+        await lpr.get(
+          `${API}/workers/cameras/${registerCamera.id}/lpr-settings`,
+        ),
+        [200],
+        'leer la configuración LPR como worker',
+      );
+
+      expect(response.json).toEqual({
+        cameraId: registerCamera.id,
+        enableLpr: false,
+        lprSettings: { action: 'register', direction: 'both', sampleFps: 8 },
+      });
+    });
+
+    it('una visita pre-aprobada NO abre ni cambia de estado: queda Registrado', async () => {
+      const plate = randomPlate();
+      const now = Date.now();
+      const created = ensureStatus(
+        await condominium.admin.http.post(`${API}/visits`, {
+          type: 'vehicular',
+          visitorName: `Visita registro ${uniqueSuffix()}`,
+          vehiclePlate: plate,
+          hostId: resident.id,
+          validFrom: new Date(now - 60_000).toISOString(),
+          validUntil: new Date(now + 2 * 60 * 60_000).toISOString(),
+          maxUses: 1,
+        }),
+        [201],
+        'crear la visita pre-aprobada',
+      );
+      const visitId = stringAt(created.json, 'id', 'visita');
+
+      const result = await reportPlate(lpr, registerCamera.id, plate);
+
+      expect(result.status).toBe(201);
+      expect(result.decision).toBe('Registrado');
+      expect(result.requiresApproval).toBe(false);
+      await expect(visitStatus(condominium.admin, visitId)).resolves.toBe(
+        'pending',
+      );
+    });
+  });
+
   it('sin API key la ingesta responde 401', async () => {
     const anonymous = scenario.newClient();
 
