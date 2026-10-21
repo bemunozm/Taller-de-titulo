@@ -9,6 +9,8 @@ import { DescriptionList, DescriptionTerm, DescriptionDetails } from '@/componen
 import { Dialog, DialogActions, DialogBody, DialogDescription, DialogTitle } from '@/components/ui/Dialog'
 import { Heading, Subheading } from '@/components/ui/Heading'
 import { AccessDecisionBadge } from '@/components/traceability/AccessDecisionBadge'
+import { DetectionImages } from '@/components/traceability/DetectionImages'
+import { hasDetectionImage, resolveDetectionImage } from '@/helpers/detectionImage'
 import { MISSING_VALUE, visibleUserEmail } from '@/helpers/userDisplay'
 import { useState, useMemo, type ComponentProps } from 'react'
 import { 
@@ -57,7 +59,6 @@ export default function TraceabilityDetailView() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [showRawMeta, setShowRawMeta] = useState(false)
-  const [imageLoaded, setImageLoaded] = useState(false)
   const [copiedId, setCopiedId] = useState(false)
   const [copiedPlate, setCopiedPlate] = useState(false)
   const [showApproveDialog, setShowApproveDialog] = useState(false)
@@ -139,7 +140,7 @@ export default function TraceabilityDetailView() {
     return {
       avgConfidence,
       processingTime,
-      hasImage: !!det?.full_frame_path,
+      hasImage: hasDetectionImage(det),
       method: attempt.method || 'No especificado'
     }
   }, [attempt])
@@ -245,6 +246,7 @@ export default function TraceabilityDetailView() {
 
   const det = attempt.detection
   const meta = det?.meta || {}
+  const imageSources = resolveDetectionImage(det)
 
   const methodBadge = (() => {
     const method = attempt.method
@@ -728,64 +730,19 @@ export default function TraceabilityDetailView() {
                           Imagen Capturada
                         </span>
                       </div>
-                      {det?.full_frame_path && (
-                        <Button 
-                          plain
-                          onClick={() => window.open(det.full_frame_path ?? undefined, '_blank')}
-                          className="text-xs"
+                      {imageSources.fullFrameUrl && (
+                        <a
+                          href={imageSources.fullFrameUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-xs text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white"
                         >
                           <EyeIcon className="w-4 h-4" />
                           Abrir original
-                        </Button>
+                        </a>
                       )}
                     </div>
-                    {det?.full_frame_path ? (
-                      <div className="space-y-3">
-                        <div className="relative rounded-lg overflow-hidden border-2 border-zinc-200 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-800 group">
-                          {!imageLoaded && (
-                            <div className="absolute inset-0 flex items-center justify-center">
-                              <div className="flex flex-col items-center gap-2">
-                                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-zinc-600"></div>
-                                <p className="text-xs text-zinc-500">Cargando imagen...</p>
-                              </div>
-                            </div>
-                          )}
-                          <img 
-                            src={det.full_frame_path} 
-                            alt="Frame capturado" 
-                            className={`w-full h-auto transition-all duration-300 ${imageLoaded ? 'opacity-100' : 'opacity-0'} group-hover:scale-105`}
-                            onLoad={() => setImageLoaded(true)}
-                          />
-                          {imageLoaded && (
-                            <div className="absolute top-2 right-2 bg-black/50 backdrop-blur-sm text-white px-2 py-1 rounded text-xs">
-                              {new Date(det.createdAt).toLocaleTimeString('es-CL')}
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-2 bg-zinc-50 dark:bg-zinc-800/50 rounded p-2">
-                          <code className="text-xs text-zinc-500 dark:text-zinc-400 truncate flex-1">
-                            {det.full_frame_path}
-                          </code>
-                          <Button
-                            plain
-                            onClick={() => copyToClipboard(det.full_frame_path!, 'id')}
-                            className="p-1"
-                          >
-                            <DocumentDuplicateIcon className="w-3.5 h-3.5 text-zinc-400" />
-                          </Button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="bg-zinc-100 dark:bg-zinc-800 rounded-lg p-12 text-center border-2 border-dashed border-zinc-300 dark:border-zinc-700">
-                        <CameraIcon className="mx-auto h-12 w-12 text-zinc-400 mb-3" />
-                        <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400 mb-1">
-                          No hay imagen disponible
-                        </p>
-                        <p className="text-xs text-zinc-500 dark:text-zinc-500">
-                          La captura no pudo ser almacenada
-                        </p>
-                      </div>
-                    )}
+                    <DetectionImages detection={det} capturedAt={det?.createdAt} />
                   </div>
                 )}
               </div>
