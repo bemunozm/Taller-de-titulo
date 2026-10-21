@@ -1,17 +1,3 @@
-// IMPORTANTE (hallazgo tarea #21): al igual que better-auth.ts, este módulo
-// necesita `process.env.JWT_SECRET` disponible EN EL MOMENTO DEL IMPORT
-// (`JwtModule.register(...)` corre como side-effect síncrono al cargar el
-// archivo, no dentro del cuerpo de `@Module`). Sin este `dotenv/config`,
-// process.env.JWT_SECRET llega `undefined` acá: `AuthModule` se importa
-// (app.module.ts) ANTES que `./auth/better-auth` en el orden de imports, y
-// `ConfigModule.forRoot()` recién carga el .env cuando corre el cuerpo del
-// decorador `@Module` de AppModule — MÁS TARDE que esto. Antes de esta tarea
-// eso pasaba desapercibido porque `getRequiredJwtSecret` no existía y el
-// fallback `|| 'yourSecretKey'` absorbía el `undefined` en silencio — es
-// decir, EN LA PRÁCTICA el login legacy llevaba firmando/verificando JWTs
-// con el secret hardcodeado 'yourSecretKey' pase lo que pasara en el .env
-// (ver hallazgo detallado en el reporte de esta tarea).
-import 'dotenv/config';
 import { Logger, Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -19,82 +5,37 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { UsersModule } from 'src/users/users.module';
-import { TokensModule } from 'src/tokens/tokens.module';
-import { JwtModule } from '@nestjs/jwt';
 import { User } from 'src/users/entities/user.entity';
-import { Token } from 'src/tokens/entities/token.entity';
-import { AuthEmailService } from './services/auth-email.service';
 import { AuthorizationGuard } from './guards/authorization.guard';
 import { AuthGuard } from './auth.guard';
 import { MailerModule } from '@nestjs-modules/mailer';
 import { CloudinaryModule } from 'src/cloudinary/cloudinary.module';
-
-// Tarea #21 (docs/modulos/auth-multitenant.md §11+, hardening): el arranque
-// DEBE fallar si JWT_SECRET no está definido o es débil — antes había un
-// fallback hardcodeado (`|| 'yourSecretKey'`) que dejaba el login legacy
-// firmando/verificando JWTs con un secret público y conocido si alguien
-// olvidaba setear la env var (p.ej. un deploy nuevo). 32 caracteres es el
-// mínimo recomendado por la skill better-auth-security-best-practices para
-// BETTER_AUTH_SECRET; se aplica el mismo piso acá porque ambos secrets
-// protegen el mismo tipo de credencial (JWT de sesión).
-function getRequiredJwtSecret(): string {
-  const secret = process.env.JWT_SECRET;
-  if (!secret || secret.trim().length < 32) {
-    throw new Error(
-      'JWT_SECRET no está definido o es demasiado corto (mínimo 32 caracteres). ' +
-        'Genera uno fuerte con `openssl rand -base64 32` y configúralo en tu .env antes de arrancar el backend.',
-    );
-  }
-  return secret;
-}
+import { THROTTLER_MODULE_OPTIONS } from '../common/rate-limit/rate-limit.policies';
+import { DataExportService } from '../privacy/data-export.service';
+import { Vehicle } from '../vehicles/entities/vehicle.entity';
+import { Visit } from '../visits/entities/visit.entity';
+import { Notification } from '../notifications/entities/notification.entity';
 
 const logger = new Logger('AuthModule');
 
 @Module({
   imports: [
     forwardRef(() => UsersModule),
-    TokensModule,
     ConfigModule,
     CloudinaryModule,
-    TypeOrmModule.forFeature([User, Token]),
-    JwtModule.register({
-      global: true,
-      secret: getRequiredJwtSecret(),
-      signOptions: { expiresIn: process.env.JWT_EXPIRATION || '1d', algorithm: 'HS256' },
-      verifyOptions: { algorithms: ['HS256'] },
-    }),
-    // Tarea #21: throttling del login legacy (`POST /api/v1/auth/login`,
-    // ver AuthController) — better-auth ya protege su propio /sign-in/email
-    // vía `rateLimit.customRules` (better-auth.ts), pero el login JWT propio
-    // (AuthService.login) no pasa por ahí. Named throttler 'login' (no se
-    // registra como guard global — solo se aplica explícitamente en la ruta
-    // de login vía @UseGuards(ThrottlerGuard) + @Throttle, así no afecta el
-    // resto de endpoints de AuthController).
-    //
-    // 'concierge-agent-chat' (Fase 1, Bloque A2a, revisión de calidad):
-    // throttler para `POST /concierge/agent/chat` (backend/src/agent/
-    // agent.controller.ts) — reenvía cada mensaje al proveedor del modelo
-    // (costo por token, latencia de red) y no tenía ningún límite de tasa.
-    // `ThrottlerModule` es `@Global()` (ver su source en
-    // node_modules/@nestjs/throttler), así que registrarlo acá — una sola
-    // vez, junto a 'login' — alcanza para que `AgentModule` (que ni siquiera
-    // importa `ThrottlerModule` directamente) pueda usar `ThrottlerGuard` +
-    // `@Throttle({ 'concierge-agent-chat': {...} })` en su controller, mismo
-    // patrón que 'login' en AuthController.
-    //
-    // 'concierge-execute-tool' (limpieza post-auditoría, MENOR 2): mismo
-    // criterio que 'concierge-agent-chat' — `POST
-    // /concierge/session/:id/execute-tool` (DigitalConciergeController) es el
-    // canal de producción real (Realtime voice: frontend/vigilia-hub) y no
-    // tenía ningún límite de tasa, a diferencia de `/concierge/agent/chat`.
-    // Límite más alto que el de chat (60 vs 20 por minuto) porque una sola
-    // llamada por citófono puede disparar varias tools (buscar_residente,
-    // guardar_datos_visitante x N, abrir_acceso, etc.) en la misma ventana.
-    ThrottlerModule.forRoot([
-      { name: 'login', ttl: 60_000, limit: 5 },
-      { name: 'concierge-agent-chat', ttl: 60_000, limit: 20 },
-      { name: 'concierge-execute-tool', ttl: 60_000, limit: 60 },
-    ]),
+    // Vehicle/Visit/Notification: exportación del titular (Fase 4 · P7.R,
+    // `GET /auth/me/data-export`, DataExportService).
+    TypeOrmModule.forFeature([User, Vehicle, Visit, Notification]),
+    // Fase 4 · P4.B (D9): UN solo throttler (`default`). Cada ruta elige su
+    // límite con `@RateLimit('<política>')` (common/rate-limit/), que aplica
+    // `VigiliaThrottlerGuard` (contador por hub, usuario o IP) a nivel de
+    // método. Antes había dos throttlers nombrados y `ThrottlerGuard` aplicaba
+    // ambos a cada ruta: `execute-tool` quedaba en 20/min en vez de 60.
+    // `ThrottlerModule` es `@Global()`: registrarlo acá alcanza para todos los
+    // módulos. Sin `APP_GUARD`: un guard global correría antes de la
+    // autenticación. better-auth limita su `/sign-in/email` aparte
+    // (`rateLimit.customRules`, better-auth.ts).
+    ThrottlerModule.forRoot(THROTTLER_MODULE_OPTIONS),
     MailerModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -124,7 +65,7 @@ const logger = new Logger('AuthModule');
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, AuthEmailService, AuthorizationGuard, AuthGuard],
+  providers: [AuthService, AuthorizationGuard, AuthGuard, DataExportService],
   // AuthGuard: Fase 1, Bloque A1 — se exporta explícitamente para que
   // `ConciergeAuthGuard` (digital-concierge) pueda inyectarlo por
   // constructor y componerlo con `HubAuthGuard` (OR de transporte: hub O
@@ -132,6 +73,6 @@ const logger = new Logger('AuthModule');
   // usos, instanciación ad-hoc de Nest para guards referenciados por clase);
   // exportarlo no cambia ese comportamiento existente, solo lo formaliza
   // como provider inyectable para consumidores nuevos.
-  exports: [AuthorizationGuard, AuthEmailService, AuthGuard],
+  exports: [AuthorizationGuard, AuthGuard],
 })
 export class AuthModule {}

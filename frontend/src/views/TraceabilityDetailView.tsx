@@ -2,13 +2,15 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { listAccessAttempts, type AccessAttempt } from '@/api/DetectionsAPI'
 import { listCameras } from '@/api/CameraAPI'
-import { respondToPendingDetection } from '@/api/PendingDetectionsAPI'
+import { isPendingAlreadyRespondedError, respondToPendingDetection } from '@/api/PendingDetectionsAPI'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { DescriptionList, DescriptionTerm, DescriptionDetails } from '@/components/ui/DescriptionList'
 import { Dialog, DialogActions, DialogBody, DialogDescription, DialogTitle } from '@/components/ui/Dialog'
 import { Heading, Subheading } from '@/components/ui/Heading'
-import { useState, useMemo } from 'react'
+import { AccessDecisionBadge } from '@/components/traceability/AccessDecisionBadge'
+import { MISSING_VALUE, visibleUserEmail } from '@/helpers/userDisplay'
+import { useState, useMemo, type ComponentProps } from 'react'
 import { 
   ChevronLeftIcon,
   CheckCircleIcon,
@@ -33,7 +35,16 @@ import {
 } from '@heroicons/react/24/outline'
 import { toast } from 'react-toastify'
 
-function prettyJSON(obj: any) {
+type BadgeColor = NonNullable<ComponentProps<typeof Badge>['color']>
+
+const METHOD_BADGES: Record<string, { color: BadgeColor; label: string }> = {
+  lpr: { color: 'lime', label: 'LPR' },
+  facial: { color: 'sky', label: 'Facial' },
+  manual: { color: 'amber', label: 'Manual' },
+  qr: { color: 'purple', label: 'QR' },
+}
+
+function prettyJSON(obj: unknown) {
   try {
     return JSON.stringify(obj, null, 2)
   } catch {
@@ -70,28 +81,35 @@ export default function TraceabilityDetailView() {
     queryFn: () => listCameras()
   })
 
+  // Tras responder (o fallar) se refrescan las detecciones: un 409 significa
+  // que ya fue respondida y la vista está desactualizada.
+  const refreshDetections = () => queryClient.invalidateQueries({ queryKey: ['detections'] })
+  const notifyRespondError = (error: Error, fallback: string) => {
+    if (isPendingAlreadyRespondedError(error)) {
+      toast.info(error.message)
+      return
+    }
+    toast.error(error.message || fallback)
+  }
+
   // Mutation para aprobar detección
   const approveMutation = useMutation({
     mutationFn: (attemptId: string) => respondToPendingDetection(attemptId, 'approved', 'Aprobado desde trazabilidad'),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['detections', 'attempts'] })
-      toast.success('✅ Detección aprobada exitosamente')
+      toast.success('Detección aprobada exitosamente')
     },
-    onError: (error: Error) => {
-      toast.error(error.message || 'Error al aprobar la detección')
-    },
+    onError: (error: Error) => notifyRespondError(error, 'Error al aprobar la detección'),
+    onSettled: refreshDetections,
   })
 
   // Mutation para rechazar detección
   const rejectMutation = useMutation({
     mutationFn: (attemptId: string) => respondToPendingDetection(attemptId, 'denied', 'Rechazado desde trazabilidad'),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['detections', 'attempts'] })
-      toast.success('✅ Detección rechazada exitosamente')
+      toast.success('Detección rechazada exitosamente')
     },
-    onError: (error: Error) => {
-      toast.error(error.message || 'Error al rechazar la detección')
-    },
+    onError: (error: Error) => notifyRespondError(error, 'Error al rechazar la detección'),
+    onSettled: refreshDetections,
   })
 
   // Get camera name from cameraId
@@ -137,7 +155,7 @@ export default function TraceabilityDetailView() {
         setTimeout(() => setCopiedPlate(false), 2000)
       }
       toast.success('Copiado al portapapeles')
-    } catch (err) {
+    } catch {
       toast.error('Error al copiar')
     }
   }
@@ -228,32 +246,11 @@ export default function TraceabilityDetailView() {
   const det = attempt.detection
   const meta = det?.meta || {}
 
-  const decisionBadge = attempt.decision === 'Aprovado' ? (
-    <Badge color="green" className="inline-flex items-center gap-1.5">
-      <CheckCircleIcon className="w-5 h-5" />
-      Aprobado
-    </Badge>
-  ) : attempt.decision === 'Denegado' ? (
-    <Badge color="red" className="inline-flex items-center gap-1.5">
-      <XCircleIcon className="w-5 h-5" />
-      Denegado
-    </Badge>
-  ) : (
-    <Badge color="zinc">{attempt.decision}</Badge>
-  )
-
   const methodBadge = (() => {
     const method = attempt.method
     if (!method) return <Badge color="zinc">No especificado</Badge>
-    
-    const methodColors: Record<string, any> = {
-      'lpr': { color: 'lime', label: 'LPR' },
-      'facial': { color: 'sky', label: 'Facial' },
-      'manual': { color: 'amber', label: 'Manual' },
-      'qr': { color: 'purple', label: 'QR' }
-    }
-    
-    const config = methodColors[method.toLowerCase()] || { color: 'zinc', label: method }
+
+    const config = METHOD_BADGES[method.toLowerCase()] ?? { color: 'zinc', label: method }
     return <Badge color={config.color}>{config.label}</Badge>
   })()
 
@@ -309,7 +306,7 @@ export default function TraceabilityDetailView() {
           </div>
           
           <div className="flex flex-wrap items-center gap-3">
-            {decisionBadge}
+            <AccessDecisionBadge decision={attempt.decision} />
             {methodBadge}
           </div>
         </div>
@@ -491,9 +488,12 @@ export default function TraceabilityDetailView() {
                           <span className="font-medium text-zinc-900 dark:text-zinc-100">
                             {attempt.residente.name}
                           </span>
-                          <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                            {attempt.residente.email}
-                          </span>
+                          {/* Sin users.update el residente llega como { id, name } (P5). */}
+                          {visibleUserEmail(attempt.residente.email) ? (
+                            <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                              {visibleUserEmail(attempt.residente.email)}
+                            </span>
+                          ) : null}
                         </div>
                       </div>
                     ) : (
@@ -519,6 +519,9 @@ export default function TraceabilityDetailView() {
                           </span>
                         )}
                       </div>
+                    ) : attempt.residente && attempt.residente.family === undefined ? (
+                      // Proyección { id, name }: la familia no se conoce, no es "sin familia".
+                      <span className="text-zinc-400 dark:text-zinc-600">{MISSING_VALUE}</span>
                     ) : (
                       <span className="text-zinc-400 dark:text-zinc-600">No asignada</span>
                     )}

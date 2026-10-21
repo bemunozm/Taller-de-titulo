@@ -12,10 +12,44 @@ import {
 } from '@heroicons/react/24/outline'
 import { listAccessAttempts } from '@/api/DetectionsAPI'
 import { useNavigate } from 'react-router-dom'
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useState } from 'react'
 import AnomalyTable from '@/components/traceability/AnomalyTable'
 import { listAnomalies } from '@/api/DetectionsAPI'
 import { ShieldExclamationIcon } from '@heroicons/react/24/outline'
+import { countAccessDecisions } from '@/helpers/accessDecision'
+
+interface StatCardProps {
+  icon: typeof MapIcon
+  iconClassName: string
+  label: string
+  value: number
+  valueClassName: string
+  footnote?: string
+}
+
+function StatCard({ icon: Icon, iconClassName, label, value, valueClassName, footnote }: StatCardProps) {
+  const labelId = useId()
+
+  return (
+    <section
+      aria-labelledby={labelId}
+      className="bg-white dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700"
+    >
+      <div className="flex items-center gap-3 mb-2">
+        <Icon aria-hidden="true" className={`w-6 h-6 ${iconClassName}`} />
+        <p id={labelId} className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
+          {label}
+        </p>
+      </div>
+      <p className={`text-3xl font-bold ${valueClassName}`}>{value.toLocaleString()}</p>
+      {footnote ? <p className="text-xs text-zinc-500 mt-1">{footnote}</p> : null}
+    </section>
+  )
+}
+
+function shareOfTotal(count: number, total: number): string {
+  return `${total > 0 ? ((count / total) * 100).toFixed(1) : 0}% del total`
+}
 
 export default function TraceabilityView() {
   const navigate = useNavigate()
@@ -24,7 +58,7 @@ export default function TraceabilityView() {
     queryKey: ['detections', 'attempts'], 
     queryFn: () => listAccessAttempts() 
   })
-  const { data: anomalies = [] } = useQuery({ 
+  const { data: anomalies = [], isError: isAnomaliesError } = useQuery({
     queryKey: ['anomalies'], 
     queryFn: () => listAnomalies() 
   })
@@ -35,11 +69,13 @@ export default function TraceabilityView() {
     queryClient.invalidateQueries({ queryKey: ['detections', 'attempts'] })
   }
 
-  // Calcular estadísticas
+  // Calcular estadísticas. "Aprobado" es solo `Permitido`: un `Duplicado`
+  // nunca abre el portón, así que no suma como acceso aprobado.
   const stats = useMemo(() => {
     const total = data.length
-    const approved = data.filter(d => d.decision === 'Aprovado').length
-    const denied = data.filter(d => d.decision === 'Denegado').length
+    const byDecision = countAccessDecisions(data)
+    const approved = byDecision.Permitido
+    const denied = byDecision.Denegado
     const today = new Date().toISOString().slice(0, 10)
     const todayAttempts = data.filter(d => 
       new Date(d.createdAt).toISOString().slice(0, 10) === today
@@ -80,66 +116,37 @@ export default function TraceabilityView() {
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        {/* Total */}
-        <div className="bg-white dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700">
-          <div className="flex items-center gap-3 mb-2">
-            <MapIcon className="w-6 h-6 text-indigo-600 dark:text-indigo-400" />
-            <div className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
-              Total de Intentos
-            </div>
-          </div>
-          <div className="text-3xl font-bold text-zinc-900 dark:text-zinc-100">
-            {stats.total.toLocaleString()}
-          </div>
-        </div>
-
-        {/* Aprobados */}
-        <div className="bg-white dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700">
-          <div className="flex items-center gap-3 mb-2">
-            <CheckCircleIcon className="w-6 h-6 text-green-600 dark:text-green-400" />
-            <div className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
-              Accesos Aprobados
-            </div>
-          </div>
-          <div className="text-3xl font-bold text-green-600 dark:text-green-400">
-            {stats.approved.toLocaleString()}
-          </div>
-          <div className="text-xs text-zinc-500 mt-1">
-            {stats.total > 0 ? ((stats.approved / stats.total) * 100).toFixed(1) : 0}% del total
-          </div>
-        </div>
-
-        {/* Denegados */}
-        <div className="bg-white dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700">
-          <div className="flex items-center gap-3 mb-2">
-            <XCircleIcon className="w-6 h-6 text-red-600 dark:text-red-400" />
-            <div className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
-              Accesos Denegados
-            </div>
-          </div>
-          <div className="text-3xl font-bold text-red-600 dark:text-red-400">
-            {stats.denied.toLocaleString()}
-          </div>
-          <div className="text-xs text-zinc-500 mt-1">
-            {stats.total > 0 ? ((stats.denied / stats.total) * 100).toFixed(1) : 0}% del total
-          </div>
-        </div>
-
-        {/* Anomalías IA */}
-        <div className="bg-white dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700">
-          <div className="flex items-center gap-3 mb-2">
-            <ShieldExclamationIcon className="w-6 h-6 text-red-600 dark:text-red-400" />
-            <div className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
-              Anomalías IA
-            </div>
-          </div>
-          <div className="text-3xl font-bold text-red-600 dark:text-red-400">
-            {anomalies.length.toLocaleString()}
-          </div>
-          <div className="text-xs text-zinc-500 mt-1">
-            Eventos críticos detectados
-          </div>
-        </div>
+        <StatCard
+          icon={MapIcon}
+          iconClassName="text-indigo-600 dark:text-indigo-400"
+          label="Total de Intentos"
+          value={stats.total}
+          valueClassName="text-zinc-900 dark:text-zinc-100"
+        />
+        <StatCard
+          icon={CheckCircleIcon}
+          iconClassName="text-green-600 dark:text-green-400"
+          label="Accesos Aprobados"
+          value={stats.approved}
+          valueClassName="text-green-600 dark:text-green-400"
+          footnote={shareOfTotal(stats.approved, stats.total)}
+        />
+        <StatCard
+          icon={XCircleIcon}
+          iconClassName="text-red-600 dark:text-red-400"
+          label="Accesos Denegados"
+          value={stats.denied}
+          valueClassName="text-red-600 dark:text-red-400"
+          footnote={shareOfTotal(stats.denied, stats.total)}
+        />
+        <StatCard
+          icon={ShieldExclamationIcon}
+          iconClassName="text-red-600 dark:text-red-400"
+          label="Anomalías IA"
+          value={anomalies.length}
+          valueClassName="text-red-600 dark:text-red-400"
+          footnote={isAnomaliesError ? 'No se pudieron cargar' : 'Eventos críticos detectados'}
+        />
       </div>
 
       {/* Tabs */}

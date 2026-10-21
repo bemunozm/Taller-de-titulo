@@ -1,11 +1,13 @@
 import { useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { 
   UserCircleIcon, 
   KeyIcon, 
   BellIcon,
   ShieldCheckIcon,
-  ChevronRightIcon
+  ChevronRightIcon,
+  DocumentArrowDownIcon,
 } from '@heroicons/react/24/outline';
 import { Heading, Subheading } from '@/components/ui/Heading';
 import { Avatar } from '@/components/ui/Avatar';
@@ -14,12 +16,18 @@ import { PersonalInfoSection } from '@/components/profile/PersonalInfoSection';
 import { SecuritySection } from '@/components/profile/SecuritySection';
 import { NotificationPreferencesSection } from '@/components/profile/NotificationPreferencesSection';
 import { AccountInfoSection } from '@/components/profile/AccountInfoSection';
+import { PrivacyDataSection } from '@/components/profile/PrivacyDataSection';
 import type { UserWithFamily } from '@/types/index';
+import { PROFILE_PRIVACY_HASH } from '@/helpers/privacyPolicy';
 
-type ActiveSection = 'personal' | 'security' | 'notifications' | 'account';
+type ActiveSection = 'personal' | 'security' | 'notifications' | 'account' | 'privacy';
 
 export default function ProfileView() {
-  const [activeSection, setActiveSection] = useState<ActiveSection>('personal');
+  // `/my-profile#privacidad` (enlace de la política) abre directo "Privacidad y mis datos".
+  const { hash } = useLocation();
+  const [activeSection, setActiveSection] = useState<ActiveSection>(() =>
+    hash === PROFILE_PRIVACY_HASH ? 'privacy' : 'personal',
+  );
 
   const { data: user, isLoading } = useQuery<UserWithFamily>({
     queryKey: ['currentUser'],
@@ -71,6 +79,12 @@ export default function ProfileView() {
       name: 'Información de Cuenta',
       icon: ShieldCheckIcon,
       description: 'Roles, permisos y estado de cuenta',
+    },
+    {
+      id: 'privacy' as ActiveSection,
+      name: 'Privacidad y mis datos',
+      icon: DocumentArrowDownIcon,
+      description: 'Descarga tus datos y ejerce tus derechos',
     },
   ];
 
@@ -133,6 +147,7 @@ export default function ProfileView() {
             {activeSection === 'security' && <SecuritySection />}
             {activeSection === 'notifications' && <NotificationPreferencesSection />}
             {activeSection === 'account' && <AccountInfoSection user={user} />}
+            {activeSection === 'privacy' && <PrivacyDataSection />}
           </div>
         </div>
       </div>

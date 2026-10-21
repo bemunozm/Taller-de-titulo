@@ -6,6 +6,7 @@ import {
   DocumentTextIcon,
 } from '@heroicons/react/24/outline';
 import type { Visit, Vehicle } from '@/types/index';
+import { canShowVisitQr } from '@/helpers/visitStatus';
 
 interface QuickActionsPanelProps {
   activeVisits: Visit[];
@@ -13,7 +14,7 @@ interface QuickActionsPanelProps {
 }
 
 export function QuickActionsPanel({ activeVisits, myVehicles }: QuickActionsPanelProps) {
-  const activeQRVisit = activeVisits.find(v => v.type === 'pedestrian' && v.qrCode);
+  const activeQRVisit = activeVisits.find(v => v.type === 'pedestrian' && canShowVisitQr(v));
 
   return (
     <div className="bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-950/20 dark:to-indigo-950/20 rounded-lg border border-blue-200 dark:border-blue-900 p-6">

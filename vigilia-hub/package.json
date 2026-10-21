@@ -4,7 +4,10 @@
   "description": "VigilIA Hub - Raspberry Pi Hardware Controller for Digital Concierge",
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "prebuild": "npm run clean",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "start": "node dist/main.js",
     "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
     "start:prod": "NODE_ENV=production node dist/main.js",
@@ -31,7 +34,6 @@
     "axios": "^1.7.9",
     "dotenv": "^16.4.7",
     "openai": "^6.22.0",
-    "pigpio": "^3.3.1",
     "rxjs": "^7.8.1",
     "socket.io-client": "^4.8.1",
     "winston": "^3.17.0",
@@ -39,7 +41,8 @@
     "zod": "^3.24.1"
   },
   "optionalDependencies": {
-    "onoff": "^6.0.3"
+    "onoff": "^6.0.3",
+    "pigpio": "^3.3.1"
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",
@@ -52,6 +55,6 @@
     "typescript": "^5.7.2"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.12.0"
   }
 }

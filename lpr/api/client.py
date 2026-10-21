@@ -3,24 +3,17 @@ import logging
 import time
 from lpr.settings import settings
 
-def _post_request(url: str, dto: dict, dry_run: bool = True) -> int:
-    """Función base para envíos POST al backend con reintentos y auth."""
-    if dry_run:
-        logging.info('DRY RUN - evento (no enviado) a %s: %s', url, dto)
-        return 200
+def service_headers() -> dict:
+    """Headers de autenticación del worker contra el backend.
 
-    headers = {'Content-Type': 'application/json'}
-    token = settings.LPR_WORKER_TOKEN or settings.WORKER_BACKEND_TOKEN
-    if token:
-        headers['Authorization'] = f'Bearer {token}'
-
-    # Tarea #21 (hardening de ingesta LPR): los endpoints de ingesta
-    # (detections/plates, detections/plates/attempts, anomalies) ahora exigen
-    # la API key de servicio de better-auth vía el header `x-api-key`
-    # (ver ServiceApiKeyGuard en el backend) — el `Authorization: Bearer`
-    # de arriba (token JWT legacy, deprecated) NO la reemplaza para estos
-    # endpoints. Sin `LPR_SERVICE_API_KEY` configurada, el backend responderá
-    # 401 en producción/staging.
+    Los endpoints de máquina (ingesta: detections/plates,
+    detections/plates/attempts, POST anomalies; y la lectura de zonas del
+    Guardián, GET anomalies/cameras/:id/zones) exigen la API key de servicio
+    de better-auth en el header `x-api-key` (ServiceApiKeyGuard en el
+    backend). Es la única credencial: el Bearer JWT legacy se retiró en la
+    Fase 4 (P2). Sin `LPR_SERVICE_API_KEY` el backend responde 401.
+    """
+    headers = {}
     if settings.LPR_SERVICE_API_KEY:
         headers['x-api-key'] = settings.LPR_SERVICE_API_KEY
     else:
@@ -28,6 +21,16 @@ def _post_request(url: str, dto: dict, dry_run: bool = True) -> int:
             'LPR_SERVICE_API_KEY no está configurada — el backend rechazará este request '
             'con 401 si el endpoint exige API key de servicio (ver docs/modulos/auth-multitenant.md).'
         )
+    return headers
+
+
+def _post_request(url: str, dto: dict, dry_run: bool = True) -> int:
+    """Función base para envíos POST al backend con reintentos y auth."""
+    if dry_run:
+        logging.info('DRY RUN - evento (no enviado) a %s: %s', url, dto)
+        return 200
+
+    headers = {'Content-Type': 'application/json', **service_headers()}
 
     attempts = 3
     backoff = 1.0

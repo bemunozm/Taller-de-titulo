@@ -1,7 +1,11 @@
 import { BadRequestException } from '@nestjs/common';
-import { GuardarDatosVisitanteTool } from './guardar-datos-visitante.tool';
+import { getMetadataArgsStorage } from 'typeorm';
+import {
+  GuardarDatosVisitanteTool,
+  VISITOR_DATA_MAX_LENGTHS,
+} from './guardar-datos-visitante.tool';
 import { DigitalConciergeService } from '../../digital-concierge/services/digital-concierge.service';
-import type { ConciergeSession } from '../../digital-concierge/entities/concierge-session.entity';
+import { ConciergeSession } from '../../digital-concierge/entities/concierge-session.entity';
 import type { AuthorizedContext } from '../types/authorized-context.type';
 
 /**
@@ -26,6 +30,7 @@ describe('GuardarDatosVisitanteTool', () => {
       isSuperAdmin: false,
       userId: undefined,
       role: 'hub',
+      channel: 'physical-hub',
       scopes: ['digital-concierge.access'],
       requestId: 'req-1',
       sessionId: 'session-1',
@@ -115,5 +120,41 @@ describe('GuardarDatosVisitanteTool', () => {
     expect(result.ok).toBe(false);
     expect(result.campo).toBe('rut');
     expect(result.mensaje).toContain('dígito verificador');
+  });
+
+  /**
+   * Fase 4 · P6.M (corrección QA): topes acordes a las columnas de
+   * `concierge_sessions`. Antes un nombre de 200 caracteres llegaba a la BD
+   * (varchar(128)) y respondía 500.
+   */
+  describe('topes de la entrada', () => {
+    /** Largo de una columna varchar de ConciergeSession según TypeORM. */
+    function columnLength(property: keyof ConciergeSession): number {
+      const column = getMetadataArgsStorage().columns.find(
+        (c) => c.target === ConciergeSession && c.propertyName === property,
+      );
+      return Number(column?.options.length);
+    }
+
+    it.each(Object.entries(VISITOR_DATA_MAX_LENGTHS))(
+      '%s: acepta el tope (%i) y rechaza uno más',
+      (field, max) => {
+        expect(
+          tool.inputSchema.safeParse({ [field]: 'a'.repeat(max) }).success,
+        ).toBe(true);
+        expect(
+          tool.inputSchema.safeParse({ [field]: 'a'.repeat(max + 1) }).success,
+        ).toBe(false);
+      },
+    );
+
+    it('los campos que se guardan tal cual caben en su columna', () => {
+      expect(VISITOR_DATA_MAX_LENGTHS.nombre).toBe(columnLength('visitorName'));
+      expect(VISITOR_DATA_MAX_LENGTHS.motivo).toBe(columnLength('visitReason'));
+      expect(VISITOR_DATA_MAX_LENGTHS.casa).toBe(
+        columnLength('destinationHouse'),
+      );
+      expect(VISITOR_DATA_MAX_LENGTHS.rut).toBe(columnLength('visitorRut'));
+    });
   });
 });

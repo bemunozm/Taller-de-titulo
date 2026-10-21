@@ -5,7 +5,7 @@ import { NotificationsGateway } from './notifications.gateway';
 import {
   Notification,
   NotificationType,
-  NotificationPriority
+  NotificationPriority,
 } from './entities/notification.entity';
 import { GetNotificationsDto } from './dto/get-notifications.dto';
 import { MarkAsReadDto } from './dto/mark-as-read.dto';
@@ -66,12 +66,17 @@ export class NotificationsService {
    * Crear y enviar una notificación (persistente + tiempo real)
    */
   async create(options: CreateNotificationOptions): Promise<Notification> {
-    this.logger.log(`Creating notification for user ${options.recipientId}: ${options.title}`);
+    this.logger.log(
+      `Creating notification for user ${options.recipientId}: ${options.title}`,
+    );
 
     // Tarea #19: organizationId resource-derived desde la organización del
     // destinatario (no cross-tenant por diseño: cada notificación ya está
     // acotada a un único recipientId).
-    const organizationId = await resolveOrganizationIdForUser(options.recipientId, this.dataSource);
+    const organizationId = await resolveOrganizationIdForUser(
+      options.recipientId,
+      this.dataSource,
+    );
 
     // 1. Guardar en base de datos (PERSISTENCIA)
     const notification = this.notificationRepository.create({
@@ -87,9 +92,14 @@ export class NotificationsService {
       read: false,
     });
 
-    const savedNotification = await this.notificationRepository.save(notification);
+    const savedNotification =
+      await this.notificationRepository.save(notification);
 
-    // 2. Enviar por WebSocket si el usuario está conectado (TIEMPO REAL)
+    // 2. Enviar por WebSocket a la sala `user:<id>` (TIEMPO REAL; si no
+    //    tiene sockets abiertos, no llega a nadie y queda en la BD). Fase 4 ·
+    //    P6.R: ya no hay `broadcastAlert` (emisión global sin llamadores) ni
+    //    consulta de "usuarios conectados" (listaba los de todos los
+    //    condominios).
     const payload: NotificationPayload = {
       title: options.title,
       message: options.message,
@@ -113,9 +123,21 @@ export class NotificationsService {
   }
 
   /**
-   * Obtener notificaciones de un usuario con filtros
+   * Obtener notificaciones de un usuario con filtros.
+   *
+   * Fase 4 · P5.B (IDOR): siempre las de `userId` (obligatorio). Antes
+   * `dto.recipientId` tenía prioridad sobre el usuario de la sesión, así que
+   * `GET /notifications?recipientId=<uuid>` leía las de cualquiera. Desde la
+   * P5.C el DTO ya no tiene `recipientId`.
    */
-  async findAll(dto: GetNotificationsDto, userId?: string): Promise<{ notifications: Notification[]; total: number; unreadCount: number }> {
+  async findAll(
+    dto: GetNotificationsDto,
+    userId: string,
+  ): Promise<{
+    notifications: Notification[];
+    total: number;
+    unreadCount: number;
+  }> {
     const page = dto.page || 1;
     const limit = dto.limit || 20;
     const skip = (page - 1) * limit;
@@ -123,7 +145,7 @@ export class NotificationsService {
     const queryBuilder = this.notificationRepository
       .createQueryBuilder('notification')
       .where('notification.recipientId = :recipientId', {
-        recipientId: dto.recipientId || userId,
+        recipientId: userId,
       })
       .orderBy('notification.createdAt', 'DESC')
       .skip(skip)
@@ -155,7 +177,7 @@ export class NotificationsService {
     const unreadCount = await this.notificationRepository
       .createQueryBuilder('notification')
       .where('notification.recipientId = :recipientId', {
-        recipientId: dto.recipientId || userId,
+        recipientId: userId,
       })
       .andWhere('notification.read = false')
       .andWhere(
@@ -173,7 +195,9 @@ export class NotificationsService {
   /**
    * Marcar notificaciones como leídas
    */
-  async markAsRead(dto: MarkAsReadDto, userId?: string): Promise<void> {
+  // P5.B: `userId` obligatorio. Opcional, un `undefined` se descartaba del
+  // `where` de TypeORM y marcaba esas notificaciones de CUALQUIER usuario.
+  async markAsRead(dto: MarkAsReadDto, userId: string): Promise<void> {
     const now = new Date();
 
     await this.notificationRepository.update(
@@ -187,7 +211,9 @@ export class NotificationsService {
       },
     );
 
-    this.logger.log(`Marked ${dto.notificationIds.length} notifications as read for user ${userId}`);
+    this.logger.log(
+      `Marked ${dto.notificationIds.length} notifications as read for user ${userId}`,
+    );
   }
 
   /**
@@ -207,7 +233,9 @@ export class NotificationsService {
       },
     );
 
-    this.logger.log(`Marked all notifications as read for user ${userId} (${result.affected} affected)`);
+    this.logger.log(
+      `Marked all notifications as read for user ${userId} (${result.affected} affected)`,
+    );
   }
 
   /**
@@ -223,7 +251,9 @@ export class NotificationsService {
       read: true,
     });
 
-    this.logger.log(`Deleted ${result.affected} old notifications for user ${userId}`);
+    this.logger.log(
+      `Deleted ${result.affected} old notifications for user ${userId}`,
+    );
   }
 
   /**
@@ -234,7 +264,9 @@ export class NotificationsService {
       recipientId: userId,
     });
 
-    this.logger.log(`Soft deleted all notifications for user ${userId} (${result.affected} affected)`);
+    this.logger.log(
+      `Soft deleted all notifications for user ${userId} (${result.affected} affected)`,
+    );
   }
 
   /**
@@ -274,7 +306,10 @@ export class NotificationsService {
         visitId: visitData.id,
         visitorName: visitData.visitorName,
         exitTime: visitData.exitTime,
-        duration: this.calculateDuration(visitData.entryTime, visitData.exitTime),
+        duration: this.calculateDuration(
+          visitData.entryTime,
+          visitData.exitTime,
+        ),
       },
     });
   }
@@ -318,10 +353,15 @@ export class NotificationsService {
   /**
    * Notificar llegada de visitante (Conserje Digital)
    * Con acción requerida: aprobar/rechazar
+   *
+   * Fase 4 · P4 (D5): `data` lleva `sessionId` Y `visitId` (la solicitud
+   * `AWAITING_APPROVAL` que ve el residente). `POST
+   * /concierge/session/:sessionId/respond` exige ese `visitId` en el body: así
+   * la respuesta resuelve exactamente la solicitud que se mostró.
    */
   async notifyVisitorArrival(
     residentId: string,
-    sessionId: string,
+    request: { sessionId: string; visitId: string },
     visitorData: {
       name: string;
       rut?: string;
@@ -342,7 +382,8 @@ export class NotificationsService {
       requiresAction: true,
       expiresAt,
       data: {
-        sessionId,
+        sessionId: request.sessionId,
+        visitId: request.visitId,
         expiresAt: expiresAt.toISOString(), // Incluir en data para el frontend
         visitor: {
           name: visitorData.name,
@@ -382,24 +423,6 @@ export class NotificationsService {
   }
 
   /**
-   * Notificar a todos los usuarios online (broadcast)
-   */
-  async broadcastAlert(alertData: {
-    title: string;
-    message: string;
-    priority?: NotificationPriority;
-  }): Promise<void> {
-    const payload: NotificationPayload = {
-      ...alertData,
-      type: NotificationType.SYSTEM_ALERT,
-      priority: alertData.priority || NotificationPriority.HIGH,
-      timestamp: new Date(),
-    };
-
-    this.notificationsGateway.broadcast('notification', payload);
-  }
-
-  /**
    * ==================== UTILIDADES ====================
    */
 
@@ -410,7 +433,7 @@ export class NotificationsService {
     const diff = new Date(end).getTime() - new Date(start).getTime();
     const hours = Math.floor(diff / 3600000);
     const minutes = Math.floor((diff % 3600000) / 60000);
-    
+
     if (hours > 0) {
       return `${hours}h ${minutes}m`;
     }
@@ -418,57 +441,7 @@ export class NotificationsService {
   }
 
   /**
-   * Verificar si un usuario está conectado
-   */
-  isUserOnline(userId: string): boolean {
-    return this.notificationsGateway.isUserConnected(userId);
-  }
-
-  /**
-   * Obtener usuarios conectados
-   */
-  getOnlineUsers(): string[] {
-    return this.notificationsGateway.getConnectedUsers();
-  }
-
-  /**
-   * Notificar a todos los usuarios con un rol específico
-   */
-  async notifyByRole(
-    roleName: string,
-    type: NotificationType,
-    title: string,
-    message: string,
-    options?: {
-      priority?: NotificationPriority;
-      data?: any;
-      requiresAction?: boolean;
-    },
-  ): Promise<Notification[]> {
-    const users = await this.usersService.findByRole(roleName);
-    
-    this.logger.log(`Notificando a ${users.length} usuarios con rol ${roleName}`);
-
-    const notifications: Notification[] = [];
-    
-    for (const user of users) {
-      const notification = await this.create({
-        recipientId: user.id,
-        type,
-        title,
-        message,
-        priority: options?.priority || NotificationPriority.NORMAL,
-        data: options?.data,
-        requiresAction: options?.requiresAction,
-      });
-      notifications.push(notification);
-    }
-    
-    return notifications;
-  }
-
-  /**
-   * Igual que `notifyByRole` pero acotado a los usuarios con el rol dado que
+   * Notifica a los usuarios con el rol dado que
    * pertenecen a `organizationId` (Fase 2, revisión pre-F2.2 —
    * docs/modulos/agente-cerebro.md §12: fix del leak de escalamiento
    * cross-tenant en `PendingActionsService.notifyEscalation`/
@@ -483,10 +456,9 @@ export class NotificationsService {
    * (`resolveOrganizationIdForUser` contra la tabla `member` de better-auth,
    * la única fuente de verdad de membresía de organización del sistema).
    *
-   * `organizationId: null` (el "cajón sin condominio" ya usado en el resto
-   * del sistema — hub aún no asociado) hace match por IGUALDAD, no por
-   * bypass: solo notifica a usuarios cuya organización resuelta sea también
-   * `null`, nunca a todos.
+   * Fase 4 · P5.C: `organizationId: null` (p. ej. un hub sin condominio
+   * asignado) no notifica a NADIE. Antes calzaba por igualdad con los
+   * usuarios sin condominio (el "cajón nulo").
    */
   async notifyByRoleForOrganization(
     roleName: string,
@@ -500,6 +472,12 @@ export class NotificationsService {
       requiresAction?: boolean;
     },
   ): Promise<Notification[]> {
+    if (!organizationId) {
+      this.logger.warn(
+        `Notificación a ${roleName} sin condominio: no se notifica a nadie (fail-closed)`,
+      );
+      return [];
+    }
     const candidates = await this.usersService.findByRole(roleName);
 
     const scoped: typeof candidates = [];
@@ -533,34 +511,5 @@ export class NotificationsService {
     }
 
     return notifications;
-  }
-
-  /**
-   * Notificar a múltiples usuarios con el mismo mensaje
-   */
-  async notifyMultiple(
-    userIds: string[],
-    type: NotificationType,
-    title: string,
-    message: string,
-    options?: {
-      priority?: NotificationPriority;
-      data?: any;
-      requiresAction?: boolean;
-    },
-  ): Promise<void> {
-    this.logger.log(`Notificando a ${userIds.length} usuarios`);
-
-    for (const userId of userIds) {
-      await this.create({
-        recipientId: userId,
-        type,
-        title,
-        message,
-        priority: options?.priority || NotificationPriority.NORMAL,
-        data: options?.data,
-        requiresAction: options?.requiresAction,
-      });
-    }
   }
 }

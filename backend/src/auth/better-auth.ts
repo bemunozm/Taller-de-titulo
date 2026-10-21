@@ -6,13 +6,33 @@
 // este archivo sea autosuficiente (mismo patrón que usan los configs standalone
 // de TypeORM CLI / better-auth CLI).
 import 'dotenv/config';
-import { betterAuth } from 'better-auth';
+import { Logger } from '@nestjs/common';
+import { APIError, BASE_ERROR_CODES, betterAuth } from 'better-auth';
+import { createAuthMiddleware, isAPIError } from 'better-auth/api';
 import { organization } from 'better-auth/plugins/organization';
 import { customSession } from 'better-auth/plugins/custom-session';
 import { apiKey } from '@better-auth/api-key';
 import { Pool } from 'pg';
 import * as nodemailer from 'nodemailer';
 import { hashPassword, checkPassword } from './utils/auth.util';
+import { CLIENT_IP_HEADER } from './middleware/client-ip.middleware';
+import { PASSWORD_RESET_SESSION_POLICY } from './password-reset.policy';
+import { shouldUseSecureCookies } from './secure-cookies.policy';
+import {
+  BETTER_AUTH_BASE_PATH,
+  httpAllowlistPlugin,
+} from './better-auth-http-allowlist';
+import {
+  auditAuthEndpointResult,
+  auditSessionCreated,
+  auditSessionDeleted,
+} from './auth-audit';
+import { notifySessionDeleted } from './session-ended-events';
+import {
+  isSessionCreationAllowed,
+  USER_DISABLED_LOOKUP_SQL,
+  userDisabledFromRows,
+} from './disabled-user-session.policy';
 import {
   buildAccountVerificationEmailHtml,
   buildOrganizationInvitationEmailHtml,
@@ -76,25 +96,16 @@ import {
  *   confirm-account/forgot-password/reset-password (ver AuthController/
  *   AuthService). La tabla `Token` NO se retira todavía (queda para #21,
  *   otros módulos aún podrían depender de `TokensService`).
- * - **Bridge `user.password` (arista de sincronización, ver RESTRICCIÓN
- *   CRÍTICA de la tarea #18):** el login legacy (`/api/v1/auth/login`, JWT,
- *   AuthService.login) sigue leyendo `user.password` (columna propia), pero
- *   better-auth guarda su hash en `account.password` (tabla separada). Para
- *   que ambos caminos de login sigan viendo la MISMA contraseña tras un
- *   reset/activación vía better-auth, `emailAndPassword.onPasswordReset`
- *   (abajo) copia el hash recién escrito en `account` hacia `user.password`
- *   con una query SQL directa sobre el mismo `pool`. Es el ÚNICO punto de
- *   sincronización cableado hoy (cubre forgot-password, reset-password y la
- *   activación de cuentas nuevas — todos pasan por `resetPassword`).
- *   `databaseHooks.account.create.after` es un segundo bridge, más liviano,
- *   para cualquier OTRO flujo futuro que cree una cuenta credential por fuera
- *   de `resetPassword` (p.ej. invitaciones de organization en #19).
- *   **Limitación transitoria documentada:** `changePassword`/`setPassword`
- *   nativos de better-auth (cambio de password con sesión activa) NO están
- *   expuestos todavía (no hay UI/endpoint que los dispare) y por lo tanto no
- *   tienen bridge propio — si se cablean en una fase futura, agregar su
- *   sincronización aquí también (mismo patrón).
+ * - **Una sola credencial (Fase 4 · P2, hallazgo A1):** la contraseña vive
+ *   SOLO en `account.password` (cuenta `credential` de better-auth). La
+ *   columna duplicada `user.password` y el puente que la sincronizaba se
+ *   retiraron: `AuthService.checkPassword`/`updateCurrentUserPassword` usan
+ *   `auth.api.verifyPassword`/`changePassword`, igual que el endpoint nativo
+ *   `/api/auth/change-password`.
  */
+// Logger fuera de DI (este módulo se construye antes de que exista el contenedor de Nest).
+const logger = new Logger('BetterAuth');
+
 const pool = new Pool({
   host: process.env.DB_HOST,
   port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 5432,
@@ -122,6 +133,19 @@ if (isProduction && !backendBaseUrl.startsWith('https://')) {
   );
 }
 
+/**
+ * Fase 4 · P6.R: ¿el usuario está deshabilitado (soft-delete de
+ * `UsersService.disable`)? `null` si no existe. Lo usa el hook
+ * `session.create.before` (ver disabled-user-session.policy.ts).
+ */
+async function lookupUserDisabled(userId: string): Promise<boolean | null> {
+  const { rows } = await pool.query<{ deletedAt: Date | null }>(
+    USER_DISABLED_LOOKUP_SQL,
+    [userId],
+  );
+  return userDisabledFromRows(rows);
+}
+
 // Fila cruda que devuelve la query de roles/permisos de customSession (abajo).
 interface RolePermissionRow {
   role_id: string;
@@ -141,7 +165,9 @@ function getMailTransporter(): nodemailer.Transporter {
   if (!mailTransporter) {
     mailTransporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
-      port: process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : undefined,
+      port: process.env.SMTP_PORT
+        ? parseInt(process.env.SMTP_PORT, 10)
+        : undefined,
       secure: false,
       auth: {
         user: process.env.SMTP_USER,
@@ -155,10 +181,13 @@ function getMailTransporter(): nodemailer.Transporter {
 /**
  * Envía un email de los hooks de better-auth. No relanza el error: si SMTP no
  * está configurado (dev) el flujo de auth (verificación/reset) no debe
- * romperse por eso — se loguea y sigue (mismo criterio "best effort" que
- * AuthEmailService, que también atrapa y loguea sin design para dev sin SMTP).
+ * romperse por eso — se loguea y sigue ("best effort").
  */
-async function sendAuthEmail(to: string, subject: string, html: string): Promise<void> {
+async function sendAuthEmail(
+  to: string,
+  subject: string,
+  html: string,
+): Promise<void> {
   try {
     await getMailTransporter().sendMail({
       from: 'UpTask <admin@uptask.com>',
@@ -166,45 +195,66 @@ async function sendAuthEmail(to: string, subject: string, html: string): Promise
       subject,
       html,
     });
-    console.log(`[better-auth] Email "${subject}" enviado a ${to}`);
+    logger.log(`Email "${subject}" enviado`);
   } catch (error) {
-    console.error(`[better-auth] Error enviando email "${subject}" a ${to}:`, error);
-  }
-}
-
-/**
- * Bridge de sincronización `account.password` (better-auth, hash bcrypt vía
- * el override de arriba) → `user.password` (columna legacy que sigue leyendo
- * el login JWT propio). Ver docstring de la clase para el detalle de cuándo
- * se invoca. Query directa sobre el mismo `pool` — no hay TypeORM disponible
- * en este archivo.
- */
-async function syncPasswordToLegacyUserColumn(userId: string): Promise<void> {
-  try {
-    const { rows } = await pool.query<{ password: string | null }>(
-      `SELECT password FROM account WHERE "userId" = $1 AND "providerId" = 'credential' LIMIT 1`,
-      [userId],
+    logger.error(
+      `Error enviando email "${subject}"`,
+      error instanceof Error ? error.stack : String(error),
     );
-    const hash = rows[0]?.password;
-    if (!hash) {
-      return;
-    }
-    await pool.query(`UPDATE "user" SET password = $1 WHERE id = $2`, [hash, userId]);
-  } catch (error) {
-    // No relanzamos: si el bridge falla, el usuario igual pudo resetear su
-    // password vía better-auth (camino nuevo funciona); solo el login legacy
-    // quedaría desincronizado hasta el próximo reset. Se loguea para que no
-    // pase desapercibido.
-    console.error(`[better-auth] Error sincronizando user.password (bridge) para userId=${userId}:`, error);
   }
 }
 
 export const auth = betterAuth({
-  basePath: '/api/auth',
+  basePath: BETTER_AUTH_BASE_PATH,
   secret: process.env.BETTER_AUTH_SECRET,
   baseURL: backendBaseUrl,
   trustedOrigins: [frontendUrl],
   database: pool,
+  // Fase 4 · P4.B: auditoría de login (LOGIN, LOGIN_FAILED, LOGOUT). La
+  // lógica vive en auth-audit.ts; acá solo se conectan los hooks.
+  // Best-effort: nunca bloquea el login.
+  hooks: {
+    after: createAuthMiddleware(async (ctx) => {
+      const returned = ctx.context.returned;
+      await auditAuthEndpointResult({
+        path: ctx.path,
+        body: ctx.body,
+        headers: ctx.headers,
+        request: ctx.request,
+        returned,
+        failed: isAPIError(returned),
+      });
+    }),
+  },
+  databaseHooks: {
+    session: {
+      create: {
+        // Fase 4 · P6.R: un usuario deshabilitado (o inexistente) no obtiene
+        // sesión. Mismo error que una contraseña incorrecta: el login no
+        // revela que la cuenta existe y está deshabilitada; `hooks.after` lo
+        // audita como LOGIN_FAILED. Ver disabled-user-session.policy.ts.
+        before: async (session) => {
+          if (!(await isSessionCreationAllowed(session, lookupUserDisabled))) {
+            throw APIError.from(
+              'UNAUTHORIZED',
+              BASE_ERROR_CODES.INVALID_EMAIL_OR_PASSWORD,
+            );
+          }
+        },
+        after: (session, context) => auditSessionCreated(session, context),
+      },
+      delete: {
+        // Fase 4 · P6.R (D13): además de auditar el LOGOUT, avisa al gateway
+        // de tiempo real para cortar los sockets de esa sesión (logout,
+        // revocación o limpieza de una sesión vencida). Síncrono y sin
+        // lanzar: ver session-ended-events.ts.
+        after: async (session, context) => {
+          notifySessionDeleted(session, context);
+          await auditSessionDeleted(session, context);
+        },
+      },
+    },
+  },
   // Tarea #21 (docs/modulos/auth-multitenant.md §11+, hardening): sin esto
   // better-auth solo activa el rate-limit por default en producción
   // (`NODE_ENV === 'production'`) — lo forzamos ON siempre (dev incluido)
@@ -231,12 +281,22 @@ export const auth = betterAuth({
       // ya existentes en el resto del dominio (ver docstring arriba).
       generateId: 'uuid',
     },
-    // Tarea #21 (hardening): better-auth ya pone `secure: true` por default
-    // cuando detecta HTTPS, pero lo forzamos explícito en producción (y lo
-    // dejamos OFF en dev, donde el backend corre en http://localhost) — así
-    // el comportamiento no depende de la detección automática (p.ej. detrás
-    // de un proxy/load balancer que termina TLS antes del backend).
-    useSecureCookies: isProduction,
+    // Tarea #21 (hardening): `secure: true` explícito en producción, aunque
+    // un proxy termine TLS antes del backend. Fase 4 · P9: fijar la opción
+    // anula la detección automática de https de better-auth, así que también
+    // va ON cuando BETTER_AUTH_URL es https (un servidor sin
+    // NODE_ENV=production detrás de https emitía la cookie sin `Secure`). En
+    // dev (http://localhost) queda OFF. Ver secure-cookies.policy.ts.
+    useSecureCookies: shouldUseSecureCookies(isProduction, backendBaseUrl),
+    // Hallazgo M1: better-auth no conoce `trust proxy` de Express y, con su
+    // default (`x-forwarded-for`), solo acepta un valor único — detrás de un
+    // proxy el rate-limit quedaba sin IP y el cliente podía elegir la suya. La
+    // única fuente es `x-client-ip`, que escribe `clientIpHeaderMiddleware`
+    // (montado antes del handler de /api/auth en app.module.ts) con `req.ip`,
+    // tras borrar los headers de IP que manda el cliente.
+    ipAddress: {
+      ipAddressHeaders: [CLIENT_IP_HEADER],
+    },
   },
   user: {
     // modelName por defecto ("user") ya apunta a la tabla que crea TypeORM.
@@ -252,6 +312,10 @@ export const auth = betterAuth({
     // Tarea #18 (doc §7b/§11): NADIE se auto-registra. Las cuentas nacen por
     // UsersService.createAccountByAdmin (admin-only) — ver docstring arriba.
     disableSignUp: true,
+    // Fase 4 · P2: `revokeSessionsOnPasswordReset: true` — restablecer la
+    // contraseña con el token del email cierra todas las sesiones del usuario
+    // (ver password-reset.policy.ts).
+    ...PASSWORD_RESET_SESSION_POLICY,
     // better-auth usa scrypt por defecto. Override a bcrypt reutilizando el
     // mismo hashing que el auth propio (src/auth/utils/auth.util.ts) para
     // mantener compatibilidad futura cuando se reconcilien los modelos de User.
@@ -277,13 +341,6 @@ export const auth = betterAuth({
         : '🔐 Restablece tu contraseña - Taller de Título';
       await sendAuthEmail(user.email, subject, html);
     },
-    // Bridge user.password (ver docstring de la clase) — se ejecuta luego de
-    // que better-auth ya escribió el hash en `account` (create o update,
-    // ambos casos), así que una relectura simple alcanza sin importar cuál de
-    // los dos caminos internos tomó `resetPassword`.
-    onPasswordReset: async ({ user }) => {
-      await syncPasswordToLegacyUserColumn(user.id);
-    },
   },
   // Tarea #18: reemplaza los códigos de 6 dígitos propios de
   // confirm-account/request-code (AuthController) por la verificación nativa
@@ -292,7 +349,11 @@ export const auth = betterAuth({
   emailVerification: {
     sendVerificationEmail: async ({ user, url }) => {
       const html = buildAccountVerificationEmailHtml(user.name, url);
-      await sendAuthEmail(user.email, '✨ Confirma tu cuenta - Taller de Título', html);
+      await sendAuthEmail(
+        user.email,
+        '✨ Confirma tu cuenta - Taller de Título',
+        html,
+      );
     },
     // Reemplaza el "email de bienvenida" que antes disparaba
     // AuthService.confirmAccount tras marcar el Token como usado. A
@@ -300,30 +361,25 @@ export const auth = betterAuth({
     // trae el usuario, solo `{status: true, user: null}`), este hook SÍ
     // recibe la fila actualizada.
     afterEmailVerification: async (user) => {
-      const html = buildWelcomeAfterVerificationEmailHtml(user.name, frontendUrl);
-      await sendAuthEmail(user.email, '🎉 ¡Cuenta confirmada! - Taller de Título', html);
-    },
-  },
-  // Segundo bridge de user.password (ver docstring de la clase): cubre
-  // cualquier creación de cuenta `credential` que NO pase por
-  // `resetPassword` (p.ej. futuras invitaciones de organization, #19).
-  // `created` trae la fila completa (a diferencia de `update`, que en
-  // better-auth 1.6.x solo expone el COUNT de filas afectadas — por eso el
-  // bridge principal de arriba usa `onPasswordReset` + relectura en vez de
-  // `databaseHooks.account.update.after`).
-  databaseHooks: {
-    account: {
-      create: {
-        after: async (created: { providerId: string; userId: string; password?: string | null }) => {
-          if (created.providerId !== 'credential' || !created.password) {
-            return;
-          }
-          await syncPasswordToLegacyUserColumn(created.userId);
-        },
-      },
+      const html = buildWelcomeAfterVerificationEmailHtml(
+        user.name,
+        frontendUrl,
+      );
+      await sendAuthEmail(
+        user.email,
+        '🎉 ¡Cuenta confirmada! - Taller de Título',
+        html,
+      );
     },
   },
   plugins: [
+    // Fase 4 · P4.B (ALTO-1, cyber N2): LISTA BLANCA de la superficie HTTP.
+    // Solo `POST /sign-in/email`, `POST /sign-out`, `GET
+    // /reset-password/:token` y `GET /verify-email` responden por HTTP; el
+    // resto (core, organization, apiKey y cualquier endpoint nuevo) da 404.
+    // Va PRIMERO: los `onRequest` corren en orden. Las llamadas `auth.api.*`
+    // del servidor no pasan por acá. Ver better-auth-http-allowlist.ts.
+    httpAllowlistPlugin(BETTER_AUTH_BASE_PATH),
     // tenant = condominio (decisión cerrada, doc sección 10.4). Tarea #19
     // (doc §7/§7b): la CREACIÓN de organizaciones queda cerrada a nivel de
     // plugin (`allowUserToCreateOrganization: false`) — nadie crea un
@@ -375,7 +431,12 @@ export const auth = betterAuth({
     // `enableMetadata: true` (default es false) porque
     // AuthService.createServiceApiKey guarda `description`/`createdBy` ahí
     // para trazabilidad — sin esto el plugin rechaza la creación con
-    // "Metadata is disabled" (400, METADATA_DISABLED).
+    // "Metadata is disabled" (400, METADATA_DISABLED). La metadata NO
+    // autoriza nada: el condominio va en `permissions` (server-only).
+    // El límite por key (`rateLimit`) conserva el default del plugin; las
+    // keys del LPR se emiten con `rateLimitEnabled: false` (ver AuthService).
+    // Los endpoints de cliente `/api-key/*` no responden por HTTP (lista
+    // blanca, primer plugin): las keys las emite y revoca el backend.
     apiKey({ enableMetadata: true }),
     // Tarea #16, punto 5: inyecta roles + permisos (RBAC fino app-side, tabla
     // Permission/Role via user_roles_role y role_permissions_permission) en la
@@ -394,17 +455,26 @@ export const auth = betterAuth({
         [user.id],
       );
 
-      const rolesById = new Map<string, { id: string; name: string; permissions: string[] }>();
+      const rolesById = new Map<
+        string,
+        { id: string; name: string; permissions: string[] }
+      >();
       for (const row of rows) {
         if (!rolesById.has(row.role_id)) {
-          rolesById.set(row.role_id, { id: row.role_id, name: row.role_name, permissions: [] });
+          rolesById.set(row.role_id, {
+            id: row.role_id,
+            name: row.role_name,
+            permissions: [],
+          });
         }
         if (row.permission_name) {
           rolesById.get(row.role_id)!.permissions.push(row.permission_name);
         }
       }
       const roles = Array.from(rolesById.values());
-      const permissions = Array.from(new Set(roles.flatMap((r) => r.permissions)));
+      const permissions = Array.from(
+        new Set(roles.flatMap((r) => r.permissions)),
+      );
 
       return {
         user: { ...user, roles, permissions },

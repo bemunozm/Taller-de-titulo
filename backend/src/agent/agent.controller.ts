@@ -7,9 +7,9 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
-import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import type { ModelMessage } from 'ai';
+import { RateLimit } from '../common/rate-limit/rate-limit.decorator';
 import { ConciergeAuthGuard } from '../digital-concierge/guards/concierge-auth.guard';
 import { AgentRunnerService } from './agent-runner.service';
 import {
@@ -51,16 +51,13 @@ export class AgentController {
    * Streaming de texto plano (una línea de conversación por request; el
    * cliente reenvía el historial completo en `messages`).
    *
-   * Revisión de calidad (FIX 3): throttler dedicado 'concierge-agent-chat'
-   * (registrado en auth.module.ts junto a 'login' — `ThrottlerModule` es
-   * `@Global()`, no hace falta reimportarlo acá) — cada mensaje reenvía al
-   * proveedor del modelo (costo por token) y antes no tenía ningún límite de
-   * tasa. El tamaño del payload se acota en el DTO
+   * Rate limit (Fase 4 · P4.B, D9): política `agent-chat` (20/min por
+   * usuario o hub) — cada mensaje reenvía al proveedor del modelo (costo por
+   * token). El tamaño del payload se acota en el DTO
    * (`@ArrayMaxSize`/`@MaxLength`, ver dto/agent-chat.dto.ts).
    */
   @Post('chat')
-  @UseGuards(ThrottlerGuard)
-  @Throttle({ 'concierge-agent-chat': { limit: 20, ttl: 60_000 } })
+  @RateLimit('agent-chat')
   async chat(
     @Body() dto: AgentChatRequestDto,
     @Req() req: ConciergeRequest,

@@ -1,6 +1,8 @@
 import { forwardRef, Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { DigitalConciergeController } from './digital-concierge.controller';
+import { ConciergeResponseController } from './concierge-response.controller';
+import { ConciergeDeviceController } from './concierge-device.controller';
 import { DigitalConciergeService } from './services/digital-concierge.service';
 import { RealtimeVoiceTokenService } from './services/realtime-voice-token.service';
 import { ConciergeSession } from './entities/concierge-session.entity';
@@ -40,7 +42,13 @@ import { ConciergeAuthGuard } from './guards/concierge-auth.guard';
     AuthModule,   // Fase 1, Bloque A1 — provee AuthGuard para ConciergeAuthGuard
     forwardRef(() => AgentModule),
   ],
-  controllers: [DigitalConciergeController],
+  // Fase 4 · P4: `/respond` (solo humano, AuthGuard) y `/device` (solo
+  // HubAuthGuard) viven en controladores propios bajo el mismo prefijo.
+  controllers: [
+    DigitalConciergeController,
+    ConciergeResponseController,
+    ConciergeDeviceController,
+  ],
   providers: [
     DigitalConciergeService,
     RealtimeVoiceTokenService,

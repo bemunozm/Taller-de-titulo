@@ -9,8 +9,10 @@ import {
   type SortingState,
   type ColumnFiltersState,
 } from '@tanstack/react-table'
+import type { ComponentProps } from 'react'
 import type { AuditLog } from '@/types/audit'
-import { AuditModule, AuditAction } from '@/types/audit'
+import { AuditModule, AuditAction, getAuditActionLabel, getAuditModuleLabel } from '@/types/audit'
+import { visibleUserEmail } from '@/helpers/userDisplay'
 import { Table, TableHead, TableBody, TableRow, TableHeader, TableCell } from '@/components/ui/Table'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -29,6 +31,8 @@ interface AuditLogsTableProps {
 
 const columnHelper = createColumnHelper<AuditLog>()
 
+type BadgeColor = NonNullable<ComponentProps<typeof Badge>['color']>
+
 export function AuditLogsTable({ logs }: AuditLogsTableProps) {
   const [sorting, setSorting] = useState<SortingState>([])
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
@@ -36,30 +40,35 @@ export function AuditLogsTable({ logs }: AuditLogsTableProps) {
   const [showFilters, setShowFilters] = useState(false)
 
   const getActionBadge = (action: AuditAction) => {
-    const colors: Record<string, 'red' | 'orange' | 'amber' | 'yellow' | 'lime' | 'green' | 'emerald' | 'teal' | 'cyan' | 'sky' | 'blue' | 'indigo' | 'violet' | 'purple' | 'fuchsia' | 'pink' | 'rose' | 'zinc'> = {
+    const colors: Partial<Record<AuditAction, BadgeColor>> = {
       CREATE: 'green',
       UPDATE: 'blue',
       DELETE: 'red',
       LOGIN: 'purple',
       LOGIN_FAILED: 'red',
-      APPROVE: 'green',
-      REJECT: 'red',
-      ENABLE: 'lime',
-      DISABLE: 'orange',
+      PASSWORD_CHANGE: 'amber',
       PASSWORD_RESET: 'amber',
-      CHECK_IN: 'cyan',
-      CHECK_OUT: 'sky',
-      VALIDATE: 'teal',
-      CANCEL: 'rose',
+      VISIT_APPROVE: 'green',
+      VISIT_REJECT: 'red',
+      VISIT_CHECK_IN: 'cyan',
+      VISIT_CHECK_OUT: 'sky',
+      VISIT_QR_VALIDATE: 'teal',
       CAMERA_REGISTER: 'indigo',
+      CAMERA_LPR_ENABLE: 'lime',
+      CAMERA_LPR_DISABLE: 'orange',
       PERMISSION_GRANT: 'emerald',
       PERMISSION_REVOKE: 'pink',
+      ROLE_ASSIGN: 'emerald',
+      ROLE_UNASSIGN: 'pink',
+      DATA_EXPORT: 'violet',
+      DATA_ERASURE: 'rose',
+      RETENTION_SWEEP: 'fuchsia',
     };
-    return <Badge color={colors[action] || 'zinc'}>{action.replace(/_/g, ' ')}</Badge>;
+    return <Badge color={colors[action] ?? 'zinc'}>{getAuditActionLabel(action)}</Badge>;
   };
 
   const getModuleBadge = (module: AuditModule) => {
-    const colors: Record<string, 'sky' | 'purple' | 'indigo' | 'blue' | 'teal' | 'emerald' | 'cyan'> = {
+    const colors: Partial<Record<AuditModule, BadgeColor>> = {
       AUTH: 'purple',
       USERS: 'sky',
       CAMERAS: 'indigo',
@@ -70,8 +79,9 @@ export function AuditLogsTable({ logs }: AuditLogsTableProps) {
       PERMISSIONS: 'purple',
       STREAMS: 'indigo',
       DETECTIONS: 'sky',
+      PRIVACY: 'violet',
     };
-    return <Badge color={colors[module] || 'sky'}>{module}</Badge>;
+    return <Badge color={colors[module] ?? 'sky'}>{getAuditModuleLabel(module)}</Badge>;
   };
 
   const formatDate = (dateString: string) => {
@@ -119,14 +129,16 @@ export function AuditLogsTable({ logs }: AuditLogsTableProps) {
         header: 'Usuario',
         cell: (info) => {
           const log = info.row.original;
+          // Sin el email marcador de una cuenta anonimizada.
+          const email = visibleUserEmail(log.user?.email);
           return (
             <div className="flex flex-col">
               <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
                 {log.user?.name || 'Sistema'}
               </span>
-              {log.user?.email && (
+              {email && (
                 <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                  {log.user.email}
+                  {email}
                 </span>
               )}
             </div>
@@ -208,10 +220,10 @@ export function AuditLogsTable({ logs }: AuditLogsTableProps) {
 
     const rows = filteredRows.map(log => ({
       fecha: new Date(log.createdAt).toISOString().replace('T', ' ').slice(0, 19),
-      modulo: log.module,
-      accion: log.action.replace(/_/g, ' '),
+      modulo: getAuditModuleLabel(log.module),
+      accion: getAuditActionLabel(log.action),
       usuario: log.user?.name || 'Sistema',
-      email: log.user?.email || '-',
+      email: visibleUserEmail(log.user?.email) ?? '-',
       entidad: log.entityType || '-',
       id_entidad: log.entityId || '-',
       descripcion: log.description,
@@ -306,7 +318,7 @@ export function AuditLogsTable({ logs }: AuditLogsTableProps) {
                 >
                   <option value="">Todos los módulos</option>
                   {Object.values(AuditModule).map(module => (
-                    <option key={module} value={module}>{module}</option>
+                    <option key={module} value={module}>{getAuditModuleLabel(module)}</option>
                   ))}
                 </Select>
               </div>
@@ -328,7 +340,7 @@ export function AuditLogsTable({ logs }: AuditLogsTableProps) {
                 >
                   <option value="">Todas las acciones</option>
                   {Object.values(AuditAction).map(action => (
-                    <option key={action} value={action}>{action.replace(/_/g, ' ')}</option>
+                    <option key={action} value={action}>{getAuditActionLabel(action)}</option>
                   ))}
                 </Select>
               </div>

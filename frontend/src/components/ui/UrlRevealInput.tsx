@@ -12,6 +12,7 @@ interface UrlRevealInputProps {
   required?: boolean
   id?: string
   className?: string
+  /** Sin `onReveal` no se muestra el botón (p.ej. sin permiso para revelar la URL). */
   onReveal?: () => void
   loading?: boolean
   revealed?: boolean
@@ -45,24 +46,25 @@ export default function UrlRevealInput({
         invalid={error}
         disabled={disabled}
         required={required}
-        className={`pr-9 sm:pr-10 text-sm sm:text-base ${className}`}
+        className={`${onReveal ? 'pr-9 sm:pr-10' : ''} text-sm sm:text-base ${className}`}
       />
-      <button
-        type="button"
-        onClick={onReveal}
-        className="absolute inset-y-0 right-0 flex items-center pr-2.5 sm:pr-3 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 focus:outline-none transition-colors"
-        tabIndex={-1}
-        aria-label={loading ? 'Cargando URL' : (revealed ? 'Ocultar URL' : 'Mostrar URL')}
-        disabled={loading}
-      >
-        {/** show Eye when hidden, EyeSlash when revealed */}
-        {/** caller should pass revealed state by setting value to real URL and managing state; we also accept revealed prop */}
-        {revealed ? (
-          <EyeSlashIcon className="h-4 w-4 sm:h-5 sm:w-5" aria-hidden="true" />
-        ) : (
-          <EyeIcon className="h-4 w-4 sm:h-5 sm:w-5" aria-hidden="true" />
-        )}
-      </button>
+      {onReveal ? (
+        <button
+          type="button"
+          onClick={onReveal}
+          className="absolute inset-y-0 right-0 flex items-center pr-2.5 sm:pr-3 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 focus:outline-none transition-colors"
+          tabIndex={-1}
+          aria-label={loading ? 'Cargando URL' : (revealed ? 'Ocultar URL' : 'Mostrar URL')}
+          disabled={loading}
+        >
+          {/* Ojo para revelar; ojo tachado cuando la URL ya está visible */}
+          {revealed ? (
+            <EyeSlashIcon className="h-4 w-4 sm:h-5 sm:w-5" aria-hidden="true" />
+          ) : (
+            <EyeIcon className="h-4 w-4 sm:h-5 sm:w-5" aria-hidden="true" />
+          )}
+        </button>
+      ) : null}
     </div>
   )
 }

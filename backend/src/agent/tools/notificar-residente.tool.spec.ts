@@ -6,6 +6,9 @@ import {
 } from '../../digital-concierge/services/digital-concierge.service';
 import type { ConciergeSession } from '../../digital-concierge/entities/concierge-session.entity';
 import type { AuthorizedContext } from '../types/authorized-context.type';
+import { BuscarResidenteTool } from './buscar-residente.tool';
+import type { FamiliesService } from '../../families/families.service';
+import type { Family } from '../../families/entities/family.entity';
 
 /**
  * Fase 1, Bloque A2t — cobertura de `NotificarResidenteTool`
@@ -34,6 +37,7 @@ describe('NotificarResidenteTool', () => {
       isSuperAdmin: false,
       userId: undefined,
       role: 'hub',
+      channel: 'physical-hub',
       scopes: ['digital-concierge.access'],
       requestId: 'req-1',
       sessionId: 'session-1',
@@ -109,6 +113,139 @@ describe('NotificarResidenteTool', () => {
       ctx,
     );
     expect(result).toEqual({ notificado: true, mensaje: 'ok' });
+  });
+
+  it('Fase 4 · P4.B (minimización): no devuelve el id interno de la visita al dispositivo', async () => {
+    conciergeService.findSessionForTenant.mockResolvedValue(
+      makeSession('condo-A'),
+    );
+    conciergeService.notifyResident.mockResolvedValue({
+      notificado: true,
+      residentes_notificados: ['Ana'],
+      cantidad_notificados: 1,
+      visita_creada: true,
+      visita_id: 'visit-uuid-interno',
+      mensaje: 'Notificación enviada',
+    });
+
+    const output = tool.outputSchema.parse(
+      await tool.execute(makeCtx(), { residentes_ids: ['user-1'] }),
+    );
+
+    // Fase 4 · P7.L: el dispositivo tampoco recibe los nombres.
+    expect(output).toStrictEqual({
+      notificado: true,
+      cantidad_notificados: 1,
+      visita_creada: true,
+      mensaje: 'Notificación enviada',
+    });
+    expect(JSON.stringify(output)).not.toContain('visit-uuid-interno');
+  });
+
+  /**
+   * Fase 4 · P7.L (docs/modulos/privacidad-ley-21719.md §5.1): los nombres de
+   * los residentes notificados solo van al canal humano.
+   */
+  describe('nombres de los residentes notificados por canal (P7.L)', () => {
+    beforeEach(() => {
+      conciergeService.findSessionForTenant.mockResolvedValue(
+        makeSession('condo-A'),
+      );
+      conciergeService.notifyResident.mockResolvedValue({
+        notificado: true,
+        residentes_notificados: ['Ana Pérez', 'Beto Pérez'],
+        cantidad_notificados: 2,
+        visita_creada: true,
+        visita_id: 'visit-1',
+        mensaje: 'Notificación enviada a 2 residente(s)',
+      });
+    });
+
+    it.each(['physical-hub', 'web-kiosk', 'unknown'] as const)(
+      '%s: solo el conteo, sin nombres',
+      async (channel) => {
+        const output = tool.outputSchema.parse(
+          await tool.execute(makeCtx({ channel }), {
+            residentes_ids: ['user-1', 'user-2'],
+          }),
+        );
+
+        expect(output).toStrictEqual({
+          notificado: true,
+          cantidad_notificados: 2,
+          visita_creada: true,
+          mensaje: 'Notificación enviada a 2 residente(s)',
+        });
+        expect(JSON.stringify(output)).not.toContain('Pérez');
+      },
+    );
+
+    it('humano: conserva los nombres', async () => {
+      const output = tool.outputSchema.parse(
+        await tool.execute(makeCtx({ channel: 'human', role: 'Conserje' }), {
+          residentes_ids: ['user-1', 'user-2'],
+        }),
+      );
+
+      expect(output.residentes_notificados).toEqual([
+        'Ana Pérez',
+        'Beto Pérez',
+      ]);
+      expect(output.cantidad_notificados).toBe(2);
+    });
+  });
+
+  /**
+   * Fase 4 · P7.L: el flujo del dispositivo sigue funcionando sin nombres:
+   * `buscar_residente` entrega los ids y `notificar_residente` los usa tal
+   * cual.
+   */
+  it('flujo de dispositivo: los ids de buscar_residente alcanzan para notificar a todos', async () => {
+    const familiesService = {
+      resolveHouse: jest.fn().mockResolvedValue({
+        status: 'found',
+        family: {
+          name: 'Familia Pérez',
+          unit: { identifier: '15' },
+          members: [
+            { id: 'user-1', name: 'Ana Pérez' },
+            { id: 'user-2', name: 'Beto Pérez' },
+          ],
+        } as unknown as Family,
+      }),
+    };
+    const buscar = new BuscarResidenteTool(
+      familiesService as unknown as FamiliesService,
+    );
+    const session = makeSession('condo-A');
+    conciergeService.findSessionForTenant.mockResolvedValue(session);
+    conciergeService.notifyResident.mockResolvedValue({
+      notificado: true,
+      residentes_notificados: ['Ana Pérez', 'Beto Pérez'],
+      cantidad_notificados: 2,
+      visita_creada: true,
+      visita_id: 'visit-1',
+      mensaje: 'Notificación enviada a 2 residente(s)',
+    });
+    const ctx = makeCtx({ channel: 'physical-hub' });
+
+    const found = buscar.outputSchema.parse(
+      await buscar.execute(ctx, { casa: '15' }),
+    );
+    const ids = (found.residentes ?? []).map((residente) => residente.id);
+    const notified = tool.outputSchema.parse(
+      await tool.execute(ctx, tool.inputSchema.parse({ residentes_ids: ids })),
+    );
+
+    expect(ids).toEqual(['user-1', 'user-2']);
+    expect(conciergeService.notifyResident).toHaveBeenCalledWith(
+      session,
+      { residentes_ids: ['user-1', 'user-2'] },
+      ctx,
+    );
+    expect(notified.notificado).toBe(true);
+    expect(notified.cantidad_notificados).toBe(2);
+    expect(JSON.stringify([found, notified])).not.toContain('Pérez');
   });
 
   describe('regresión cross-tenant (fix M1, §6 del diseño)', () => {

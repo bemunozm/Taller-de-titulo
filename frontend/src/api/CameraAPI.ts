@@ -1,6 +1,6 @@
 import api from '@/lib/axios'
 import { isAxiosError } from 'axios'
-import type { Camera, CreateCameraFormData, UpdateCameraFormData } from '@/types/index'
+import type { Camera, CreateCameraPayload, UpdateCameraFormData } from '@/types/index'
 
 export async function enableCameraGuardian(id: string, enableGuardian: boolean): Promise<{ id: string; name: string; enableGuardian: boolean }> {
   try {
@@ -26,9 +26,9 @@ export async function listCameras(): Promise<Camera[]> {
   }
 }
 
-export async function createCamera(formData: CreateCameraFormData) {
+export async function createCamera(formData: CreateCameraPayload): Promise<Camera> {
   try {
-    const { data } = await api.post('/cameras', formData)
+    const { data } = await api.post<Camera>('/cameras', formData)
     return data
   } catch (error) {
     if (isAxiosError(error) && error.response) {
@@ -38,9 +38,9 @@ export async function createCamera(formData: CreateCameraFormData) {
   }
 }
 
-export async function updateCamera(id: string, formData: UpdateCameraFormData) {
+export async function updateCamera(id: string, formData: UpdateCameraFormData): Promise<Camera> {
   try {
-    const { data } = await api.patch(`/cameras/${id}`, formData)
+    const { data } = await api.patch<Camera>(`/cameras/${id}`, formData)
     return data
   } catch (error) {
     if (isAxiosError(error) && error.response) {
@@ -50,7 +50,7 @@ export async function updateCamera(id: string, formData: UpdateCameraFormData) {
   }
 }
 
-export async function deleteCamera(id: string) {
+export async function deleteCamera(id: string): Promise<unknown> {
   try {
     const { data } = await api.delete(`/cameras/${id}`)
     return data
@@ -62,7 +62,7 @@ export async function deleteCamera(id: string) {
   }
 }
 
-export async function registerCamera(id: string) {
+export async function registerCamera(id: string): Promise<unknown> {
   try {
     const { data } = await api.post(`/cameras/${id}/register`)
     return data
@@ -98,19 +98,7 @@ export async function getCameraHasSource(id: string): Promise<{ hasSource: boole
   }
 }
 
-export async function getCameraRecentEventsCount(id: string): Promise<{ recentEvents: number }> {
-  try {
-    const { data } = await api.get(`/cameras/${id}/recent-events-count`)
-    return data
-  } catch (error) {
-    if (isAxiosError(error) && error.response) {
-      throw new Error(error.response.data.message)
-    }
-    throw error
-  }
-}
-
-export async function getIAHealth(): Promise<{ ok: boolean; status: string; details?: any; message?: string }> {
+export async function getIAHealth(): Promise<{ ok: boolean; status: string; details?: unknown; message?: string }> {
   try {
     const { data } = await api.get('/workers/ia-health')
     return data
@@ -122,7 +110,7 @@ export async function getIAHealth(): Promise<{ ok: boolean; status: string; deta
   }
 }
 
-export async function getMediamtxHealth(): Promise<{ ok: boolean; status: string; details?: any; message?: string }> {
+export async function getMediamtxHealth(): Promise<{ ok: boolean; status: string; details?: unknown; message?: string }> {
   try {
     const { data } = await api.get('/mediamtx/health')
     return data

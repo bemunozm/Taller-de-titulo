@@ -46,6 +46,12 @@ export default function ResidentDashboardView() {
     return (visit.status === 'pending' && validFrom > now) || visit.status === 'ready';
   }).sort((a, b) => new Date(a.validFrom).getTime() - new Date(b.validFrom).getTime());
 
+  // Solicitudes del conserje digital que el residente aún no aprueba: se listan
+  // aparte para no confundirlas con visitas programadas (aprobadas).
+  const awaitingApprovalVisits = myVisits
+    .filter(visit => visit.status === 'awaiting_approval')
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
   // Visitas recientes completadas (últimos 7 días)
   const recentCompletedVisits = myVisits.filter(visit => {
     const exitTime = visit.exitTime ? new Date(visit.exitTime) : null;
@@ -143,6 +149,11 @@ export default function ResidentDashboardView() {
               </p>
               <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
                 {upcomingVisits.length} próximas
+                {awaitingApprovalVisits.length > 0 && (
+                  <span className="text-orange-600 dark:text-orange-400">
+                    {' · '}{awaitingApprovalVisits.length} esperando aprobación
+                  </span>
+                )}
               </p>
             </div>
             <div className="p-3 bg-blue-100 dark:bg-blue-500/10 rounded-lg">
@@ -227,6 +238,7 @@ export default function ResidentDashboardView() {
             <MyVisitsCard
               activeVisits={activeVisits}
               upcomingVisits={upcomingVisits}
+              awaitingApprovalVisits={awaitingApprovalVisits}
               recentCompletedVisits={recentCompletedVisits}
               loading={visitsLoading}
             />

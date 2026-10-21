@@ -1,3 +1,5 @@
+# LEGACY / SOLO DESARROLLO: servidor de medios de prueba (no usar en el piloto).
+# Ver rtsp-simple-server/README.md.
 
 ###############################################
 # General parameters
@@ -20,22 +22,23 @@ writeQueueSize: 512
 # This can be decreased to avoid fragmentation on networks with a low UDP MTU.
 udpMaxPayloadSize: 1472
 
-# HTTP URL to perform external authentication.
-# Every time a user wants to authenticate, the server calls this URL
-# with the POST method and a body containing:
-# {
-#   "ip": "ip",
-#   "user": "user",
-#   "password": "password",
-#   "path": "path",
-#   "protocol": "rtsp|rtmp|hls|webrtc",
-#   "id": "id",
-#   "action": "read|publish",
-#   "query": "query"
-# }
-# If the response code is 20x, authentication is accepted, otherwise
-# it is discarded.
-externalAuthenticationURL:
+# LEGACY / SOLO DESARROLLO (ver README.md de esta carpeta). Endurecido en la
+# Fase 4 · P6.M: sin el usuario anónimo "any" con permisos y todo en loopback.
+#
+# Un único usuario, solo desde loopback, para publicar y leer el stream de
+# prueba. La contraseña NO está en este archivo: el hash de abajo es de un
+# valor aleatorio descartado (nadie puede entrar si se ejecuta el binario a
+# mano). start-server.ps1 genera una contraseña aleatoria por ejecución y la
+# pasa por el entorno (MTX_AUTHINTERNALUSERS_0_USER/_PASS/_IPS/_PERMISSIONS_*:
+# MediaMTX reemplaza el elemento completo).
+authMethod: internal
+authInternalUsers:
+- user: devlocal
+  pass: sha256:UO8YQR9dEuYd7Rfms6PW4HVrgSY3+HyC5Nmw7gIZsrI=
+  ips: ['127.0.0.1', '::1']
+  permissions:
+  - action: publish
+  - action: read
 
 # Enable the HTTP API.
 api: no
@@ -72,19 +75,20 @@ rtsp: yes
 # TCP is the most versatile, and does support encryption.
 # The handshake is always performed with TCP.
 # List of enabled RTSP transport protocols.
-rtspTransports: [udp, multicast, tcp]
+# Solo TCP: sin listeners UDP/multicast (Fase 4 · P6.M).
+rtspTransports: [tcp]
 # Encrypt handshakes and TCP streams with TLS (RTSPS).
 # Available values are "no", "strict", "optional".
 rtspEncryption: "no"
 # Address of the TCP/RTSP listener. This is needed only when encryption is "no" or "optional".
 # Puerto RTSP alternativo para pruebas locales (para no chocar con la instancia principal).
-rtspAddress: :8556
+rtspAddress: 127.0.0.1:8556
 # Address of the TCP/TLS/RTSPS listener. This is needed only when encryption is "strict" or "optional".
-rtspsAddress: :8322
+rtspsAddress: 127.0.0.1:8322
 # Address of the UDP/RTP listener. This is needed only when "udp" is in protocols.
-rtpAddress: :8100
+rtpAddress: 127.0.0.1:8100
 # Address of the UDP/RTCP listener. This is needed only when "udp" is in protocols.
-rtcpAddress: :8101
+rtcpAddress: 127.0.0.1:8101
 # IP range of all UDP-multicast listeners. This is needed only when "multicast" is in protocols.
 multicastIPRange: 224.1.0.0/16
 # Port of all UDP-multicast/RTP listeners. This is needed only when "multicast" is in protocols.
@@ -103,9 +107,9 @@ rtspServerCert: server.crt
 # "digest" doesn't provide any additional security and is available for compatibility reasons only.
 
 # Address of the UDP/SRTP listener (alternativo para evitar choque con instancia principal)
-srtpAddress: :8104
+srtpAddress: 127.0.0.1:8104
 # Address of the UDP/SRTCP listener (alternativo)
-srtcpAddress: :8105
+srtcpAddress: 127.0.0.1:8105
 rtspAuthMethods: [basic]
 
 ###############################################
@@ -118,7 +122,7 @@ rtmp: no
 # Available values are "no", "strict", "optional".
 rtmpEncryption: "no"
 # Address of the RTMPS listener. This is needed only when encryption is "strict" or "optional".
-rtmpsAddress: :1936
+rtmpsAddress: 127.0.0.1:1936
 # Path to the server key. This is needed only when encryption is "strict" or "optional".
 # This can be generated with:
 # openssl genrsa -out server.key 2048
@@ -133,7 +137,7 @@ rtmpServerCert: server.crt
 # Enable HLS (uses an alternate port to avoid conflicts). Set to 'no' to disable.
 hls: yes
 # Address of the HLS listener.
-hlsAddress: :18888
+hlsAddress: 127.0.0.1:18888
 # Enable TLS/HTTPS on the HLS server.
 # This is required for Low-Latency HLS.
 hlsEncryption: no
@@ -173,7 +177,7 @@ hlsPartDuration: 200ms
 hlsSegmentMaxSize: 50M
 # Value of the Access-Control-Allow-Origin header provided in every HTTP response.
 # This allows to play the HLS stream from an external website.
-hlsAllowOrigin: '*'
+hlsAllowOrigin: 'http://127.0.0.1'
 # List of IPs or CIDRs of proxies placed before the HLS server.
 # If the server receives a request from one of these entries, IP in logs
 # will be taken from the X-Forwarded-For header.
@@ -189,7 +193,7 @@ hlsDirectory: ''
 # Enable downloading recordings from the playback server.
 playback: no
 # Address of the playback server listener (alternativo para pruebas locales).
-playbackAddress: :19996
+playbackAddress: 127.0.0.1:19996
 
 ###############################################
 # WebRTC parameters
@@ -197,7 +201,7 @@ playbackAddress: :19996
 # Enable WebRTC support (alternate HTTP port).
 webrtc: yes
 # Address of the WebRTC listener.
-webrtcAddress: :18889
+webrtcAddress: 127.0.0.1:18889
 # Enable TLS/HTTPS on the WebRTC server.
 webrtcEncryption: no
 # Path to the server key.
@@ -209,7 +213,7 @@ webrtcServerKey: server.key
 webrtcServerCert: server.crt
 # Value of the Access-Control-Allow-Origin header provided in every HTTP response.
 # This allows to play the WebRTC stream from an external website.
-webrtcAllowOrigin: '*'
+webrtcAllowOrigin: 'http://127.0.0.1'
 # List of IPs or CIDRs of proxies placed before the WebRTC server.
 # If the server receives a request from one of these entries, IP in logs
 # will be taken from the X-Forwarded-For header.
@@ -223,11 +227,11 @@ webrtcTrustedProxies: []
 # if user is "AUTH_SECRET", then authentication is secret based.
 # the secret must be inserted into the password field.
 # ICE servers (use webrtcICEServers2 as per current docs)
-webrtcICEServers2:
-  - url: stun:stun.l.google.com:19302
+# Sin STUN externo: solo pruebas en este equipo.
+webrtcICEServers2: []
 # Address of a local UDP listener that will receive connections.
 # Use a blank string to disable. (Puerto alternativo para pruebas locales)
-webrtcLocalUDPAddress: :8199
+webrtcLocalUDPAddress: 127.0.0.1:8199
 # List of additional hosts or IPs to send to clients (replaces webrtcICEHostNAT1To1IPs).
 webrtcAdditionalHosts: []
 # Address of a ICE UDP listener in format host:port.
@@ -468,4 +472,4 @@ paths:
 # Enable publishing and reading streams with the SRT protocol.
 srt: yes
 # Address of the SRT listener (alternativo para pruebas locales).
-srtAddress: :8899
+srtAddress: 127.0.0.1:8899

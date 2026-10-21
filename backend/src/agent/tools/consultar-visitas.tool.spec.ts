@@ -30,6 +30,7 @@ describe('ConsultarVisitasTool', () => {
       isSuperAdmin: false,
       userId: undefined,
       role: 'hub',
+      channel: 'physical-hub',
       scopes: ['digital-concierge.access'],
       requestId: 'req-1',
       ...overrides,
@@ -87,6 +88,38 @@ describe('ConsultarVisitasTool', () => {
     expect(result.encontrado).toBe(true);
     expect(result.cantidad).toBe(2);
     expect(result.visitas?.map((v) => v.id)).toEqual(['visit-1', 'visit-3']);
+  });
+
+  it('Fase 4 · P3: por defecto NO lista solicitudes AWAITING_APPROVAL (no son visitas autorizadas)', async () => {
+    familiesService.findByDepartment.mockResolvedValue(makeFamily('condo-A'));
+    visitsService.findAll.mockResolvedValue([
+      makeVisit({
+        id: 'visit-awaiting',
+        status: VisitStatus.AWAITING_APPROVAL,
+      }),
+      makeVisit({ id: 'visit-pending', status: VisitStatus.PENDING }),
+    ]);
+
+    const result = await tool.execute(makeCtx(), { casa: '15' });
+
+    expect(result.visitas?.map((v) => v.id)).toEqual(['visit-pending']);
+  });
+
+  it('con soloActivas:false sí incluye la solicitud, con su estado real', async () => {
+    familiesService.findByDepartment.mockResolvedValue(makeFamily('condo-A'));
+    visitsService.findAll.mockResolvedValue([
+      makeVisit({
+        id: 'visit-awaiting',
+        status: VisitStatus.AWAITING_APPROVAL,
+      }),
+    ]);
+
+    const result = await tool.execute(makeCtx(), {
+      casa: '15',
+      soloActivas: false,
+    });
+
+    expect(result.visitas?.[0].estado).toBe('awaiting_approval');
   });
 
   it('con soloActivas:false devuelve TODAS las visitas, incluidas completadas/canceladas', async () => {

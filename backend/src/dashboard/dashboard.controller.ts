@@ -4,6 +4,7 @@ import { DashboardService } from './dashboard.service';
 import { AuthGuard } from '../auth/auth.guard';
 import { AuthorizationGuard } from '../auth/guards/authorization.guard';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
+import { TenantContextService } from '../common/tenant/tenant-context.service';
 import {
   DashboardQueryDto,
   VisitsTrendQueryDto,
@@ -11,12 +12,20 @@ import {
   DetectionsQueryDto,
 } from './dto/dashboard-query.dto';
 
+/**
+ * Fase 4 · P5.B (D12): cada ruta resuelve el condominio del actor
+ * (`TenantContextService`) y lo pasa a `DashboardService`, que acota todos los
+ * conteos y listados (ver su docstring). Super-admin: toda la plataforma.
+ */
 @ApiTags('Dashboard')
 @ApiBearerAuth()
 @Controller('dashboard')
 @UseGuards(AuthGuard, AuthorizationGuard)
 export class DashboardController {
-  constructor(private readonly dashboardService: DashboardService) {}
+  constructor(
+    private readonly dashboardService: DashboardService,
+    private readonly tenantContext: TenantContextService,
+  ) {}
 
   @Get('summary')
   @RequirePermissions('admin.dashboard')
@@ -25,7 +34,10 @@ export class DashboardController {
   @ApiResponse({ status: 401, description: 'No autorizado' })
   @ApiResponse({ status: 403, description: 'Sin permisos suficientes' })
   async getSummary(@Query() query: DashboardQueryDto) {
-    return await this.dashboardService.getDashboardSummary(query);
+    return await this.dashboardService.getDashboardSummary(
+      query,
+      await this.tenantContext.getContext(),
+    );
   }
 
   @Get('visits/trend')
@@ -34,7 +46,10 @@ export class DashboardController {
   @ApiResponse({ status: 200, description: 'Tendencia de visitas obtenida exitosamente' })
   @ApiQuery({ name: 'days', required: false, type: Number, description: 'Número de días (1-90)', example: 7 })
   async getVisitsTrend(@Query() query: VisitsTrendQueryDto) {
-    return await this.dashboardService.getVisitsTrend(query);
+    return await this.dashboardService.getVisitsTrend(
+      query,
+      await this.tenantContext.getContext(),
+    );
   }
 
   @Get('activity/recent')
@@ -49,7 +64,10 @@ export class DashboardController {
     description: 'Filtrar por tipo',
   })
   async getRecentActivity(@Query() query: RecentActivityQueryDto) {
-    return await this.dashboardService.getRecentActivity(query);
+    return await this.dashboardService.getRecentActivity(
+      query,
+      await this.tenantContext.getContext(),
+    );
   }
 
   @Get('detections/latest')
@@ -59,7 +77,10 @@ export class DashboardController {
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Límite de detecciones (1-100)', example: 10 })
   @ApiQuery({ name: 'matchedOnly', required: false, type: Boolean, description: 'Solo mostrar con match', example: false })
   async getLatestDetections(@Query() query: DetectionsQueryDto) {
-    return await this.dashboardService.getLatestDetections(query);
+    return await this.dashboardService.getLatestDetections(
+      query,
+      await this.tenantContext.getContext(),
+    );
   }
 
   @Get('detections/hourly')
@@ -67,7 +88,9 @@ export class DashboardController {
   @ApiOperation({ summary: 'Obtener distribución de detecciones por hora del día' })
   @ApiResponse({ status: 200, description: 'Distribución horaria obtenida exitosamente' })
   async getDetectionsByHour() {
-    return await this.dashboardService.getDetectionsByHour();
+    return await this.dashboardService.getDetectionsByHour(
+      await this.tenantContext.getContext(),
+    );
   }
 
   @Get('cameras/activity')
@@ -75,7 +98,9 @@ export class DashboardController {
   @ApiOperation({ summary: 'Obtener actividad de detecciones por cámara' })
   @ApiResponse({ status: 200, description: 'Actividad de cámaras obtenida exitosamente' })
   async getCameraActivity() {
-    return await this.dashboardService.getCameraActivity();
+    return await this.dashboardService.getCameraActivity(
+      await this.tenantContext.getContext(),
+    );
   }
 
   @Get('visits/distribution')
@@ -83,7 +108,9 @@ export class DashboardController {
   @ApiOperation({ summary: 'Obtener distribución de tipos de visitas' })
   @ApiResponse({ status: 200, description: 'Distribución de visitas obtenida exitosamente' })
   async getVisitTypeDistribution() {
-    return await this.dashboardService.getVisitTypeDistribution();
+    return await this.dashboardService.getVisitTypeDistribution(
+      await this.tenantContext.getContext(),
+    );
   }
 
   @Get('errors/trends')
@@ -91,7 +118,9 @@ export class DashboardController {
   @ApiOperation({ summary: 'Obtener tendencias de errores por servicio' })
   @ApiResponse({ status: 200, description: 'Tendencias de errores obtenidas exitosamente' })
   async getErrorTrends() {
-    return await this.dashboardService.getErrorTrends();
+    return await this.dashboardService.getErrorTrends(
+      await this.tenantContext.getContext(),
+    );
   }
 
   @Get('metrics/response-time')
@@ -124,7 +153,10 @@ export class DashboardController {
   })
   @ApiQuery({ name: 'period', required: false, enum: ['today', 'week', 'month', 'custom'], description: 'Período de tiempo', example: 'today' })
   async getResponseTimeMetrics(@Query() query: DashboardQueryDto) {
-    return await this.dashboardService.getResponseTimeMetrics(query);
+    return await this.dashboardService.getResponseTimeMetrics(
+      query,
+      await this.tenantContext.getContext(),
+    );
   }
 
   @Get('metrics/response-time/detailed')
@@ -154,6 +186,9 @@ export class DashboardController {
   })
   @ApiQuery({ name: 'period', required: false, enum: ['today', 'week', 'month', 'custom'], description: 'Período de tiempo', example: 'today' })
   async getResponseTimeDetailed(@Query() query: DashboardQueryDto) {
-    return await this.dashboardService.getResponseTimeDetailed(query);
+    return await this.dashboardService.getResponseTimeDetailed(
+      query,
+      await this.tenantContext.getContext(),
+    );
   }
 }

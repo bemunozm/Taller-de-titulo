@@ -1,6 +1,7 @@
 import { ConnectivityService } from '../../src/services/connectivity.service';
 import axios from 'axios';
 import * as dns from 'dns/promises';
+import { testHubConfig } from './support/hub-config.fixture';
 
 // Mock de axios
 jest.mock('axios');
@@ -17,7 +18,7 @@ describe('ConnectivityService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     jest.useFakeTimers();
-    service = new ConnectivityService();
+    service = new ConnectivityService(testHubConfig());
   });
 
   afterEach(() => {

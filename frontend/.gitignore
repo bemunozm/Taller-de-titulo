@@ -26,7 +26,7 @@ dist-ssr
 # CodeGraph (indice local; codegraph.json se versiona)
 .codegraph/
 
-# Env local (puede contener secrets como VITE_KIOSK_HUB_SECRET) — usar .env.example como plantilla
+# Env local — usar .env.example como plantilla
 .env
 .env.local
 .env.*.local

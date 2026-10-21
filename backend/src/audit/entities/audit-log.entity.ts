@@ -1,4 +1,12 @@
-import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, ManyToOne, JoinColumn, Index } from 'typeorm';
+import {
+  Entity,
+  Column,
+  PrimaryGeneratedColumn,
+  CreateDateColumn,
+  ManyToOne,
+  JoinColumn,
+  Index,
+} from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 
 export enum AuditAction {
@@ -7,7 +15,7 @@ export enum AuditAction {
   READ = 'READ',
   UPDATE = 'UPDATE',
   DELETE = 'DELETE',
-  
+
   // Auth Operations
   LOGIN = 'LOGIN',
   LOGOUT = 'LOGOUT',
@@ -15,39 +23,45 @@ export enum AuditAction {
   PASSWORD_CHANGE = 'PASSWORD_CHANGE',
   PASSWORD_RESET = 'PASSWORD_RESET',
   ACCOUNT_CONFIRM = 'ACCOUNT_CONFIRM',
-  
+
   // Permission Operations
   PERMISSION_GRANT = 'PERMISSION_GRANT',
   PERMISSION_REVOKE = 'PERMISSION_REVOKE',
   ROLE_ASSIGN = 'ROLE_ASSIGN',
   ROLE_UNASSIGN = 'ROLE_UNASSIGN',
-  
+
   // Camera Operations
   CAMERA_REGISTER = 'CAMERA_REGISTER',
   CAMERA_LPR_ENABLE = 'CAMERA_LPR_ENABLE',
   CAMERA_LPR_DISABLE = 'CAMERA_LPR_DISABLE',
   CAMERA_ACTIVATE = 'CAMERA_ACTIVATE',
   CAMERA_DEACTIVATE = 'CAMERA_DEACTIVATE',
-  
+
   // Visit Operations
   VISIT_APPROVE = 'VISIT_APPROVE',
   VISIT_REJECT = 'VISIT_REJECT',
   VISIT_CHECK_IN = 'VISIT_CHECK_IN',
   VISIT_CHECK_OUT = 'VISIT_CHECK_OUT',
   VISIT_QR_VALIDATE = 'VISIT_QR_VALIDATE',
-  
+
   // Detection Operations
   DETECTION_CREATED = 'DETECTION_CREATED',
   DETECTION_MATCHED = 'DETECTION_MATCHED',
-  
+
   // Vehicle Operations
   VEHICLE_REGISTER = 'VEHICLE_REGISTER',
   VEHICLE_AUTHORIZE = 'VEHICLE_AUTHORIZE',
   VEHICLE_REVOKE = 'VEHICLE_REVOKE',
-  
+
   // Family Operations
   FAMILY_MEMBER_ADD = 'FAMILY_MEMBER_ADD',
   FAMILY_MEMBER_REMOVE = 'FAMILY_MEMBER_REMOVE',
+
+  // Privacy Operations (Fase 4 · P7.R, Ley 21.719). Van al final: el tipo
+  // Postgres los agrega con ADD VALUE (migración PrivacyRetention).
+  DATA_EXPORT = 'DATA_EXPORT',
+  DATA_ERASURE = 'DATA_ERASURE',
+  RETENTION_SWEEP = 'RETENTION_SWEEP',
 }
 
 export enum AuditModule {
@@ -64,6 +78,8 @@ export enum AuditModule {
   NOTIFICATIONS = 'NOTIFICATIONS',
   DIGITAL_CONCIERGE = 'DIGITAL_CONCIERGE',
   MEDIAMTX = 'MEDIAMTX',
+  // Fase 4 · P7.R: exportación, supresión y retención de datos personales.
+  PRIVACY = 'PRIVACY',
 }
 
 @Entity('audit_logs')
@@ -71,9 +87,19 @@ export enum AuditModule {
 @Index(['userId', 'createdAt'])
 @Index(['action', 'createdAt'])
 @Index(['entityType', 'entityId'])
+@Index(['organizationId', 'createdAt'])
 export class AuditLog {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  /**
+   * Condominio del evento (Fase 4 · P5). Lo estampan `AuditInterceptor` (desde
+   * `request.tenantContext` o la membresía del usuario) y el sink de login
+   * (membresía del usuario). `null` = sin condominio (p. ej. `LOGIN_FAILED` o
+   * acciones de un super-admin): esas filas las lee solo el super-admin.
+   */
+  @Column({ type: 'uuid', nullable: true })
+  organizationId: string | null;
 
   @Column({ type: 'enum', enum: AuditModule })
   module: AuditModule;

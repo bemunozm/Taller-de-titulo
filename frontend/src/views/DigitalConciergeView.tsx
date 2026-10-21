@@ -1,16 +1,39 @@
-import { useState, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import { RealtimeAgent, RealtimeSession, tool } from '@openai/agents/realtime';
 import { ConciergeAPI, type RealtimeToolDefinition, type ToolExecutionResponse } from '@/api/ConciergeAPI';
-import { webSocketService } from '@/services/WebSocketService';
+import { kioskSocket } from '@/services/KioskSocketService';
+import type { KioskCredential } from '@/services/kioskCredentialStore';
+import { useKioskCredential } from '@/hooks/useKioskCredential';
+import { useResidentResponseWatcher } from '@/hooks/useResidentResponseWatcher';
+import { buildResidentOutcomeMessages, type KioskWaitOutcome } from '@/helpers/kioskResidentResponse';
+import { getUserFacingErrorMessage } from '@/helpers/httpErrors';
+import { describeNotifiedResidents, maskHubId } from '@/helpers/kiosk';
+import { useLongPress } from '@/hooks/useLongPress';
+import { KioskPairingScreen } from '@/components/concierge/KioskPairingScreen';
+import { KioskUnpairPanel } from '@/components/concierge/KioskUnpairPanel';
 import { ConversationStatus, type ConversationState } from '@/components/concierge/ConversationStatus';
 import { CollectedDataPanel, type CollectedData } from '@/components/concierge/CollectedDataPanel';
 import { AudioVisualizer } from '@/components/concierge/AudioVisualizer';
 import { TranscriptDisplay, type TranscriptMessage } from '@/components/concierge/TranscriptDisplay';
 import { DialPad } from '@/components/concierge/DialPad';
+import { KioskPrivacyNotice } from '@/components/concierge/KioskPrivacyNotice';
+import { PrivacyPolicyDialog } from '@/components/privacy/PrivacyPolicyDialog';
 import { PhoneXMarkIcon, ExclamationCircleIcon } from '@heroicons/react/24/outline';
 import { Subheading } from '@/components/ui/Heading';
 import { Text } from '@/components/ui/Text';
 import { Button } from '@/components/ui/Button';
+
+/** Margen para que el audio de despedida termine antes de cortar (el agente tarda ~3-5 s). */
+const FINALIZE_CALL_DELAY_MS = 8_000;
+/** Si el agente no llama a `finalizar_llamada()` tras la respuesta, se corta igual. */
+const SAFETY_HANGUP_DELAY_MS = 25_000;
+/**
+ * Sin respuesta (sesión cerrada o espera vencida) la sesión ya terminó en el
+ * backend y las tools fallan: alcanza para el mensaje de despedida.
+ */
+const UNANSWERED_HANGUP_DELAY_MS = 15_000;
+/** Gesto de operador sobre el identificador del dispositivo para desemparejar. */
+const UNPAIR_LONG_PRESS_MS = 3_000;
 
 /**
  * Forma mínima de JSON Schema "object" que satisface `ToolInputParameters`
@@ -32,6 +55,74 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+function clearTimer(timerRef: RefObject<ReturnType<typeof setTimeout> | null>): void {
+  if (timerRef.current !== null) {
+    clearTimeout(timerRef.current);
+    timerRef.current = null;
+  }
+}
+
+/** Texto visible de un item `message` del historial de Realtime. */
+function messageText(content: unknown): string {
+  if (!Array.isArray(content) || content.length === 0) {
+    return '';
+  }
+  const first: unknown = content[0];
+  if (!isRecord(first)) {
+    return '';
+  }
+
+  const transcript = typeof first.transcript === 'string' ? first.transcript : '';
+  switch (first.type) {
+    // Las transcripciones están incluidas en el precio base de Realtime API.
+    case 'input_audio':
+      return transcript || '🎤 [Audio sin transcribir]';
+    case 'output_audio':
+      return transcript || '[Respuesta en progreso...]';
+    case 'text':
+      return typeof first.text === 'string' ? first.text : '';
+    default:
+      return '';
+  }
+}
+
+/**
+ * Historial de Realtime → transcript del kiosko. Los mensajes de sistema que
+ * se inyectan al agente (`input_text`) no tienen texto visible y quedan fuera.
+ */
+function historyToTranscript(history: readonly unknown[]): TranscriptMessage[] {
+  const messages: TranscriptMessage[] = [];
+
+  for (const item of history) {
+    if (!isRecord(item) || item.type !== 'message') {
+      continue;
+    }
+    const role = item.role;
+    if (role !== 'user' && role !== 'assistant') {
+      continue;
+    }
+    const content = messageText(item.content);
+    if (content.trim() === '') {
+      continue;
+    }
+    messages.push({
+      id: `msg-${String(item.itemId)}`,
+      role,
+      content,
+      timestamp: new Date(),
+    });
+  }
+
+  return messages;
+}
+
+function describeTransportError(event: unknown): string {
+  if (isRecord(event) && isRecord(event.error) && typeof event.error.message === 'string') {
+    return event.error.message;
+  }
+  return 'Error desconocido';
+}
+
 /**
  * Construye una tool "delgada" para el SDK de Realtime a partir de la
  * definición que sirve el backend: NO ejecuta lógica de negocio localmente,
@@ -50,9 +141,14 @@ function buildRealtimeTool(
     strict: false,
     async execute(input) {
       const parameters = isRecord(input) ? input : {};
-      console.log(`[TOOL] ${definition.name}:`, parameters);
-
-      const result = await ConciergeAPI.executeTool(sessionId, definition.name, parameters);
+      let result: ToolExecutionResponse;
+      try {
+        result = await ConciergeAPI.executeTool(sessionId, definition.name, parameters);
+      } catch {
+        // P. ej. la sesión ya terminó en el backend (espera vencida): el agente
+        // recibe un error y la llamada se corta por el timer de seguridad.
+        return JSON.stringify({ error: 'La herramienta no está disponible en este momento.' });
+      }
       onResult(definition.name, result);
 
       return JSON.stringify(result.success ? (result.data ?? {}) : { error: result.error });
@@ -60,44 +156,105 @@ function buildRealtimeTool(
   });
 }
 
+/**
+ * Kiosko del Conserje Digital (`/digital-concierge`, vista pública).
+ *
+ * El kiosko es un DEVICE `web-kiosk` del condominio, no un usuario humano.
+ * Sin credencial emparejada muestra la pantalla de emparejamiento; un 401 del
+ * backend la borra y vuelve a esa pantalla (ver `ConciergeAPI`).
+ */
 export function DigitalConciergeView() {
+  const credential = useKioskCredential();
+
+  if (!credential) {
+    return <KioskPairingScreen />;
+  }
+
+  return <KioskConcierge key={credential.hubId} credential={credential} />;
+}
+
+interface KioskConciergeProps {
+  credential: KioskCredential;
+}
+
+function KioskConcierge({ credential }: KioskConciergeProps) {
   // Estado de la sesión
   const [conversationState, setConversationState] = useState<ConversationState>('idle');
   const [isConnected, setIsConnected] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [targetHouse, setTargetHouse] = useState<string | null>(null); // Casa marcada desde el DialPad
+  // Casa marcada que espera el "Continuar" del aviso de privacidad (antes del micrófono).
+  const [consentHouse, setConsentHouse] = useState<string | null>(null);
+  const [isPolicyOpen, setIsPolicyOpen] = useState(false);
+  const [awaitingResident, setAwaitingResident] = useState(false);
+  const [isUnpairOpen, setIsUnpairOpen] = useState(false);
+  const unpairGesture = useLongPress(() => setIsUnpairOpen(true), UNPAIR_LONG_PRESS_MS);
 
-  // Datos recolectados
+  // Datos recolectados y transcripción
   const [collectedData, setCollectedData] = useState<CollectedData>({});
-
-  // Ref para mantener el estado actualizado en closures (evita stale state)
-  const collectedDataRef = useRef<CollectedData>({});
-
-  // Transcripción
   const [transcript, setTranscript] = useState<TranscriptMessage[]>([]);
+  // Avisos del sistema: aparte del historial, que `history_updated` reemplaza entero.
+  const [systemNotices, setSystemNotices] = useState<TranscriptMessage[]>([]);
 
-  // Referencias
+  // Referencias (valores que leen los closures del SDK y los timers)
+  const mountedRef = useRef(true);
   const sessionRef = useRef<RealtimeSession | null>(null);
-  const isSpeakingRef = useRef<boolean>(false); // Track si el agente está reproduciendo audio
+  const sessionIdRef = useRef<string | null>(null);
+  const isSpeakingRef = useRef(false); // Si el agente está reproduciendo audio
+  const finalizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const safetyHangupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Cada intento de conexión tiene un número; "Cambiar Casa" o desmontar lo invalidan.
+  const connectAttemptRef = useRef(0);
 
-  // Sincronizar ref con estado
-  useEffect(() => {
-    collectedDataRef.current = collectedData;
-  }, [collectedData]);
+  /** Cierra la sesión en el backend, una sola vez (expira la solicitud pendiente). */
+  const endBackendSession = useCallback(async (finalStatus: 'completed' | 'cancelled' | 'timeout') => {
+    const currentSessionId = sessionIdRef.current;
+    sessionIdRef.current = null;
+    if (currentSessionId) {
+      await ConciergeAPI.endSession(currentSessionId, finalStatus);
+    }
+  }, []);
+
+  /** Desconecta la sesión de voz y cierra la sesión en el backend. */
+  const disconnectSession = useCallback(async () => {
+    clearTimer(finalizeTimerRef);
+    clearTimer(safetyHangupTimerRef);
+
+    const realtimeSession = sessionRef.current;
+    sessionRef.current = null;
+
+    setIsConnected(false);
+    setConversationState('idle');
+    setSessionId(null);
+    setAwaitingResident(false);
+    setCollectedData({});
+    setTranscript([]);
+    setSystemNotices([]);
+    isSpeakingRef.current = false;
+
+    try {
+      realtimeSession?.close();
+    } catch {
+      // La sesión de voz ya estaba cerrada.
+    }
+
+    try {
+      await endBackendSession('completed');
+    } catch (err) {
+      if (mountedRef.current) {
+        setError(getUserFacingErrorMessage(err, 'No se pudo cerrar la sesión del conserje'));
+      }
+    }
+  }, [endBackendSession]);
 
   /**
-   * Sincroniza los paneles de UI (datos recolectados / transcript / fin de
-   * llamada) con el resultado de una tool ejecutada en el backend. Es lógica
-   * de presentación, no de agente — el backend no sabe (ni le importa) que
-   * estos paneles existen; solo devuelve `{ success, data, error }` por cada
-   * tool y el cliente decide qué mostrar.
+   * Sincroniza los paneles de UI (datos recolectados / espera de respuesta /
+   * fin de llamada) con el resultado de una tool ejecutada en el backend. Es
+   * lógica de presentación: el backend solo devuelve `{ success, data, error }`.
    */
   const applyToolResultToUi = (toolName: string, result: ToolExecutionResponse) => {
     if (!result.success || !isRecord(result.data)) {
-      if (!result.success) {
-        console.warn(`[TOOL] ${toolName} falló:`, result.error);
-      }
       return;
     }
 
@@ -119,32 +276,43 @@ export function DigitalConciergeView() {
         break;
       }
       case 'buscar_residente': {
-        if (data.encontrado === true && Array.isArray(data.residentes)) {
-          const residentNames = data.residentes
-            .filter(isRecord)
-            .map((resident) => (typeof resident.nombre === 'string' ? resident.nombre : ''))
-            .filter((nombre) => nombre.length > 0)
-            .join(', ');
-
-          if (residentNames) {
-            setCollectedData((prev) => ({ ...prev, residentName: residentNames }));
-          }
+        // El kiosko recibe ids y conteo, nunca nombres: solo se toma el código
+        // exacto de la casa ("303" -> "A-303") para el panel.
+        if (data.encontrado === true && typeof data.casa === 'string' && data.casa.trim() !== '') {
+          const house = data.casa.trim();
+          setCollectedData((prev) => ({ ...prev, destinationHouse: house }));
         }
         break;
       }
       case 'notificar_residente': {
-        setCollectedData((prev) => ({ ...prev, residentResponse: 'pending' }));
+        // Solo con la notificación efectivamente enviada hay una respuesta que esperar.
+        if (data.notificado !== true) break;
+        const notifiedCount =
+          typeof data.cantidad_notificados === 'number' ? data.cantidad_notificados : undefined;
+        setCollectedData((prev) => ({
+          ...prev,
+          residentName: describeNotifiedResidents(prev.destinationHouse, notifiedCount),
+          residentResponse: 'pending',
+        }));
+        // Desde acá se espera la respuesta: socket + polling, con espera máxima.
+        setAwaitingResident(true);
+        break;
+      }
+      case 'reenviar_notificacion': {
+        // Un reenvío exitoso le da al residente una ventana completa para
+        // responder; uno fallido no cambia la espera.
+        if (data.reenviado === true) {
+          restartResidentWait();
+        }
         break;
       }
       case 'finalizar_llamada': {
         if (data.finalizada === true) {
-          console.log('[TOOL] finalizar_llamada - Esperando a que termine el audio...');
-          // Dar tiempo suficiente para que el audio de despedida se reproduzca
-          // completamente antes de cortar la sesión (el agente tarda ~3-5s).
-          setTimeout(() => {
-            console.log('[SESSION] ✅ Finalizando llamada por solicitud del agente...');
-            disconnectSession();
-          }, 8000);
+          clearTimer(finalizeTimerRef);
+          finalizeTimerRef.current = setTimeout(() => {
+            finalizeTimerRef.current = null;
+            void disconnectSession();
+          }, FINALIZE_CALL_DELAY_MS);
         }
         break;
       }
@@ -154,55 +322,141 @@ export function DigitalConciergeView() {
   };
 
   /**
+   * Fin de la espera (llega una sola vez): respuesta del residente por socket
+   * o polling, sesión cerrada sin respuesta, o espera máxima vencida.
+   * Fail-closed: solo `admitted` (acceso efectivo) instruye la bienvenida; ver
+   * `buildResidentOutcomeMessages`. En todos los casos la llamada se corta.
+   */
+  const handleResidentOutcome = (outcome: KioskWaitOutcome) => {
+    const messages = buildResidentOutcomeMessages(outcome);
+    const unanswered = outcome === 'closed' || outcome === 'no-response';
+
+    if (outcome === 'no-response') {
+      // Se cierra ya en el backend: la solicitud expira y una aprobación
+      // tardía responde 409, sin abrir para nadie.
+      void endBackendSession('timeout').catch(() => undefined);
+    } else if (outcome === 'closed') {
+      // El backend ya dio la sesión por terminada: no queda nada que cerrar.
+      sessionIdRef.current = null;
+    }
+
+    setAwaitingResident(false);
+    setCollectedData((prev) => ({ ...prev, residentResponse: messages.panelResponse }));
+    setSystemNotices((prev) => [
+      ...prev,
+      {
+        id: `system-${Date.now()}`,
+        role: 'assistant',
+        content: messages.transcript,
+        timestamp: new Date(),
+      },
+    ]);
+
+    try {
+      sessionRef.current?.sendMessage({
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: messages.agentInstruction }],
+      });
+    } catch {
+      // Sin canal de voz abierto: el visitante igual ve el aviso en pantalla.
+    }
+
+    // Corte garantizado aunque el agente no llame a `finalizar_llamada()`.
+    clearTimer(safetyHangupTimerRef);
+    safetyHangupTimerRef.current = setTimeout(
+      () => {
+        safetyHangupTimerRef.current = null;
+        void disconnectSession();
+      },
+      unanswered ? UNANSWERED_HANGUP_DELAY_MS : SAFETY_HANGUP_DELAY_MS,
+    );
+  };
+
+  const { restartMaxWait: restartResidentWait } = useResidentResponseWatcher({
+    sessionId,
+    awaitingResponse: awaitingResident,
+    onOutcome: handleResidentOutcome,
+  });
+
+  /**
    * Inicializa y conecta la sesión del conserje digital
    * @param houseNumber Número de casa marcado desde el DialPad
    */
   const connectSession = async (houseNumber: string) => {
+    const attempt = connectAttemptRef.current + 1;
+    connectAttemptRef.current = attempt;
+    // Sigue vigente si la vista está montada y nadie lo canceló ("Cambiar Casa").
+    const isCurrentAttempt = () => mountedRef.current && connectAttemptRef.current === attempt;
+    let startedSessionId: string | null = null;
+    let realtimeSession: RealtimeSession | null = null;
+
+    /**
+     * Cierra la sesión del backend de ESTE intento si todavía es la vigente
+     * (si ya la cerró "Cambiar Casa" o el desmontaje, `sessionIdRef` no la tiene).
+     */
+    const releaseStartedSession = () => {
+      if (startedSessionId !== null && sessionIdRef.current === startedSessionId) {
+        void endBackendSession('cancelled').catch(() => undefined);
+      }
+    };
+
+    // El panel de desemparejar no debe reaparecer al volver al teclado.
+    setIsUnpairOpen(false);
+
     try {
       setError(null);
       setConversationState('processing');
 
-      // 0. Solicitar permisos de micrófono ANTES de cualquier cosa
-      console.log('[SESSION] Solicitando permisos de micrófono...');
+      // 0. Permisos de micrófono ANTES de cualquier cosa (y solo tras el "Continuar" del aviso)
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        // Detener el stream inmediatamente ya que el SDK lo manejará
-        stream.getTracks().forEach(track => track.stop());
-        console.log('[SESSION] Permisos de micrófono concedidos');
-      } catch (micError) {
-        console.error('[SESSION] Error al acceder al micrófono:', micError);
+        // Se detiene de inmediato: el SDK abre su propio stream
+        stream.getTracks().forEach((track) => track.stop());
+      } catch {
+        if (!isCurrentAttempt()) {
+          return;
+        }
+        setConsentHouse(null);
         setError('No se pudo acceder al micrófono. Por favor, permite el acceso al micrófono.');
         setConversationState('error');
         return;
       }
+      // "Cancelar" mientras el navegador pedía el permiso: no se abre nada.
+      if (!isCurrentAttempt()) {
+        return;
+      }
 
-      // 1. Guardar número de casa marcado
+      // 1. Casa marcada
+      setConsentHouse(null);
       setTargetHouse(houseNumber);
-      console.log('[SESSION] 🏠 Casa de destino:', houseNumber);
 
-      // 2. Obtener token efímero del backend y pasar el socketId para notificaciones
-      const currentSocketId = webSocketService.getSocketId();
-      console.log('[SESSION] 🔌 Socket ID actual:', currentSocketId);
-
-      const { sessionId: newSessionId, ephemeralToken } = await ConciergeAPI.startSession(currentSocketId);
+      // 2. Token efímero; el socketId es el del socket del kiosko en `/hub`
+      const { sessionId: newSessionId, ephemeralToken } = await ConciergeAPI.startSession(
+        kioskSocket.getSocketId(),
+      );
+      if (!isCurrentAttempt()) {
+        // Cancelado mientras se creaba: la sesión nueva no debe quedar ACTIVE.
+        void ConciergeAPI.endSession(newSessionId, 'cancelled').catch(() => undefined);
+        return;
+      }
+      startedSessionId = newSessionId;
+      sessionIdRef.current = newSessionId;
       setSessionId(newSessionId);
-      console.log('[SESSION] 🆔 SessionId establecido:', newSessionId);
-      console.log('[SESSION] Este sessionId se usará para el listener visitor:response:' + newSessionId);
+      setAwaitingResident(false);
+      setSystemNotices([]);
 
-      // 3. Pre-cargar el número de casa en collectedData
+      // 3. Casa de destino pre-cargada
       setCollectedData({ destinationHouse: houseNumber });
-      console.log('[SESSION] 📋 Casa de destino pre-cargada en collectedData');
 
-      // 4. Obtener configuración del agente desde el backend (prompt + tools)
-      //    Única fuente de verdad — el cliente ya no hardcodea ninguno de los dos.
+      // 4. Configuración del agente (prompt + tools): única fuente de verdad, el backend
       const { instructions, tools: toolDefinitions } = await ConciergeAPI.getAgentConfig(houseNumber);
-      console.log('[SESSION] 🧠 Config de agente obtenida del backend:', toolDefinitions.map((t) => t.name));
+      if (!isCurrentAttempt()) {
+        releaseStartedSession();
+        return;
+      }
 
-      // 5. Construir tools "delgadas": cada una reenvía la llamada a
-      //    execute-tool y aplica el resultado a la UI (paneles/transcript).
-      //    La ejecución real (formateo, validaciones, side-effects) vive en
-      //    el backend (VigiliaTool + ToolDispatcherService) — el cliente ya
-      //    no ejecuta ninguna lógica de negocio localmente.
+      // 5. Tools "delgadas": reenvían a execute-tool y aplican el resultado a la UI
       const realtimeTools = toolDefinitions.map((definition) =>
         buildRealtimeTool(definition, newSessionId, applyToolResultToUi),
       );
@@ -214,18 +468,16 @@ export function DigitalConciergeView() {
         tools: realtimeTools,
       });
 
-      // 6. Crear sesión de Realtime con WebRTC (por defecto)
-      // Usando gpt-realtime-mini (GA) - más económico que gpt-realtime
+      // 6. Sesión de Realtime con WebRTC (gpt-realtime-mini, GA)
       const session = new RealtimeSession(agent, {
         model: 'gpt-realtime-mini',
         config: {
           modalities: ['audio'],
           inputAudioFormat: 'pcm16',
           outputAudioFormat: 'pcm16',
-          // Configurar transcripción de audio en español para mejor precisión
           inputAudioTranscription: {
             model: 'whisper-1',
-            language: 'es', // Especificar español explícitamente
+            language: 'es',
           },
           turnDetection: {
             type: 'server_vad',
@@ -235,327 +487,163 @@ export function DigitalConciergeView() {
           },
         },
       });
+      realtimeSession = session;
 
-      // 7. Escuchar eventos de la sesión
-
-      // Evento para actualizaciones del historial de conversación
-      session.on('history_updated', (history: any[]) => {
-        console.log('[SESSION] Historial actualizado:', history.length, 'items');
-
-        // DEBUG: Ver estructura de los items
-        if (history.length > 0) {
-          console.log('[DEBUG] Primer item del historial:', JSON.stringify(history[0], null, 2));
-          console.log('[DEBUG] Último item del historial:', JSON.stringify(history[history.length - 1], null, 2));
-        }
-
-        // Actualizar transcript con los mensajes del historial
-        const messages: TranscriptMessage[] = history
-          .filter((item: any) => item.type === 'message' && item.role)
-          .map((item: any) => {
-            let messageText = '';
-
-            // La estructura real es: item.content[0].transcript
-            if (Array.isArray(item.content) && item.content.length > 0) {
-              const contentItem = item.content[0];
-
-              // Para mensajes del usuario (input_audio)
-              // Las transcripciones están incluidas en el precio base de Realtime API
-              if (contentItem.type === 'input_audio') {
-                messageText = contentItem.transcript || '🎤 [Audio sin transcribir]';
-              }
-              // Para mensajes del asistente (output_audio)
-              else if (contentItem.type === 'output_audio') {
-                messageText = contentItem.transcript || '[Respuesta en progreso...]';
-              }
-              // Para mensajes de texto
-              else if (contentItem.type === 'text') {
-                messageText = contentItem.text || '';
-              }
-            }
-
-            // Incluir mensajes del asistente y placeholder para usuario
-            if (!messageText) {
-              return null;
-            }
-
-            return {
-              id: `msg-${item.itemId}`,
-              role: item.role,
-              content: messageText,
-              timestamp: new Date(),
-            };
-          })
-          .filter((msg: TranscriptMessage | null): msg is TranscriptMessage =>
-            msg !== null && msg.content.trim() !== ''
-          );
-
-        setTranscript(messages);
+      // 7. Eventos de la sesión
+      session.on('history_updated', (history) => {
+        setTranscript(historyToTranscript(history));
       });
 
-      // Evento para interrupciones de audio
       session.on('audio_interrupted', () => {
-        console.log('[SESSION] Audio interrumpido');
         setConversationState('listening');
       });
 
-      // Eventos de transporte de bajo nivel (para estados de audio)
-      session.on('transport_event', (event: any) => {
-        console.log('[TRANSPORT EVENT]', event.type, event);
-
-        // Eventos de input de audio (usuario hablando)
-        if (event.type === 'input_audio_buffer.speech_started') {
-          console.log('[STATE] Usuario empezó a hablar');
-          setConversationState('listening');
-          isSpeakingRef.current = false;
-        } else if (event.type === 'input_audio_buffer.speech_stopped') {
-          console.log('[STATE] Usuario dejó de hablar');
-          setConversationState('processing');
-        } else if (event.type === 'input_audio_buffer.committed') {
-          console.log('[STATE] Audio del usuario confirmado');
-          setConversationState('processing');
-        }
-        // Eventos de output de audio (agente hablando)
-        else if (event.type === 'output_audio_buffer.started') {
-          // El buffer de audio comenzó a reproducirse
-          console.log('[STATE] ✅ Buffer de audio iniciado - agente hablando');
-          isSpeakingRef.current = true;
-          setConversationState('speaking');
-        }
-        else if (event.type === 'output_audio_buffer.stopped') {
-          // El buffer de audio se detuvo (terminó de reproducirse)
-          console.log('[STATE] ✅ Buffer de audio detenido - agente terminó de hablar');
-          isSpeakingRef.current = false;
-          setConversationState('idle');
-        }
-        else if (event.type === 'output_audio_buffer.cleared') {
-          // El buffer de audio fue limpiado
-          console.log('[STATE] Buffer de audio limpiado');
-          isSpeakingRef.current = false;
-          setConversationState('idle');
-        }
-        else if (event.type === 'response.audio.delta' || event.type === 'response.output_audio.delta') {
-          // Recibiendo chunks de audio del agente (durante generación, no reproducción)
-          console.log('[STATE] Recibiendo delta de audio');
-          // No cambiar estado aquí, esperar a output_audio_buffer.started
-        }
-        else if (event.type === 'response.audio_transcript.delta' || event.type === 'response.output_audio_transcript.delta') {
-          // Transcripción de audio en progreso
-          console.log('[STATE] Transcripción en progreso');
-          // No cambiar estado aquí
-        }
-        else if (event.type === 'response.audio.done' || event.type === 'response.output_audio.done') {
-          // Audio del agente completado (generación, no reproducción)
-          console.log('[STATE] Audio generado completamente (pero puede estar reproduciéndose)');
-          // No resetear isSpeakingRef aquí, esperar a output_audio_buffer.stopped
-        }
-        else if (event.type === 'response.content_part.added') {
-          // Nueva parte de contenido agregada
-          const part = event.part;
-          console.log('[STATE] Nueva parte de contenido:', part?.type);
-          // No cambiar estado aquí
-        }
-        else if (event.type === 'response.done') {
-          // Respuesta completada - solo cambiar a idle si NO está reproduciendo audio
-          console.log('[STATE] Respuesta completada, isSpeaking:', isSpeakingRef.current);
-          if (!isSpeakingRef.current) {
+      // Eventos de transporte de bajo nivel (estados de audio)
+      session.on('transport_event', (event) => {
+        switch (event.type) {
+          case 'input_audio_buffer.speech_started':
+            isSpeakingRef.current = false;
+            setConversationState('listening');
+            break;
+          case 'input_audio_buffer.speech_stopped':
+          case 'input_audio_buffer.committed':
+            setConversationState('processing');
+            break;
+          case 'output_audio_buffer.started':
+            isSpeakingRef.current = true;
+            setConversationState('speaking');
+            break;
+          case 'output_audio_buffer.stopped':
+          case 'output_audio_buffer.cleared':
+            isSpeakingRef.current = false;
             setConversationState('idle');
-          }
-        }
-        // Eventos de conversación
-        else if (event.type === 'conversation.item.truncated') {
-          // Audio interrumpido por el usuario
-          console.log('[STATE] Audio interrumpido');
-          isSpeakingRef.current = false;
-          setConversationState('listening');
-        }
-        // Eventos de errores
-        else if (event.type === 'error') {
-          console.error('[TRANSPORT] Error:', event);
-          setError(`Error: ${event.error?.message || 'Error desconocido'}`);
-          setConversationState('error');
-          isSpeakingRef.current = false;
+            break;
+          case 'response.done':
+            // Solo vuelve a idle si NO está reproduciendo audio
+            if (!isSpeakingRef.current) {
+              setConversationState('idle');
+            }
+            break;
+          case 'conversation.item.truncated':
+            // Audio interrumpido por el visitante
+            isSpeakingRef.current = false;
+            setConversationState('listening');
+            break;
+          case 'error':
+            isSpeakingRef.current = false;
+            setError(`Error: ${describeTransportError(event)}`);
+            setConversationState('error');
+            break;
+          default:
+            break;
         }
       });
 
-      // 8. Conectar sesión con el token efímero
+      // 8. Conectar con el token efímero
       await session.connect({
         apiKey: ephemeralToken,
       });
 
+      // Cancelado o desmontado durante la conexión (p. ej. un 401 desemparejó el kiosko).
+      if (!isCurrentAttempt()) {
+        session.close();
+        releaseStartedSession();
+        return;
+      }
+
       sessionRef.current = session;
       setIsConnected(true);
-      setConversationState('speaking'); // Iniciar en estado "hablando" porque el agente empezará
+      setConversationState('speaking'); // El agente habla primero
+    } catch (err) {
+      // Falló después de crear la sesión (p. ej. 429 en agent-config o error al
+      // conectar la voz): se cierra todo para que la sesión no quede ACTIVE.
+      try {
+        realtimeSession?.close();
+      } catch {
+        // La sesión de voz no llegó a abrirse.
+      }
+      releaseStartedSession();
 
-      console.log('[SESSION] Conectado exitosamente');
-    } catch (err: any) {
-      console.error('[SESSION] Error al conectar:', err);
-      setError(err.message || 'Error al conectar con el conserje digital');
+      if (!isCurrentAttempt()) {
+        return;
+      }
+      setSessionId(null);
+      setError(getUserFacingErrorMessage(err, 'Error al conectar con el conserje digital'));
       setConversationState('error');
     }
   };
 
   /**
-   * Desconecta la sesión
+   * "Cambiar Casa": vuelve al teclado. Invalida un intento de conexión en
+   * curso y cierra la sesión del backend si quedó una abierta.
    */
-  const disconnectSession = async () => {
-    try {
-      if (sessionRef.current) {
-        await sessionRef.current.close();
-        sessionRef.current = null;
-      }
+  const handleChangeHouse = () => {
+    connectAttemptRef.current += 1;
+    void endBackendSession('cancelled').catch(() => undefined);
+    setSessionId(null);
+    setAwaitingResident(false);
+    setSystemNotices([]);
+    setTranscript([]);
+    setTargetHouse(null);
+    setConsentHouse(null);
+    setCollectedData({});
+    setError(null);
+    setConversationState('idle');
+  };
 
-      if (sessionId) {
-        await ConciergeAPI.endSession(sessionId, 'completed');
-      }
+  /**
+   * El visitante marcó una casa: primero el aviso de privacidad (§5.2). El
+   * micrófono y la sesión se piden recién con "Continuar".
+   */
+  const handleDial = (houseNumber: string) => {
+    setIsUnpairOpen(false);
+    setIsPolicyOpen(false);
+    setError(null);
+    setConsentHouse(houseNumber);
+  };
 
-      setIsConnected(false);
-      setConversationState('idle');
-      setSessionId(null);
-      setCollectedData({});
-      setTranscript([]);
-      isSpeakingRef.current = false;
-
-      console.log('[SESSION] Desconectado');
-    } catch (err: any) {
-      console.error('[SESSION] Error al desconectar:', err);
-      setError(err.message);
+  const handleConsentContinue = () => {
+    if (consentHouse !== null) {
+      void connectSession(consentHouse);
     }
   };
 
-  // Conectar WebSocket anónimamente al montar el componente (vista pública)
-  useEffect(() => {
-    console.log('[WEBSOCKET] Conectando WebSocket para conserje digital (modo anónimo)...');
-    webSocketService.connectAnonymous();
-
-    return () => {
-      // Cleanup al desmontar
-      if (sessionRef.current) {
-        try {
-          sessionRef.current.close();
-        } catch (error) {
-          console.error('[SESSION] Error en cleanup:', error);
-        }
-      }
-
-      // Desconectar WebSocket al salir de la vista
-      console.log('[WEBSOCKET] Desconectando WebSocket del conserje digital...');
-      webSocketService.disconnect();
-    };
+  /** "Cancelar" el aviso: vuelve al teclado sin sesión (invalida un permiso en curso). */
+  const handleConsentCancel = useCallback(() => {
+    connectAttemptRef.current += 1;
+    setConsentHouse(null);
+    setConversationState('idle');
   }, []);
 
-  // Escuchar respuesta del residente en tiempo real vía Socket.IO
+  // Socket del kiosko en `/hub` mientras la vista esté montada con esta credencial.
   useEffect(() => {
-    console.log('[SESSION] 👂 useEffect del listener ejecutándose, sessionId:', sessionId);
-
-    if (!sessionId) {
-      console.warn('[SESSION] ⚠️ sessionId es null, listener NO se configurará');
-      return;
-    }
-
-    console.log(`[SESSION] 🔔 Configurando listener para visitor:response:${sessionId}`);
-
-    // Suscribirse al evento específico de esta sesión
-    const handleResidentResponse = (data: any) => {
-      console.log('[SESSION] ✅ Respuesta del residente recibida:', data);
-      console.log('[SESSION] Aprobado:', data.approved);
-
-      // Actualizar el estado de collectedData para que el agente sepa la respuesta
-      setCollectedData((prev: CollectedData) => {
-        const updated = {
-          ...prev,
-          residentResponse: data.approved ? ('approved' as const) : ('denied' as const),
-        };
-        console.log('[SESSION] CollectedData actualizado:', updated);
-        return updated;
-      });
-
-      // NUEVO: Inyectar mensaje del sistema al agente para que reaccione inmediatamente
-      if (sessionRef.current) {
-        const systemMessage = data.approved
-          ? '🔔 NOTIFICACIÓN DEL SISTEMA: El residente ha APROBADO la visita. Procede inmediatamente a dar la bienvenida al visitante y llamar a finalizar_llamada().'
-          : '🔔 NOTIFICACIÓN DEL SISTEMA: El residente ha RECHAZADO la visita. Informa amablemente al visitante que no puede ingresar, despídete y llama a finalizar_llamada().';
-
-        console.log('[SESSION] 📨 Inyectando mensaje del sistema al agente:', systemMessage);
-
-        // Enviar mensaje del sistema para que el agente reaccione
-        sessionRef.current.sendMessage({
-          type: 'message',
-          role: 'user',
-          content: [{ type: 'input_text', text: systemMessage }],
-        });
-      }
-
-      // Agregar mensaje al transcript para que el usuario vea la actualización
-      const responseMessage: TranscriptMessage = {
-        id: `system-${Date.now()}`,
-        role: 'assistant' as const,
-        content: data.approved
-          ? '✅ El residente ha APROBADO la visita'
-          : '❌ El residente ha RECHAZADO la visita',
-        timestamp: new Date(),
-      };
-
-      setTranscript((prev) => [...prev, responseMessage]);
-
-      console.log('[SESSION] Transcript actualizado con respuesta del residente');
-
-      // TIMEOUT DE SEGURIDAD: Finalizar llamada automáticamente después de 25 segundos
-      // si el agente no llamó a finalizar_llamada() por alguna razón
-      setTimeout(() => {
-        console.log('[SESSION] ⏱️ Timeout alcanzado - finalizando llamada automáticamente');
-        if (sessionRef.current) {
-          disconnectSession();
-        }
-      }, 25000); // 25 segundos: tiempo suficiente para mensaje final + despedida
-    };
-
-    const eventName = `visitor:response:${sessionId}`;
-
-    // Función para registrar el listener
-    const registerListener = () => {
-      const socket = webSocketService.getSocket();
-
-      if (socket && socket.connected) {
-        socket.on(eventName, handleResidentResponse);
-        console.log(`[SESSION] ✅ Listener registrado para ${eventName}`);
-        console.log(`[SESSION] Socket ID: ${socket.id}`);
-        return true;
-      } else {
-        console.warn('[SESSION] ⚠️ Socket no disponible o no conectado al intentar registrar listener');
-        console.warn('[SESSION] Socket:', socket ? 'existe' : 'null', 'Connected:', socket?.connected);
-        return false;
-      }
-    };
-
-    // Intentar registrar inmediatamente
-    let registered = registerListener();
-
-    // Si no se pudo registrar, intentar cada segundo hasta que el socket esté listo
-    let retryInterval: NodeJS.Timeout | null = null;
-    if (!registered) {
-      console.log('[SESSION] ⏳ Esperando a que el socket esté conectado...');
-      retryInterval = setInterval(() => {
-        registered = registerListener();
-        if (registered && retryInterval) {
-          clearInterval(retryInterval);
-          retryInterval = null;
-        }
-      }, 1000);
-    }
-
-    // Cleanup: remover listener cuando cambie sessionId o se desmonte
+    kioskSocket.connect(credential);
     return () => {
-      if (retryInterval) {
-        clearInterval(retryInterval);
-      }
-
-      const socket = webSocketService.getSocket();
-      if (socket) {
-        socket.off(eventName, handleResidentResponse);
-        console.log(`[SESSION] 🧹 Listener removido para ${eventName}`);
-      }
+      kioskSocket.disconnect();
     };
-  }, [sessionId]);
+  }, [credential]);
+
+  // Limpieza al desmontar: timers, sesión de voz y sesión del backend abierta.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      clearTimer(finalizeTimerRef);
+      clearTimer(safetyHangupTimerRef);
+      const realtimeSession = sessionRef.current;
+      sessionRef.current = null;
+      try {
+        realtimeSession?.close();
+      } catch {
+        // La sesión de voz ya estaba cerrada.
+      }
+      // Best-effort: tras un 401 ya no hay credencial y esto falla en silencio.
+      void endBackendSession('cancelled').catch(() => undefined);
+    };
+  }, [endBackendSession]);
+
+  const displayedTranscript = systemNotices.length > 0 ? [...transcript, ...systemNotices] : transcript;
+  const isIdleAtDialPad = !isConnected && !targetHouse;
 
   return (
     <div className="h-screen overflow-auto bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 dark:from-zinc-950 dark:via-zinc-900 dark:to-zinc-950 p-4">
@@ -564,7 +652,7 @@ export function DigitalConciergeView() {
         {/* Error Alert */}
         {error && (
           <div className="mb-6 max-w-2xl mx-auto">
-            <div className="bg-red-50 dark:bg-red-900/20 border-2 border-red-200 dark:border-red-800 rounded-xl p-5 flex items-start gap-4 shadow-lg">
+            <div role="alert" className="bg-red-50 dark:bg-red-900/20 border-2 border-red-200 dark:border-red-800 rounded-xl p-5 flex items-start gap-4 shadow-lg">
               <div className="flex-shrink-0 w-10 h-10 bg-red-100 dark:bg-red-900/50 rounded-lg flex items-center justify-center">
                 <ExclamationCircleIcon className="w-6 h-6 text-red-600 dark:text-red-400" />
               </div>
@@ -576,18 +664,55 @@ export function DigitalConciergeView() {
           </div>
         )}
 
+        {/* Vista: Aviso de privacidad (casa marcada, antes del micrófono) */}
+        {isIdleAtDialPad && consentHouse !== null && (
+          <KioskPrivacyNotice
+            houseNumber={consentHouse}
+            isStarting={conversationState === 'processing'}
+            onContinue={handleConsentContinue}
+            onCancel={handleConsentCancel}
+          />
+        )}
+
         {/* Vista: Teclado Numérico (cuando NO está conectado) */}
-        {!isConnected && !targetHouse && (
-          <div className="flex justify-center items-center">
+        {isIdleAtDialPad && consentHouse === null && (
+          <div className="flex flex-col items-center">
             <DialPad
-              onCall={connectSession}
+              onCall={handleDial}
               disabled={conversationState === 'processing'}
             />
+
+            <button
+              type="button"
+              onClick={() => setIsPolicyOpen(true)}
+              className="mt-8 rounded-md px-2 py-1 text-sm font-medium text-zinc-500 underline decoration-zinc-400/50 underline-offset-4 hover:text-zinc-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 dark:text-zinc-400 dark:hover:text-zinc-200"
+            >
+              Aviso de privacidad
+            </button>
+            <PrivacyPolicyDialog open={isPolicyOpen} onClose={() => setIsPolicyOpen(false)} />
+
+            {/*
+              Desemparejar: gesto de operador sin pista visible (mantener
+              presionado el identificador ~3 s) y luego el secret actual.
+              El hubId va enmascarado: el visitante no lee el identificador.
+            */}
+            <p
+              {...unpairGesture}
+              tabIndex={0}
+              // touch-none: un leve movimiento del dedo no dispara `pointercancel` (scroll/pan del navegador).
+              className="mt-6 touch-none font-mono text-[0.7rem] text-zinc-400 select-none [-webkit-touch-callout:none] dark:text-zinc-500"
+            >
+              Dispositivo {maskHubId(credential.hubId)}
+            </p>
+
+            {isUnpairOpen && (
+              <KioskUnpairPanel credential={credential} onCancel={() => setIsUnpairOpen(false)} />
+            )}
           </div>
         )}
 
         {/* Vista: Conversación (cuando está conectado O ya marcó) */}
-        {(isConnected || targetHouse) && (
+        {!isIdleAtDialPad && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Panel Izquierdo: Estado y Controles */}
           <div className="space-y-6">
@@ -609,20 +734,15 @@ export function DigitalConciergeView() {
               {/* Botones de Control */}
               <div className="mt-8 flex justify-center gap-4">
                 {!isConnected ? (
-                  <Button
-                    color="zinc"
-                    onClick={() => {
-                      setTargetHouse(null);
-                      setCollectedData({});
-                      setError(null);
-                    }}
-                  >
+                  <Button color="zinc" onClick={handleChangeHouse}>
                     Cambiar Casa
                   </Button>
                 ) : (
                   <Button
                     color="red"
-                    onClick={disconnectSession}
+                    onClick={() => {
+                      void disconnectSession();
+                    }}
                   >
                     <PhoneXMarkIcon className="w-5 h-5" />
                     Finalizar Sesión
@@ -637,7 +757,7 @@ export function DigitalConciergeView() {
 
           {/* Panel Derecho: Transcripción */}
           <div>
-            <TranscriptDisplay messages={transcript} />
+            <TranscriptDisplay messages={displayedTranscript} />
           </div>
         </div>
         )}

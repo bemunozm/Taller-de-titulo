@@ -1,0 +1,129 @@
+# Privacidad y Ley 21.719: diseño de Vigilia
+
+> Estado: diseño de la fase P7 del hardening (2026-10-09). Base: la investigación del 2026-10-09 (fuentes al final), el inventario de datos del backend y la revisión de transparencia del frontend, del prompt y del hub.
+> **No es asesoría legal.** Un abogado debe revisar los textos de aviso y la política antes del piloto.
+
+## 1. Marco aplicable
+
+- **Ley 21.719** (reforma la 19.628). Vigencia legal: **1-dic-2026**. El Boletín 18.623-07 propone postergarla y está en discusión. Se diseña para el 1-dic-2026.
+- No existe norma específica para CCTV, LPR ni asistentes de IA. Rigen los principios del art. 3 (licitud, finalidad, **proporcionalidad**, calidad, responsabilidad, seguridad, transparencia, confidencialidad) y los arts. 12–16 ter.
+- **Datos de Vigilia:** nombre, RUT, teléfono, email, patente, imagen de CCTV, voz y transcripción. Son **datos personales comunes**. La voz y el rostro solo serían biométricos (art. 16 ter) si se usaran para identificar de forma única.
+- **Decisión de diseño:** Vigilia **no hace reconocimiento facial ni de voz**. Así queda fuera del régimen de datos sensibles.
+
+## 2. Bases de licitud
+
+| Tratamiento | Base | Nota |
+|---|---|---|
+| Datos de residentes (RUT, teléfono, email, familia, vehículos) | Art. 13 c: ejecución de contrato (administración del condominio) | El consentimiento sería frágil, porque el residente no puede negarse sin perder el servicio. |
+| CCTV en espacios comunes y anomalías | Art. 13 d: interés legítimo (seguridad), con ponderación documentada (§7) | Se recomienda un acuerdo de la asamblea de copropietarios. |
+| LPR de residentes | Art. 13 c y d | Es lo que permite el ingreso vehicular. |
+| LPR de visitantes | Art. 13 d | Aviso visible en el acceso (§6). |
+| Voz y datos del visitante con la IA | Art. 13 d (operar el control de acceso), más aviso previo | Pedir consentimiento verbal no sirve: no es libre, porque quien se niega queda sin acceso. Grabar para otros fines sí requeriría consentimiento, y **no se hace**. |
+| Notificaciones al residente (app, email o SMS) | Art. 13 c | Son parte del servicio. |
+
+## 3. Retención (P7: `RetentionService`)
+
+La ley no fija plazos: son **criterio propio** justificado por la proporcionalidad. El de 30 días para imágenes sigue la referencia del CPLT (Oficio 2309/2017).
+- Cada plazo es configurable por env.
+- El servicio corre a diario en lotes, con modo de prueba (`RETENTION_DRY_RUN`).
+- Es idempotente (`anonymizedAt`) y **nunca toca registros vigentes**: visitas en AWAITING_APPROVAL, PENDING, ACTIVE o READY_FOR_REENTRY; sesiones ACTIVE; acciones pendientes no terminales.
+
+| Dato | Acción | Plazo por defecto | Env |
+|---|---|---|---|
+| Imágenes: recorte de patente (`plate_detections.meta.snapshot_jpeg_b64`), frame completo (`full_frame_path` y su archivo en Cloudinary), foto de anomalía (`anomaly_events.snapshotJpegB64`) | Borrar la imagen (la fila sigue) | **30 días** | `RETENTION_IMAGES_DAYS` |
+| Visita terminal: nombre, RUT, teléfono, patente solicitada, motivo y QR del visitante | Anonimizar (`visitorName` = "[anonimizado]", el resto a null) | **90 días** desde el cierre | `RETENTION_VISITS_DAYS` |
+| Sesión del conserje terminal: datos del visitante, nombres en `residentsNotified` (se conservan los ids), `transcript` y `functionCalls` | Anonimizar | **90 días** | `RETENTION_VISITS_DAYS` |
+| Detecciones e intentos: patente (`plate`/`plate_raw`), vínculo al residente, texto de `reason` | Anonimizar (las métricas del dashboard siguen) | **90 días** | `RETENTION_ACCESS_LOG_DAYS` |
+| Anomalías (fila con `aiReasoning`) | Borrar | **90 días** | `RETENTION_ANOMALIES_DAYS` |
+| Notificaciones (copian los datos del visitante) | Borrar | **90 días** | `RETENTION_NOTIFICATIONS_DAYS` |
+| Acciones pendientes terminales (`input`, `contextSnapshot`, `result`) | Borrar | **90 días** | `RETENTION_PENDING_ACTIONS_DAYS` |
+| Auditoría (`audit_logs`) | Borrar | **365 días** | `RETENTION_AUDIT_DAYS` |
+| Logs del sistema (`system_logs`) | Borrar | **30 días** (hoy está fijo en el código) | `RETENTION_SYSTEM_LOGS_DAYS` |
+| Usuario deshabilitado | Anonimizar: nombre "Usuario eliminado", email no entregable y único, RUT, teléfono y foto a null; borrar la foto en Cloudinary | **30 días** desde la baja | `RETENTION_DISABLED_USERS_DAYS` |
+| better-auth: `session` y `verification` vencidas; `rateLimit` antiguo | Borrar | al vencer / 1 día | — |
+| Disco del LPR (frames) | Ya existe | 7 días | `LPR_RETENTION_DAYS` |
+
+- **Audio crudo:** Vigilia **no lo guarda**: ni el backend ni el hub lo persisten (se verifica en P7). La transcripción solo se usa en vivo, porque `ConciergeSession.transcript` nunca se escribe.
+- **Retención del encargado:** OpenAI retiene sus logs de monitoreo de abuso hasta **30 días**, y Realtime **no es elegible** para Zero Data Retention. Debe informarse en la política.
+
+**Minimización desde la captura, que sigue funcionando aunque la retención falle:**
+- Logs sin datos personales: teléfono enmascarado, patente parcial, sin nombres ni RUT.
+- `LOG_LEVEL` en producción sin `debug`.
+- Auditoría (`oldValue`/`newValue`) y `auditToolCall` / `pending_actions` con los campos personales redactados.
+
+## 4. Derechos de los titulares (arts. 5–11)
+
+- **Canal:** el correo de la administración del condominio, publicado en la política. Se responde en **30 días corridos**, prorrogables una vez por 30 días más. El titular puede reclamar ante la Agencia.
+- **Herramientas mínimas (P7):**
+  - **Residente:** `GET /auth/me/data-export` le entrega sus datos (perfil, familia, vehículos, visitas que creó, notificaciones), con lo que cubre acceso y portabilidad. Rectifica en su perfil.
+  - **Administración** (supresión u oposición de visitantes y residentes): una ruta de borrado inmediato, acotada al condominio y auditada, que anonimiza por **RUT** o **patente** las visitas, sesiones, notificaciones y detecciones que coincidan. También permite anonimizar a un usuario deshabilitado sin esperar los 30 días.
+  - **Video:** si se entrega una copia, difuminar a terceros (CPLT). Es un procedimiento manual y queda fuera del software del piloto.
+
+## 5. Transparencia
+
+### 5.1 Aviso de IA (voz, al inicio de cada llamada; lo dice Sofía)
+
+> "¡Hola! Soy Sofía, la asistente virtual con inteligencia artificial del condominio. Esta conversación se transcribe solo para gestionar tu visita; el aviso de privacidad está en el acceso."
+
+- No se presenta como "conserje" humana.
+- Al pedir el RUT o el teléfono indica la finalidad una vez: "para registrar tu visita".
+- **Nunca nombra a los residentes**: "notifiqué al residente de la casa X". Además, los dispositivos ya no reciben los nombres desde las tools.
+- Si no puede resolver o el acceso se niega, informa que una persona (residente o conserjería) decide. Así se cumplen las garantías del art. 8 bis.
+
+### 5.2 Kiosko web: pantalla previa al micrófono
+
+Antes de `getUserMedia`, el kiosko muestra:
+
+> "Vas a hablar con Sofía, una asistente de inteligencia artificial. Para gestionar tu visita, tu voz se procesa en tiempo real con un proveedor de IA (OpenAI, EE.UU.). Registramos tu nombre, RUT, teléfono, patente y motivo, que se conservan 90 días. [Ver aviso de privacidad] [Continuar] [Cancelar]"
+
+### 5.3 Política de privacidad pública (art. 14 ter)
+
+Es una ruta **pública**, enlazada desde la landing, el login y el kiosko. Secciones:
+1. Responsable (la administración del condominio) y contacto, configurables. Vigilia actúa como encargado.
+2. Categorías de datos: identificación, contacto, imagen, patente, voz y transcripción, registros de acceso.
+3. Finalidades y base de licitud de cada una (§2).
+4. Encargados: OpenAI (voz, transcripción, visión de anomalías, agente de texto), proveedor de correo SMTP (notificaciones y el "SMS" con el QR, que hoy es un email), Cloudinary (fotos de perfil y, si se activa, frames del LPR) y hosting.
+5. Transferencias internacionales a EE.UU. (OpenAI, bajo su DPA) y su sustento. Está pendiente la lista de países adecuados de la Agencia.
+6. Plazos de conservación, la tabla del §3. **Deben coincidir con los valores configurados.**
+7. Medidas de seguridad **reales**: control de acceso por rol y condominio, cifrado de las credenciales de cámaras, auditoría y TLS. Se quitan las afirmaciones falsas (2FA y "cifrado de datos sensibles").
+8. Derechos (acceso, rectificación, supresión, oposición, bloqueo, portabilidad), cómo ejercerlos y el plazo de 30 días.
+9. Reclamo ante la Agencia de Protección de Datos Personales.
+10. Fuentes de los datos: el propio titular, el residente que registra una visita, las cámaras y el LPR.
+11. Decisiones automatizadas: el LPR abre para vehículos autorizados; una negativa nunca es definitiva sin una persona.
+12. Sin reconocimiento facial ni de voz.
+13. Fecha y versión.
+
+## 6. Cartel de cámaras y LPR (físico, en el acceso)
+
+> **ZONA VIDEOVIGILADA.** Este condominio graba imágenes y lee patentes de vehículos por seguridad y control de acceso. En el citófono te atiende una asistente de inteligencia artificial. Responsable: [Administración del condominio, RUT]. Conservación: imágenes 30 días; registros de acceso 90 días. Más información y ejercicio de derechos: [correo] / [QR a la política].
+
+El cartel va visible **antes** de entrar al área grabada.
+
+## 7. Evaluación de impacto liviana (EIPD)
+
+El art. 15 ter probablemente no la exige a un condominio, porque no es gran escala. Igual se hace como buena práctica y como material de tesis.
+
+| Riesgo | Medida | Riesgo residual |
+|---|---|---|
+| Acceso indebido entre condominios | Aislamiento por condominio (P5), jerarquía de roles y auditoría | Bajo |
+| Exposición de imágenes con personas | Retención de 30 días, foto por HTTP acotada y fuera del socket (P6), sin reconocimiento facial | Medio: viajan a OpenAI para el análisis de anomalías |
+| Transferencia de voz a EE.UU. | Aviso previo, minimización y DPA de OpenAI | Medio: Realtime sin ZDR y retención de 30 días del proveedor |
+| Decisión automatizada que niega el acceso | El LPR o la IA nunca niegan de forma definitiva; escala a una persona; el citófono siempre está disponible | Bajo |
+| Perfilado de visitantes | Se eliminan los "frecuentes" del contexto (P6) y se anonimiza a los 90 días | Bajo |
+| Datos personales en logs | Redacción desde la captura y `LOG_LEVEL` | Bajo |
+| Brecha de seguridad | Hardening P2–P6 y deber de reporte a la Agencia (art. 14 sexies) | Medio: sin un procedimiento formal de respuesta a incidentes en el piloto |
+
+## 8. Incierto o pendiente
+
+- Prórroga de la vigencia, normativa de la Agencia (videovigilancia, LPR, formato de reporte de brechas) y lista de países adecuados.
+- Firmar o aceptar el DPA de OpenAI y revisar el del proveedor SMTP y el de Cloudinary.
+- Revisión legal de los textos. Audio pregrabado del aviso en el hub, para no depender del modelo (follow-up).
+
+## Fuentes (consultadas el 2026-10-09)
+
+- [BCN, Ley 21.719](https://www.bcn.cl/leychile/consulta/obtxml?opt=7&idNorma=1209272)
+- [OpenAI, Your data (retención y ZDR)](https://developers.openai.com/api/docs/guides/your-data)
+- [OpenAI, Data Processing Addendum](https://openai.com/policies/data-processing-addendum/)
+- [CPLT, Oficio 2309/2017, recomendaciones sobre dispositivos de vigilancia](https://www.consejotransparencia.cl/wp-content/uploads/2020/01/RECOMENDACIONES-Dispositivos-de-Vigilancia.pdf)
+- [IAPP, puntos pendientes de la reforma en Chile](https://iapp.org/news/a/protecci-n-de-datos-personales-puntos-pendientes-antes-de-la-entrada-en-vigor-de-la-reforma-en-chile)
+- [Carey, proyecto de postergación](https://www.carey.cl/gobierno-ingresa-proyecto-de-ley-que-posterga-en-un-ano-entrada-en-vigor-de-la-ley-sobre-proteccion-de-datos-personales)

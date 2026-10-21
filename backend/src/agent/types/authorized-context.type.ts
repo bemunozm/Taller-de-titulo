@@ -1,3 +1,5 @@
+import type { AgentChannel } from '../agent-channel';
+
 /**
  * Fase 1, Bloque A2a (docs/modulos/agente-cerebro.md §5) — el contrato de
  * seguridad del catálogo de tools del agente-cerebro.
@@ -41,6 +43,14 @@ export interface AuthorizedContext {
    * físico) toma el valor sentinel `'hub'`.
    */
   readonly role: string;
+
+  /**
+   * Fase 4 · P4.B (D6/D8): canal del turno, derivado de la credencial
+   * autenticada (`request.hub.type` o sesión humana). Decide qué tools ve y
+   * puede ejecutar el agente (`VigiliaTool.allowedChannels`); `'unknown'` no
+   * ejecuta ninguna.
+   */
+  readonly channel: AgentChannel;
 
   /**
    * Permisos efectivos de la sesión, evaluados en NestJS ANTES de ejecutar

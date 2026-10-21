@@ -8,11 +8,15 @@ import { listRoles } from '@/api/RoleAPI'
 import type { Role } from '@/types/index'
 import MultiSelectCombobox from '@/components/ui/MultiSelectCombobox'
 import { useForm, Controller } from 'react-hook-form'
-import type { CreateCameraFormData, UpdateCameraFormData, Camera } from '@/types/index'
+import type { CreateCameraFormData, CreateCameraPayload, UpdateCameraFormData, Camera, OrganizationScoped } from '@/types/index'
+import { CONDOMINIUM_REQUIRED_MESSAGE, scopeCreatePayload, withoutOrganizationId } from '@/helpers/condominium'
+import { useCondominiumScope } from '@/hooks/useCondominiumScope'
+import { CondominiumSelect } from '@/components/condominiums/CondominiumSelect'
 import { toast } from 'react-toastify'
 import { Switch, SwitchField, SwitchGroup } from '@/components/ui/Switch'
 import { Label, Description } from '@/components/ui/Fieldset'
 import UrlRevealInput from '@/components/ui/UrlRevealInput'
+import { usePermissions } from '@/hooks/usePermissions'
 import { Dropdown, DropdownButton, DropdownItem, DropdownMenu } from '@/components/ui/Dropdown'
 import { EllipsisHorizontalIcon } from '@heroicons/react/20/solid'
 import { 
@@ -23,6 +27,8 @@ import {
   ServerIcon
 } from '@heroicons/react/24/outline'
 import GuardianZoneEditor from './GuardianZoneEditor'
+
+type CameraFormValues = CreateCameraFormData & OrganizationScoped
 
 interface CamerasPanelProps {
   triggerNew?: boolean
@@ -43,79 +49,89 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
     }
   }, [triggerNew])
 
+  // `GET /cameras/:id/source` revela una credencial (la URL RTSP): exige cameras.update.
+  const { hasPermission } = usePermissions()
+  const canRevealSource = hasPermission('cameras.update')
+
   const { data: cameras = [], isLoading } = useQuery<Camera[], Error>({ queryKey: ['cameras'], queryFn: () => listCameras() })
   const { data: iaHealth } = useQuery({ queryKey: ['ia-health'], queryFn: () => getIAHealth(), staleTime: 30_000, refetchOnWindowFocus: false, retry: false })
   const { data: mediamtxHealth } = useQuery({ queryKey: ['mediamtx-health'], queryFn: () => getMediamtxHealth(), staleTime: 30_000, refetchOnWindowFocus: false, retry: false })
   const { data: roles = [] as Role[] } = useQuery<Role[], Error>({ queryKey: ['roles'], queryFn: () => listRoles() })
 
-  const createMut = useMutation<any, Error, CreateCameraFormData>({
+  const createMut = useMutation<Camera, Error, CreateCameraFormData>({
     mutationFn: (payload) => createCamera(payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['cameras'] })
       toast.success('Cámara creada')
     },
-    onError: (err: any) => toast.error(err?.message || 'Error al crear cámara'),
+    onError: (err) => toast.error(err.message || 'Error al crear cámara'),
   })
 
-  const updateMut = useMutation<any, Error, { id: string; payload: UpdateCameraFormData }>({
+  const updateMut = useMutation<Camera, Error, { id: string; payload: UpdateCameraFormData }>({
     mutationFn: ({ id, payload }) => updateCamera(id, payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['cameras'] })
       toast.success('Cámara actualizada')
     },
-    onError: (err: any) => toast.error(err?.message || 'Error al actualizar cámara'),
+    onError: (err) => toast.error(err.message || 'Error al actualizar cámara'),
   })
 
-  const deleteMut = useMutation<any, Error, string>({
+  const deleteMut = useMutation<unknown, Error, string>({
     mutationFn: (id) => deleteCamera(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['cameras'] })
       toast.success('Cámara eliminada')
     },
-    onError: (err: any) => toast.error(err?.message || 'Error al eliminar cámara'),
+    onError: (err) => toast.error(err.message || 'Error al eliminar cámara'),
   })
 
-  const registerMut = useMutation<any, Error, string>({
+  const registerMut = useMutation<unknown, Error, string>({
     mutationFn: (id) => registerCamera(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['cameras'] })
       toast.success('Registro enviado a MediaMTX')
     },
-    onError: (err: any) => toast.error(err?.message || 'Error al registrar en MediaMTX'),
+    onError: (err) => toast.error(err.message || 'Error al registrar en MediaMTX'),
   })
 
-  const toggleLprMut = useMutation<any, Error, { id: string; enableLpr: boolean }>({
-    mutationFn: ({ id, enableLpr }) => enableCameraLpr(id, enableLpr),
+  const toggleLprMut = useMutation({
+    mutationFn: ({ id, enableLpr }: { id: string; enableLpr: boolean }) => enableCameraLpr(id, enableLpr),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['cameras'] })
       toast.success(`LPR ${data.enableLpr ? 'habilitado' : 'deshabilitado'} para ${data.name}`)
     },
-    onError: (err: any) => toast.error(err?.message || 'Error al cambiar estado de LPR'),
+    onError: (err: Error) => toast.error(err.message || 'Error al cambiar estado de LPR'),
   })
 
-  const toggleGuardianMut = useMutation<any, Error, { id: string; enableGuardian: boolean }>({
-    mutationFn: ({ id, enableGuardian }) => enableCameraGuardian(id, enableGuardian),
+  const toggleGuardianMut = useMutation({
+    mutationFn: ({ id, enableGuardian }: { id: string; enableGuardian: boolean }) =>
+      enableCameraGuardian(id, enableGuardian),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['cameras'] })
       toast.success(`Guardián Visual ${data.enableGuardian ? 'activado' : 'desactivado'} para ${data.name}`)
     },
-    onError: (err: any) => toast.error(err?.message || 'Error al cambiar estado de Guardián Visual'),
+    onError: (err: Error) => toast.error(err.message || 'Error al cambiar estado de Guardián Visual'),
   })
 
-  const { register, handleSubmit, reset, setValue, control } = useForm<CreateCameraFormData>({})
+  const { register, handleSubmit, reset, setValue, control, setError, clearErrors, formState: { errors } } =
+    useForm<CameraFormValues>({})
+
+  // Super-admin creando una cámara: elige el condominio (obligatorio); nadie más
+  // lo envía y nunca va en `PATCH /cameras/:id` (400).
+  const { chooseCondominium } = useCondominiumScope(!!selected)
 
 
   const [loadingSource, setLoadingSource] = useState(false)
   const [hasSource, setHasSource] = useState(false)
   const [revealedSource, setRevealedSource] = useState<string | null>(null)
 
-  
+
 
   useEffect(() => {
     if (selected) {
       // populate form
       setValue('name', selected.name)
-      setValue('location', (selected as any).location || '')
+      setValue('location', selected.location || '')
       // do not auto-fetch sourceUrl for privacy; only mark masked if exists
       setValue('sourceUrl', '')
       setRevealedSource(null)
@@ -123,31 +139,25 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
         try {
           const r = await getCameraHasSource(selected.id)
           setHasSource(!!r?.hasSource)
-        } catch (err) {
+        } catch {
           setHasSource(false)
         }
       })()
-      
+
       // populate roleIds if roles are attached
-      if ((selected as any).roles?.length) {
-        const ids = (selected as any).roles.map((r: Role) => r.id)
-        setValue('roleIds', ids)
-      } else {
-        setValue('roleIds', [])
-      }
-  // populate enableLpr flag
-  setValue('enableLpr', (selected as any).enableLpr ?? false)
-  // populate enableGuardian flag
-  setValue('enableGuardian', (selected as any).enableGuardian ?? false)
-  // populate active flag: backend may treat undefined as active, but for editing we want explicit value
-  setValue('active', (selected as any).active === undefined ? true : !!(selected as any).active)
+      setValue('roleIds', selected.roles?.map((r) => r.id) ?? [])
+      // populate enableLpr / enableGuardian flags
+      setValue('enableLpr', selected.enableLpr ?? false)
+      setValue('enableGuardian', selected.enableGuardian ?? false)
+      // populate active flag: backend may treat undefined as active, but for editing we want explicit value
+      setValue('active', selected.active === undefined ? true : !!selected.active)
     } else {
       reset()
     }
   }, [selected, setValue, reset])
 
   const handleShowSource = async () => {
-    if (!selected) return
+    if (!selected || !canRevealSource) return
     // toggle reveal/hide
     if (revealedSource) {
       // hide: clear visible value but keep hasSource true (masked)
@@ -167,35 +177,39 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
         toast.info('No hay URL disponible para esta cámara')
         setHasSource(false)
       }
-    } catch (err: any) {
-      toast.error(err?.message || 'No fue posible obtener la URL de la cámara')
+    } catch (err) {
+      toast.error(err instanceof Error && err.message ? err.message : 'No fue posible obtener la URL de la cámara')
     } finally {
       setLoadingSource(false)
     }
   }
 
-  const onSubmit = async (data: CreateCameraFormData) => {
+  const onSubmit = async (data: CameraFormValues) => {
     try {
       if (selected && selected.id) {
         // Build update payload: remove keys that should not be sent or are empty
-        const payload: UpdateCameraFormData = { ...(data as UpdateCameraFormData) }
-
-  // Send `active` explicitly so backend updates the value (true/false)
+        // (`active` se envía explícito para que el backend guarde true/false)
+        const payload: UpdateCameraFormData = withoutOrganizationId(data)
 
         // If sourceUrl provided via revealedSource, prefer that; otherwise if empty remove
         if (revealedSource) {
           payload.sourceUrl = revealedSource
         } else if (!payload.sourceUrl) {
-          delete (payload as any).sourceUrl
+          delete payload.sourceUrl
         }
 
         // remove empty roleIds
-        if (Array.isArray(payload.roleIds) && payload.roleIds.length === 0) delete (payload as any).roleIds
+        if (Array.isArray(payload.roleIds) && payload.roleIds.length === 0) delete payload.roleIds
 
         await updateMut.mutateAsync({ id: selected.id, payload })
       } else {
         // Manual validation for create: require sourceUrl and name
-        const toCreate: CreateCameraFormData = { ...(data as CreateCameraFormData) }
+        if (chooseCondominium && !data.organizationId) {
+          setError('organizationId', { type: 'required', message: CONDOMINIUM_REQUIRED_MESSAGE })
+          return
+        }
+        clearErrors('organizationId')
+        const toCreate: CreateCameraPayload = scopeCreatePayload(data, chooseCondominium)
         if (revealedSource) toCreate.sourceUrl = revealedSource
         // minimal validation
         if (!toCreate.name || typeof toCreate.name !== 'string' || !toCreate.name.trim()) {
@@ -211,20 +225,19 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
       setShowForm(false)
       setSelected(null)
       reset()
-    } catch (err) {
-      console.error(err)
-      try { toast.error((err as any)?.message || 'Error procesando la solicitud') } catch {}
+    } catch {
+      // El onError de la mutación ya avisó con un toast; el formulario sigue abierto.
     }
   }
 
-  const isSubmitting = (createMut as any).isLoading || (updateMut as any).isLoading || createMut.status === 'pending' || updateMut.status === 'pending'
+  const isSubmitting = createMut.isPending || updateMut.isPending
 
   const onDelete = async (id: string) => {
     try {
       await deleteMut.mutateAsync(id)
       setShowDelete(null)
-    } catch (err) {
-      console.error(err)
+    } catch {
+      // El onError de la mutación ya avisó con un toast.
     }
   }
 
@@ -239,7 +252,7 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
               <VideoCameraIcon className="h-5 w-5 text-zinc-400 flex-shrink-0" />
               <h4 className="font-semibold text-zinc-100 truncate">{cam.name || '(sin nombre)'}</h4>
             </div>
-            <p className="text-sm text-zinc-400 truncate">{(cam as any).location || 'Sin ubicación'}</p>
+            <p className="text-sm text-zinc-400 truncate">{cam.location || 'Sin ubicación'}</p>
           </div>
           
           <Dropdown>
@@ -249,12 +262,12 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
             <DropdownMenu>
               <DropdownItem onClick={() => { setSelected(cam); setShowForm(true) }}>Editar</DropdownItem>
               <DropdownItem onClick={() => registerMut.mutate(cam.id)}>Registrar en MediaMTX</DropdownItem>
-              {(cam as any).enableLpr ? (
+              {cam.enableLpr ? (
                 <DropdownItem onClick={() => toggleLprMut.mutate({ id: cam.id, enableLpr: false })}>Deshabilitar LPR</DropdownItem>
               ) : (
                 <DropdownItem onClick={() => toggleLprMut.mutate({ id: cam.id, enableLpr: true })}>Habilitar LPR</DropdownItem>
               )}
-              {(cam as any).enableGuardian ? (
+              {cam.enableGuardian ? (
                 <DropdownItem onClick={() => toggleGuardianMut.mutate({ id: cam.id, enableGuardian: false })}>Deshabilitar Guardián</DropdownItem>
               ) : (
                 <DropdownItem onClick={() => toggleGuardianMut.mutate({ id: cam.id, enableGuardian: true })}>Habilitar Guardián</DropdownItem>
@@ -267,14 +280,14 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
 
         {/* Status Badges */}
         <div className="flex items-center gap-2 flex-wrap mb-3">
-          {(cam as any).active === false ? (
+          {cam.active === false ? (
             <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/20">
               <XCircleIcon className="h-3.5 w-3.5 text-red-400" />
               <span className="text-xs font-medium text-red-400">Inactiva</span>
             </div>
           ) : (
             <>
-              {(cam as any).registeredInMediamtx ? (
+              {cam.registeredInMediamtx ? (
                 <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20">
                   <CheckCircleIcon className="h-3.5 w-3.5 text-emerald-400" />
                   <span className="text-xs font-medium text-emerald-400">MediaMTX</span>
@@ -286,14 +299,14 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
                 </div>
               )}
               
-              {(cam as any).enableLpr && (
+              {cam.enableLpr && (
                 <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-blue-500/10 border border-blue-500/20">
                   <BoltIcon className="h-3.5 w-3.5 text-blue-400" />
                   <span className="text-xs font-medium text-blue-400">LPR</span>
                 </div>
               )}
               
-              {(cam as any).enableGuardian && (
+              {cam.enableGuardian && (
                 <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20">
                   <div className="h-2 w-2 bg-indigo-500 rounded-full animate-pulse" />
                   <span className="text-xs font-medium text-indigo-400">Guardián IA</span>
@@ -317,9 +330,9 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
   // Calcular estadísticas
   const stats = {
     total: cameras.length,
-    active: cameras.filter((c) => (c as any).active !== false).length,
-    withLpr: cameras.filter((c) => (c as any).enableLpr === true).length,
-    registered: cameras.filter((c) => (c as any).registeredInMediamtx === true).length,
+    active: cameras.filter((c) => c.active !== false).length,
+    withLpr: cameras.filter((c) => c.enableLpr === true).length,
+    registered: cameras.filter((c) => c.registeredInMediamtx === true).length,
   }
 
   if (isLoading) {
@@ -464,6 +477,13 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
           </DialogDescription>
           <DialogBody>
             <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+              {chooseCondominium && (
+                <CondominiumSelect
+                  {...register('organizationId')}
+                  errorMessage={errors.organizationId?.message}
+                  description="La cámara queda registrada en este condominio."
+                />
+              )}
               <Input {...register('name')} placeholder="Nombre de la cámara" />
               <Input {...register('location')} placeholder="Ubicación física" />
               <Controller
@@ -475,7 +495,7 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
                     value={revealedSource ?? (hasSource ? '••••••••' : (field.value || ''))}
                     onChange={field.onChange}
                     onBlur={field.onBlur}
-                    onReveal={handleShowSource}
+                    onReveal={selected && canRevealSource ? handleShowSource : undefined}
                     loading={loadingSource}
                     revealed={!!revealedSource}
                   />

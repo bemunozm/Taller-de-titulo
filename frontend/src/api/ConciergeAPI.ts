@@ -1,4 +1,6 @@
+import { isAxiosError, type AxiosRequestConfig } from 'axios';
 import api from '@/lib/axios';
+import { kioskCredentialStore, type KioskCredential } from '@/services/kioskCredentialStore';
 
 export interface ConciergeSessionResponse {
   sessionId: string;
@@ -52,155 +54,224 @@ export interface EndSessionResponse {
   visitCreated: boolean;
 }
 
+export type ResidentResponseStatus = 'pending' | 'approved' | 'denied';
+
 /**
- * Credenciales de hub del kiosko-web (`web-kiosk`, aprovisionado vía
- * `POST /hubs` en el backend — ver `frontend/.env.example`). El totem se
- * autentica ante `ConciergeAuthGuard`/`HubAuthGuard` con los MISMOS headers
- * que ya usa `vigilia-hub` (`X-Hub-Secret` + `X-Hub-Id`, ver
- * `vigilia-hub/src/services/concierge-client.service.ts#hubHeaders`) — no un
- * mecanismo nuevo. Se leen de env (`import.meta.env`, nunca hardcodeadas) y
- * se validan acá para fallar temprano y explícito si el totem no fue
- * provisionado, en vez de dejar que cada llamada reviente en un 401 opaco.
+ * `POST /concierge/session/:id/status`. La llaman el residente (cookie) y el
+ * kiosko (headers de hub, solo para su propia sesión). `active`/`reason` son
+ * los campos previos a la P4; `visitId`, `residentResponse` y
+ * `entryRegistered` los agrega la P4 (respaldo por polling del kiosko).
+ * No trae datos del visitante: esos vienen en la notificación.
  *
- * NOTA DE SEGURIDAD: un secret embebido en el bundle web es extraíble por
- * cualquiera con acceso al totem (DevTools, bundle servido, etc.). Es
- * aceptable SOLO porque este kiosko es un dispositivo dedicado con acceso
- * físico controlado (conserjería/entrada del condominio) — NUNCA usar este
- * patrón para una vista pública accesible desde internet sin control físico.
+ * Con `residentResponse: 'approved'`, `entryRegistered` es un valor persistido:
+ * `null` = aún procesando, `true` = acceso efectivo (ingreso registrado y
+ * apertura ordenada), `false` = definitivo (aprobada sin apertura).
  */
-function getKioskHubHeaders(): Record<string, string> {
-  const hubId = import.meta.env.VITE_KIOSK_HUB_ID as string | undefined;
-  const hubSecret = import.meta.env.VITE_KIOSK_HUB_SECRET as string | undefined;
+export interface SessionStatusResponse {
+  active: boolean;
+  reason?: string;
+  visitId: string | null;
+  residentResponse: ResidentResponseStatus | null;
+  entryRegistered: boolean | null;
+}
 
-  if (!hubId || !hubSecret) {
-    throw new Error(
-      'Faltan las credenciales de hub del kiosko (VITE_KIOSK_HUB_ID / VITE_KIOSK_HUB_SECRET). ' +
-        'El totem del conserje digital necesita estas variables de entorno para autenticarse ' +
-        'contra el backend — ver frontend/.env.example.'
-    );
+/** `POST /concierge/session/:id/respond` (solo sesión humana, P4). */
+export interface RespondToVisitorResponse {
+  success: boolean;
+  message: string;
+  entryRegistered: boolean;
+}
+
+export type KioskDeviceType = 'physical-hub' | 'web-kiosk';
+
+/** `GET /concierge/device` (solo `HubAuthGuard`). */
+export interface KioskDeviceIdentity {
+  hubId: string;
+  type: KioskDeviceType;
+  organizationId: string | null;
+}
+
+/** El kiosko intentó llamar al backend sin credencial emparejada. */
+export class KioskNotPairedError extends Error {
+  constructor() {
+    super('El kiosko no está emparejado: ingresa la credencial del dispositivo.');
+    this.name = 'KioskNotPairedError';
   }
+}
 
+/** `GET /concierge/device` respondió 2xx con un cuerpo que no cumple el contrato. */
+export class UnexpectedDeviceResponseError extends Error {
+  constructor() {
+    super('Respuesta inesperada del servidor al validar el dispositivo.');
+    this.name = 'UnexpectedDeviceResponseError';
+  }
+}
+
+function isKioskDeviceIdentity(value: unknown): value is KioskDeviceIdentity {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const { hubId, type, organizationId } = value as Record<string, unknown>;
+  return (
+    typeof hubId === 'string' &&
+    hubId !== '' &&
+    (type === 'physical-hub' || type === 'web-kiosk') &&
+    (organizationId === null || typeof organizationId === 'string')
+  );
+}
+
+/**
+ * Mismos headers que usa `vigilia-hub` (`X-Hub-Secret` + `X-Hub-Id`): el
+ * backend enruta a `HubAuthGuard` cuando los recibe.
+ */
+function hubHeaders(credential: KioskCredential): Record<string, string> {
   return {
-    'X-Hub-Secret': hubSecret,
-    'X-Hub-Id': hubId,
+    'X-Hub-Id': credential.hubId,
+    'X-Hub-Secret': credential.hubSecret,
   };
 }
 
 /**
- * API para el sistema de Conserje Digital
+ * Request del kiosko con la credencial emparejada (`kioskCredentialStore`).
  *
- * Fase 1, Bloque A1 (docs/modulos/agente-cerebro.md §7): antes usaba una
- * instancia `axios` "pelada" (sin `withCredentials`), así que la cookie de
- * sesión httpOnly de better-auth NUNCA se enviaba — daba igual porque el
- * backend no exigía sesión. Ahora que `ConciergeAuthGuard` la exige para el
- * transporte "web" (sin header X-Hub-Secret), `respondToVisitor`/
- * `checkSessionStatus` (llamados desde componentes de residentes YA
- * autenticados: NotificationDetailModal, VisitorApprovalDialog) necesitan la
- * instancia compartida `api` (withCredentials: true, mismo patrón que
- * FamilyAPI/UnitAPI/etc.) o quedarían en 401 pese a que el residente sí tiene
- * sesión.
+ * - `withCredentials: false`: el kiosko es un dispositivo; aunque haya una
+ *   cookie de sesión humana en el navegador, no viaja con sus llamadas.
+ * - Un 401 HTTP significa que el backend ya no acepta esa credencial (secret
+ *   rotado, hub desactivado): se borra y la vista vuelve al emparejamiento.
+ *   Solo los 401 HTTP; los errores de socket no tocan la credencial.
+ */
+async function kioskRequest<T>(config: AxiosRequestConfig): Promise<T> {
+  const credential = kioskCredentialStore.get();
+  if (!credential) {
+    throw new KioskNotPairedError();
+  }
+
+  try {
+    const response = await api.request<T>({
+      ...config,
+      headers: hubHeaders(credential),
+      withCredentials: false,
+    });
+    return response.data;
+  } catch (error) {
+    if (isAxiosError(error) && error.response?.status === 401) {
+      kioskCredentialStore.clearIfCurrent(credential, 'unauthorized');
+    }
+    throw error;
+  }
+}
+
+function sessionPath(sessionId: string, action: string): string {
+  return `/concierge/session/${encodeURIComponent(sessionId)}/${action}`;
+}
+
+/**
+ * API del Conserje Digital.
  *
- * RESUELTO (decisión de Benjamin, cierre fases 1-2): `startSession`/
- * `getAgentConfig`/`executeTool`/`endSession` los llama el kiosko
- * `DigitalConciergeView.tsx` — una vista pública SIN sesión de better-auth.
- * En vez de agregarle login humano, el kiosko se trata como un DEVICE del
- * condominio (tipo `web-kiosk`) con secret propio, y manda
- * `X-Hub-Secret`/`X-Hub-Id` (vía `getKioskHubHeaders()`) para que
- * `ConciergeAuthGuard` lo enrute a `HubAuthGuard` — el mismo camino que ya
- * usa `vigilia-hub`. `respondToVisitor`/`checkSessionStatus` NO llevan estos
- * headers: los sigue llamando un residente ya autenticado por cookie, no el
- * kiosko.
+ * Dos clientes distintos:
+ * - **Kiosko** (`DigitalConciergeView`, vista pública sin sesión humana):
+ *   `startSession`, `getAgentConfig`, `executeTool`, `endSession`,
+ *   `getKioskSessionStatus`. Se autentica como dispositivo `web-kiosk` con la
+ *   credencial emparejada en runtime (`kioskRequest`).
+ * - **Residente** (cookie de better-auth vía la instancia compartida `api`):
+ *   `checkSessionStatus`, `respondToVisitor`. `/respond` es solo humano.
  */
 export class ConciergeAPI {
   /**
-   * Inicia una nueva sesión del conserje digital
-   * Retorna el sessionId y el token efímero para WebRTC
+   * Valida una credencial candidata contra `GET /concierge/device`. Usa la
+   * credencial recibida (aún no guardada), no la del store, y no borra nada
+   * ante un 401: el emparejamiento decide qué mostrar.
+   */
+  static async getDeviceIdentity(credential: KioskCredential): Promise<KioskDeviceIdentity> {
+    const response = await api.get<unknown>('/concierge/device', {
+      headers: hubHeaders(credential),
+      withCredentials: false,
+    });
+    if (!isKioskDeviceIdentity(response.data)) {
+      throw new UnexpectedDeviceResponseError();
+    }
+    return response.data;
+  }
+
+  /**
+   * Inicia una nueva sesión del conserje digital.
+   * `socketId` es el del socket del kiosko en el namespace `/hub`.
    */
   static async startSession(socketId?: string): Promise<ConciergeSessionResponse> {
-    const response = await api.post(
-      '/concierge/session/start',
-      {
-        metadata: navigator.userAgent, // Info del dispositivo
-        socketId, // Socket ID para notificaciones en tiempo real
+    return kioskRequest<ConciergeSessionResponse>({
+      method: 'POST',
+      url: '/concierge/session/start',
+      data: {
+        metadata: navigator.userAgent,
+        socketId,
       },
-      { headers: getKioskHubHeaders() }
-    );
-    return response.data;
+    });
   }
 
   /**
-   * Obtiene la configuración del agente (system prompt + definiciones de
-   * tools) para una casa/departamento de destino. Única fuente de verdad:
-   * el cliente ya NO hardcodea ni el prompt ni las tools (Fase 1, Bloque
-   * "clientes delgados").
+   * Configuración del agente (system prompt + definiciones de tools) para la
+   * casa/departamento de destino. Única fuente de verdad: el backend.
    */
   static async getAgentConfig(houseNumber: string): Promise<AgentConfigResponse> {
-    const response = await api.post(
-      `/concierge/agent-config/${houseNumber}`,
-      undefined,
-      { headers: getKioskHubHeaders() }
-    );
-    return response.data;
+    return kioskRequest<AgentConfigResponse>({
+      method: 'POST',
+      url: `/concierge/agent-config/${encodeURIComponent(houseNumber)}`,
+    });
   }
 
-  /**
-   * Ejecuta una herramienta/función desde el frontend
-   * (Este método lo llamará el agente de OpenAI cuando necesite ejecutar funciones)
-   */
+  /** Reenvía la ejecución de una tool del agente de Realtime al backend. */
   static async executeTool(
     sessionId: string,
     toolName: string,
     parameters: Record<string, unknown>
   ): Promise<ToolExecutionResponse> {
-    const response = await api.post(
-      `/concierge/session/${sessionId}/execute-tool`,
-      { toolName, parameters },
-      { headers: getKioskHubHeaders() }
-    );
-    return response.data;
+    return kioskRequest<ToolExecutionResponse>({
+      method: 'POST',
+      url: sessionPath(sessionId, 'execute-tool'),
+      data: { toolName, parameters },
+    });
   }
 
-  /**
-   * Finaliza la sesión del conserje digital
-   */
+  /** Finaliza la sesión del conserje digital. */
   static async endSession(
     sessionId: string,
     finalStatus?: 'completed' | 'cancelled' | 'timeout'
   ): Promise<EndSessionResponse> {
-    const response = await api.post(
-      `/concierge/session/${sessionId}/end`,
-      { finalStatus },
-      { headers: getKioskHubHeaders() }
-    );
+    return kioskRequest<EndSessionResponse>({
+      method: 'POST',
+      url: sessionPath(sessionId, 'end'),
+      data: { finalStatus },
+    });
+  }
+
+  /** Estado de la sesión pedido por el kiosko dueño (respaldo por polling). */
+  static async getKioskSessionStatus(sessionId: string): Promise<SessionStatusResponse> {
+    return kioskRequest<SessionStatusResponse>({
+      method: 'POST',
+      url: sessionPath(sessionId, 'status'),
+    });
+  }
+
+  /** Estado de la sesión pedido por un residente notificado (cookie). */
+  static async checkSessionStatus(sessionId: string): Promise<SessionStatusResponse> {
+    const response = await api.post<SessionStatusResponse>(sessionPath(sessionId, 'status'));
     return response.data;
   }
 
   /**
-   * Verificar si una sesión está activa y puede recibir respuestas
-   */
-  static async checkSessionStatus(
-    sessionId: string
-  ): Promise<{ active: boolean; reason?: string }> {
-    const response = await api.post(
-      `/concierge/session/${sessionId}/status`
-    );
-    return response.data;
-  }
-
-  /**
-   * Responde a una solicitud de visita (aprobar o rechazar)
+   * Respuesta del residente. El body es exactamente `{ approved, visitId }`:
+   * quien responde lo identifica el backend por la sesión (cookie), nunca
+   * por un id enviado desde el cliente.
    */
   static async respondToVisitor(
     sessionId: string,
     approved: boolean,
-    residentId?: string
-  ): Promise<{ success: boolean; message: string }> {
-    const response = await api.post(
-      `/concierge/session/${sessionId}/respond`,
-      { approved, residentId }
-    );
+    visitId: string
+  ): Promise<RespondToVisitorResponse> {
+    const response = await api.post<RespondToVisitorResponse>(sessionPath(sessionId, 'respond'), {
+      approved,
+      visitId,
+    });
     return response.data;
   }
 }
-
-export default ConciergeAPI;

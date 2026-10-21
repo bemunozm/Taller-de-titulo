@@ -1,16 +1,20 @@
 import { VisitStatus } from './entities/visit.entity';
+import { LPR_MATCHABLE } from './visit-state-machine';
 
 /**
- * Limpieza post-auditoría (dedup DUP2): mismo `Set<VisitStatus>` que estaba
- * duplicado en `agent/tools/abrir-acceso.tool.ts` (ahí como criterio de
- * "visita pre-aprobada vigente" para la política de autonomía condicional) y
- * en `agent/tools/consultar-visitas.tool.ts` (ahí como criterio de "visita
- * activa" para el filtro por default) — ambos usan exactamente el mismo
- * criterio subyacente: la visita NO llegó a un estado terminal (completed/
- * cancelled/expired/denied).
+ * Visitas AUTORIZADAS que todavía no llegaron a un estado terminal: programada
+ * (`PENDING`), en curso (`ACTIVE`) o lista para reingresar
+ * (`READY_FOR_REENTRY`).
+ *
+ * Lo usan `agent/tools/abrir-acceso.tool.ts` (criterio de "visita
+ * pre-aprobada vigente" de la política de autonomía) y
+ * `agent/tools/consultar-visitas.tool.ts` (filtro por defecto).
+ *
+ * NO incluye `AWAITING_APPROVAL` (Fase 4 · P3): aunque no es terminal, es una
+ * solicitud que el residente todavía no aprueba. Si estuviera acá, una
+ * solicitud del conserje digital contaría como pase directo para la apertura
+ * autónoma. Mismo conjunto que acepta el LPR (`LPR_MATCHABLE`).
  */
-export const NON_TERMINAL_VISIT_STATUSES = new Set<VisitStatus>([
-  VisitStatus.PENDING,
-  VisitStatus.ACTIVE,
-  VisitStatus.READY_FOR_REENTRY,
-]);
+export const NON_TERMINAL_VISIT_STATUSES: ReadonlySet<VisitStatus> = new Set(
+  LPR_MATCHABLE,
+);

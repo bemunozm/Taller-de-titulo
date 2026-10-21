@@ -146,7 +146,7 @@ export default function PinCode({
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => handlePinChange(index, e.target.value)}
               onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => handleKeyDown(index, e)}
               className={clsx(
-                // Tamaño ajustado para coincidir con el RegisterView
+                // Tamaño de las casillas del PIN
                 "w-10 h-11",           // base (mobile first)
                 "sm:w-11 sm:h-12",     // sm (640px+)
                 

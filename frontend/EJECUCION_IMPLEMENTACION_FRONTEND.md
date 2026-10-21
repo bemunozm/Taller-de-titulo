@@ -214,26 +214,30 @@ CameraPlayer                 Frontend API           Backend          MediaMTX
 [Renderizar video en <video>]   |                    |                |
 ```
 
-**3. Notificaciones en Tiempo Real**
+**3. Notificaciones en Tiempo Real** (modelo vigente: Fase 4 · P6)
 
 ```
 Frontend                    WebSocket Gateway          Notifications Service
+(RealtimeConnection)               |                            |
     |                              |                            |
-    |--- connect(token) ---------->|                            |
+    |--- io(VITE_WS_URL,           |                            |
+    |     withCredentials) ------->|                            |
+    |    [cookie de sesión]        |                            |
+    |                      [Middleware: valida la cookie        |
+    |                       de better-auth ANTES del CONNECT;   |
+    |                       sin sesión → connect_error          |
+    |                       'unauthorized']                     |
     |                              |                            |
-    |                      [Validar JWT token]                  |
-    |                              |                            |
-    |<--- socket.emit('connect')---|                            |
-    |                              |                            |
-    |--- emit('register') -------->|                            |
-    |    { userId }                |                            |
-    |                              |                            |
-    |<--- emit('register')---------|                            |
-    |    { success: true }         |                            |
-    |                              |                            |
+    |                      [El servidor asigna las salas:       |
+    |                       user:<id>, session:<id> y, con      |
+    |                       detections.read + view-all,         |
+    |                       org:<id>:security]                  |
+    |<--- 'connect' ---------------|                            |
+    |   (el cliente no emite nada: |                            |
+    |    sin register ni join_room)|                            |
     |                              |                            |
     |                              |<--- emit('notification') --|
-    |                              |    to(userId)              |
+    |                              |    to('user:<id>')         |
     |                              |    payload: {...}          |
     |                              |                            |
     |<--- on('notification')-------|                            |
@@ -248,6 +252,14 @@ Frontend                    WebSocket Gateway          Notifications Service
     |--- POST /visits/:id/approve->|                            |
     |                              |                            |
     |<--- { success: true } -------|                            |
+    |                              |                            |
+    |              [Logout, expiración o revocación de la sesión]|
+    |<--- 'session:ended'          |                            |
+    |     { reason }               |                            |
+    |<--- io server disconnect ----|                            |
+    |                              |                            |
+[Revalida GET /auth/user: sin sesión → no reintenta, espera     |
+ un nuevo login; con sesión → hasta 3 reintentos con backoff]   |
 ```
 
 **4. Operaciones CRUD con React Query**
@@ -677,156 +689,95 @@ export async function createVisit(visit: Partial<Visit>): Promise<Visit> {
 
 **Descripción**: Socket.io Client es la librería cliente para establecer conexiones WebSocket con el backend. Proporciona fallback automático a polling, reconexión automática, y soporte para rooms.
 
-**Servicio WebSocket** (services/WebSocketService.ts):
+**Modelo vigente (Fase 4 · P6):** un solo socket por pestaña, autenticado con la
+cookie de sesión de better-auth en el handshake. Las salas las asigna el
+servidor (`user:<id>`, `session:<id>` y, con `detections.read` +
+`condominium.view-all`, `org:<id>:security`; nunca para el super-admin). El
+cliente no emite nada: ya no existen `register`, `join_room`/`leave_room`,
+`visitor:arrival` ni `security:anomaly_detected`.
+
+**Servicio WebSocket** (`services/WebSocketService.ts`, extracto):
 ```typescript
-import { io, Socket } from 'socket.io-client'
-import type { NotificationPayload } from '@/types/index'
-
-class WebSocketService {
-  private socket: Socket | null = null
-  private listeners: Set<NotificationCallback> = new Set()
-  private reconnectAttempts = 0
-  private maxReconnectAttempts = 5
-
-  /**
-   * Conecta al servidor WebSocket con autenticación JWT
-   */
-  connect(token: string): void {
-    if (this.socket?.connected) {
-      console.log('[WebSocket] Ya está conectado')
-      return
-    }
-
-    const wsUrl = import.meta.env.VITE_WS_URL || 'http://localhost:3000'
-
-    this.socket = io(wsUrl, {
-      auth: { token },
+export class WebSocketService {
+  /** Idempotente para el mismo usuario; con otro usuario cierra el socket anterior. */
+  connect(session: { userId: string; verifySession: () => Promise<boolean> }): void {
+    // ...
+    const socket = this.createSocket(url, {
+      withCredentials: true, // cookie de sesión en el handshake
       transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionAttempts: this.maxReconnectAttempts,
-      reconnectionDelay: 3000,
+      reconnection: true, // cortes de red: socket.io reintenta solo
+      reconnectionDelay: REALTIME_RECONNECT_DELAY_MS,
+      reconnectionDelayMax: REALTIME_RECONNECT_DELAY_MAX_MS,
     })
 
-    this.setupListeners()
+    socket.on('connect_error', () => {
+      // Rechazo del middleware ('unauthorized'): socket.io no reintenta.
+      if (!socket.active) this.handleServerEnded(socket)
+    })
+    socket.on('disconnect', (reason) => {
+      // Fin de sesión (el servidor antes envía 'session:ended { reason }').
+      if (reason === 'io server disconnect') this.handleServerEnded(socket)
+    })
+    socket.on('notification', (payload: unknown) => { /* a onNotification(...) */ })
+    socket.on('security:anomaly_highlight', (payload: unknown) => { /* a onAnomalyHighlight(...) */ })
   }
 
   /**
-   * Configura los listeners de eventos del socket
+   * Revalida la sesión por HTTP: si ya no vale, queda en 'session-ended' sin
+   * reintentar (espera un nuevo login); si sigue vigente, hasta 3 reintentos
+   * con backoff (2 s, 4 s, 8 s).
    */
-  private setupListeners(): void {
-    if (!this.socket) return
+  private handleServerEnded(socket: Socket): void { /* ... */ }
 
-    this.socket.on('connect', () => {
-      console.log('[WebSocket] Conectado exitosamente')
-      this.reconnectAttempts = 0
-    })
-
-    this.socket.on('disconnect', (reason) => {
-      console.log('[WebSocket] Desconectado:', reason)
-    })
-
-    this.socket.on('notification', (payload: NotificationPayload) => {
-      console.log('[WebSocket] 📬 Notificación recibida:', payload)
-      this.notifyListeners(payload)
-    })
-
-    this.socket.on('visitor:arrival', (data: any) => {
-      console.log('[WebSocket] 🚗 Visitante llegó:', data)
-      this.notifyVisitorApprovalListeners(data)
-    })
-  }
-
-  /**
-   * Registra el usuario en el servidor WebSocket
-   */
-  registerUser(userId: string): void {
-    if (!this.socket?.connected) {
-      console.warn('[WebSocket] Socket no conectado')
-      return
-    }
-
-    console.log('[WebSocket] Registrando usuario:', userId)
-    this.socket.emit('register', { userId })
-  }
-
-  /**
-   * Suscribe un callback para recibir notificaciones
-   */
-  onNotification(callback: NotificationCallback): () => void {
-    this.listeners.add(callback)
-    return () => this.listeners.delete(callback)
-  }
-
-  /**
-   * Notifica a todos los listeners suscritos
-   */
-  private notifyListeners(payload: NotificationPayload): void {
-    this.listeners.forEach(listener => {
-      try {
-        listener(payload)
-      } catch (error) {
-        console.error('[WebSocket] Error en listener:', error)
-      }
-    })
-  }
-
-  /**
-   * Desconecta el socket
-   */
-  disconnect(): void {
-    if (this.socket) {
-      this.socket.disconnect()
-      this.socket = null
-    }
-  }
+  disconnect(): void { /* logout, sin sesión o kiosko; conserva los suscriptores */ }
+  onNotification(handler: (payload: unknown) => void): () => void { /* ... */ }
+  onAnomalyHighlight(handler: (highlight: AnomalyHighlight) => void): () => void { /* ... */ }
+  getStatus(): RealtimeStatus { /* idle | connecting | connected | reconnecting | session-ended */ }
 }
 
 export const webSocketService = new WebSocketService()
 ```
 
-**Integración en Hook Personalizado**:
-```typescript
-// hooks/useNotifications.ts
-import { useEffect } from 'react'
-import { webSocketService } from '@/services/WebSocketService'
-import { useAuth } from './useAuth'
+**Dueño único del socket** (`components/RealtimeConnection.tsx`, montado en `router.tsx`):
+```tsx
+export function RealtimeConnection() {
+  const { pathname } = useLocation()
+  // El kiosko es un dispositivo público: ahí ni se consulta la sesión humana.
+  return isKioskRoute(pathname) ? <RealtimeOff /> : <SessionRealtimeConnection />
+}
 
-export function useNotifications() {
-  const { data: user } = useAuth()
+function SessionRealtimeConnection() {
+  const queryClient = useQueryClient()
+  const { data: user, isError } = useAuth()
+  const sessionUserId = user && !isError ? user.id : undefined
 
   useEffect(() => {
-    if (!user?.id) return
-
-    // Obtener token y conectar
-    const token = localStorage.getItem('AUTH_TOKEN')
-    if (token) {
-      webSocketService.connect(token)
-      webSocketService.registerUser(user.id)
-    }
-
-    // Suscribirse a notificaciones
-    const unsubscribe = webSocketService.onNotification((payload) => {
-      // Invalidar cache de React Query para refrescar notificaciones
-      queryClient.invalidateQueries({ queryKey: ['notifications', user.id] })
-      
-      // Mostrar notificación del navegador si está permitido
-      if (Notification.permission === 'granted') {
-        new Notification(payload.title, {
-          body: payload.message,
-          icon: '/logo.png',
-        })
-      }
-    })
-
-    return () => {
-      unsubscribe()
+    if (sessionUserId === undefined) {
       webSocketService.disconnect()
+      return
     }
-  }, [user?.id])
+    webSocketService.connect({
+      userId: sessionUserId,
+      verifySession: () => isSessionOwnedBy(queryClient, sessionUserId), // GET /auth/user
+    })
+  }, [sessionUserId, queryClient])
 
-  // ... resto del hook
+  // Único suscriptor de 'notification': notificación del navegador + refresco de la lista.
+  useEffect(() => {
+    if (sessionUserId === undefined) return
+    return webSocketService.onNotification((payload) => {
+      showBrowserNotification(payload)
+      void queryClient.invalidateQueries({ queryKey: ['notifications', sessionUserId] })
+    })
+  }, [sessionUserId, queryClient])
+
+  return null
 }
 ```
+
+`useNotifications` ya no conecta: entrega la lista, las mutaciones y
+`isConnected` (estado del servicio vía `useSyncExternalStore`). `useAuth().logout()`
+cierra el socket antes de `sign-out`.
 
 ### 2.7 Tailwind CSS - Framework de Estilos
 
@@ -1645,17 +1596,20 @@ El sistema de notificaciones combina WebSocket para entrega en tiempo real, Reac
 
 ```typescript
 // hooks/useNotifications.ts
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useSyncExternalStore } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { webSocketService } from '@/services/WebSocketService'
 import { NotificationsAPI } from '@/api/NotificationsAPI'
 import { useAuth } from './useAuth'
 
+const subscribeToRealtimeStatus = (onChange: () => void) => webSocketService.onStatusChange(onChange)
+const getRealtimeStatus = () => webSocketService.getStatus()
+
 export function useNotifications() {
   const { data: user } = useAuth()
   const queryClient = useQueryClient()
-  const [isConnected, setIsConnected] = useState(false)
-  const hasConnected = useRef(false)
+  // Estado del socket único; la conexión la gobierna RealtimeConnection.
+  const isConnected = useSyncExternalStore(subscribeToRealtimeStatus, getRealtimeStatus) === 'connected'
 
   // Query para obtener notificaciones
   const { data: notificationsResponse, isLoading } = useQuery({
@@ -1683,44 +1637,9 @@ export function useNotifications() {
 
   const unreadCount = notificationsResponse?.unreadCount || 0
 
-  // Conectar WebSocket cuando el usuario está autenticado
-  useEffect(() => {
-    if (!user?.id || hasConnected.current) return
-
-    const token = localStorage.getItem('AUTH_TOKEN')
-    if (!token) return
-
-    console.log('[useNotifications] 🔌 Conectando WebSocket...')
-    webSocketService.connect(token)
-    webSocketService.registerUser(user.id)
-    setIsConnected(true)
-    hasConnected.current = true
-
-    // Suscribirse a notificaciones
-    const unsubscribe = webSocketService.onNotification((payload) => {
-      console.log('[useNotifications] 📬 Nueva notificación:', payload)
-      
-      // Invalidar cache para refrescar
-      queryClient.invalidateQueries({ queryKey: ['notifications', user.id] })
-      
-      // Mostrar notificación del navegador
-      if (Notification.permission === 'granted') {
-        new Notification(payload.title, {
-          body: payload.message,
-          icon: '/logo.png',
-          badge: '/badge.png',
-        })
-      }
-    })
-
-    return () => {
-      console.log('[useNotifications] 🔌 Desconectando WebSocket...')
-      unsubscribe()
-      webSocketService.disconnect()
-      hasConnected.current = false
-      setIsConnected(false)
-    }
-  }, [user?.id, queryClient])
+  // Sin conexión ni suscripción aquí: RealtimeConnection (a nivel de app) es
+  // el único que conecta el socket y el único suscriptor de 'notification'
+  // (refresca ['notifications', userId] y muestra la notificación del navegador).
 
   // Mutation para marcar como leída
   const markAsReadMutation = useMutation({
@@ -2180,47 +2099,23 @@ export default function LoginView() {
 
 **Escenario**: La conexión WebSocket se pierde por problemas de red o reinicio del servidor.
 
-**Detección y Reconexión**:
+**Detección y Reconexión** (modelo vigente, `services/WebSocketService.ts`):
 
-```typescript
-// services/WebSocketService.ts
-private setupListeners(): void {
-  this.socket.on('disconnect', (reason) => {
-    console.log('[WebSocket] Desconectado:', reason)
-    this.isConnected = false
-    
-    if (!this.isIntentionalDisconnect) {
-      if (reason === 'io server disconnect') {
-        // Servidor cerró la conexión, reconectar manualmente
-        console.log('[WebSocket] Intentando reconectar...')
-        this.attemptReconnect()
-      }
-      // Para otros casos, socket.io reconecta automáticamente
-    }
-  })
+| Situación | Señal de socket.io | Comportamiento del cliente |
+|---|---|---|
+| Corte de red / reinicio del servidor | `connect_error` o `disconnect` con el socket **activo** (`transport close`, etc.) | socket.io reintenta solo (2 s → máx. 30 s, sin tope); cada reconexión vuelve a validar la cookie en el handshake. Estado `reconnecting`. |
+| Handshake rechazado | `connect_error` con `unauthorized` y el socket **inactivo** | No reintenta a ciegas: revalida la sesión con `GET /auth/user`. |
+| Fin de sesión (logout, expiración, revocación) | `session:ended { reason }` y luego `disconnect` con `io server disconnect` | Igual: revalida la sesión antes de cualquier reintento. |
+| Logout local | `useAuth().logout()` → `webSocketService.disconnect()` | Cierra el socket; estado `idle`. |
 
-  this.socket.on('connect_error', (error) => {
-    console.error('[WebSocket] Error de conexión:', error.message)
-    this.reconnectAttempts++
-    
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('[WebSocket] Máximo de reintentos alcanzado')
-      
-      // Notificar al usuario
-      toast.error('No se pudo establecer conexión con el servidor. Funcionalidades en tiempo real deshabilitadas.')
-    }
-  })
-}
-
-private attemptReconnect(): void {
-  if (this.reconnectAttempts < this.maxReconnectAttempts) {
-    setTimeout(() => {
-      console.log(`[WebSocket] Reintento ${this.reconnectAttempts + 1}/${this.maxReconnectAttempts}`)
-      this.socket?.connect()
-    }, this.reconnectDelay)
-  }
-}
-```
+Tras la revalidación:
+- **Sesión inválida** → `session-ended`, sin socket hasta el próximo login. La
+  revalidación usa la query `['user']`, así que la app también ve la sesión
+  caída y el layout redirige al login.
+- **Sesión aún válida** → hasta 3 reintentos con backoff (2 s, 4 s, 8 s,
+  ±20 %). El presupuesto se reinicia tras 30 s de conexión estable; agotado,
+  queda en `session-ended` (sin bucle) y la lista sigue llegando por el
+  refresco de 60 s.
 
 **Indicador Visual de Estado de Conexión**:
 

@@ -99,19 +99,28 @@ Internet ─► Firewall ─► Red DMZ ─► Raspberry Pi 3
 ### Variables de Entorno Backend
 
 ```bash
-# .env en backend NestJS
+# .env en backend NestJS (ver backend/.env.example)
 
-# Hub Configuration
-HUB_SECRET=your-super-secret-shared-key-change-me
-HUB_HEARTBEAT_TIMEOUT_MS=60000
+PORT=3000
 
-# WebSocket
-WEBSOCKET_CORS_ORIGIN=* # O IP específica del Hub
-WEBSOCKET_PORT=3000
+# Orígenes del WebSocket: los controla VigiliaIoAdapter con FRONTEND_URL
+# (https:// obligatorio en producción). NO existe WEBSOCKET_CORS_ORIGIN ni
+# se usa "*". El hub es un cliente Node sin cabecera Origin: el adapter lo
+# acepta, pero igual debe autenticarse en el namespace /hub (ver
+# "Autenticación del Backend").
+FRONTEND_URL=https://app.vigilia.example.cl
 
 # Database
-DATABASE_URL=postgresql://user:pass@localhost:5432/vigilia
+DB_HOST=localhost
+DB_PORT=5455
+DB_USER=...
+DB_PASSWORD=...
+DB_NAME=...
 ```
+
+> El hub **no** usa un `HUB_SECRET` en el `.env` del backend: cada hub tiene su
+> propio secret, que se crea al provisionarlo y del que el backend solo guarda
+> el hash (sección "Autenticación del Backend").
 
 ### Firewall Rules (Backend)
 
@@ -194,31 +203,158 @@ sudo ufw status
 
 ### 3. Autenticación del Backend
 
-El Hub se autentica con el backend usando **HUB_SECRET**:
+Cada hub tiene su **propio secret**; no hay un `HUB_SECRET` global compartido.
 
-```typescript
-// Backend: src/hub/hub.gateway.ts
-async handleConnection(client: Socket) {
-  const { hubId, secret } = client.handshake.auth;
-  
-  if (secret !== process.env.HUB_SECRET) {
-    client.disconnect();
-    throw new UnauthorizedException('Invalid hub secret');
-  }
-}
+**Provisionar un hub** (una vez por equipo), con un usuario con el permiso
+`platform.manage-hubs` (Super Administrador):
+
+```bash
+curl -X POST https://vigilia.example.cl/api/v1/hubs \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{
+    "hubId": "hub-main-entrance",
+    "location": "Edificio A - Panel de Calle",
+    "organizationId": "<uuid del condominio>",
+    "type": "physical-hub",
+    "description": "opcional"
+  }'
 ```
+
+- `hubId`: letras, números, `-` y `_` (máx. 64); es el `HUB_ID` del `.env`.
+- `type` es opcional: `physical-hub` (default, Raspberry Pi con relés) o
+  `web-kiosk` (totem web, sin relés). `description` es opcional (máx. 128).
+- Un hub sirve a **un** condominio (`organizationId`); sin él el citófono no
+  ve unidades ni residentes.
+- La respuesta incluye `secret` en texto plano **una sola vez**: cópialo al
+  `HUB_SECRET` del `.env` de ese hub (`chmod 600`). En la base de datos solo
+  queda `secretHash`; si se pierde, no hay forma de recuperarlo, hay que rotarlo.
+
+**Rotar el secret** (pérdida o sospecha de compromiso):
+
+```bash
+curl -X POST https://vigilia.example.cl/api/v1/hubs/hub-main-entrance/rotate-secret \
+  -H "Authorization: Bearer <token>"
+```
+
+Invalida el secret anterior, **desconecta el socket** del hub y devuelve el
+nuevo secret (también una sola vez). Actualiza el `.env` del hub y reinicia
+`vigilia-hub`. Desactivar el hub o cambiar su `type` / `organizationId`
+(`PATCH /api/v1/hubs/:hubId`) también corta su socket.
+
+**Cómo se autentica el hub:**
+
+- WebSocket: se conecta al namespace `/hub` con
+  `auth: { hubId, hubSecret }`; el backend lo valida en el middleware del
+  namespace contra el `secretHash` del hub activo, antes de aceptar la conexión.
+- HTTP (`/concierge/*`, `/units/ai-enabled`): cabeceras `X-Hub-Id` y
+  `X-Hub-Secret`, que `HubAuthGuard` verifica contra ese mismo hub.
+- Los orígenes del socket los controla `VigiliaIoAdapter` con `FRONTEND_URL`
+  (el hub, al no ser un navegador, no envía `Origin`).
+
+Referencia: `backend/src/hub/hub.controller.ts`, `hub.gateway.ts` y
+`guards/hub-auth.guard.ts`.
 
 ### 4. TLS/SSL
 
-Si el backend usa HTTPS:
+Desde la Fase 4 · P6.M el hub **exige** `https://` en producción
+(`src/config.ts`): con `NODE_ENV=production` (o `staging`, o sin `NODE_ENV`)
+no arranca si `BACKEND_URL` es `http://`. El WebSocket usa `wss://`, derivado
+de la misma URL. Ver la sección siguiente para la LAN del piloto.
+
+### 5. TLS en la LAN del piloto
+
+En el piloto el backend corre en un servidor de la LAN del condominio, sin
+nombre público. El hub habla con él por TLS a través de un **reverse proxy con
+certificado** delante del backend (Node no termina TLS):
+
+```
+Raspberry (vigilia-hub) ──https/wss──▶ reverse proxy :443 ──http──▶ backend 127.0.0.1:3000
+```
+
+1. **Nombre y certificado.** Elige un nombre estable para el servidor (p. ej.
+   `vigilia.lan`, resuelto por el DNS del router o en `/etc/hosts` de la
+   Raspberry) y emite un certificado para ese nombre:
+   - con una **CA propia** (p. ej. `step-ca`, `mkcert` o la CA interna de
+     Caddy: `tls internal`), o
+   - con un dominio público y desafío DNS de Let's Encrypt (sin abrir puertos).
+2. **Reverse proxy** (Caddy o nginx) en el servidor:
+   - escucha en `:443` y reenvía a `http://127.0.0.1:3000`;
+   - reenvía el *upgrade* de WebSocket (`/socket.io/`, namespaces `/` y `/hub`);
+   - **no** expone `/api/v1/internal/` (lo usa solo MediaMTX, por loopback);
+   - en el backend: `TRUST_PROXY=1`.
+
+   Ejemplo con Caddy y CA interna:
+
+   ```caddyfile
+   vigilia.lan {
+     tls internal
+     @internal path /api/v1/internal/*
+     respond @internal 404
+     reverse_proxy 127.0.0.1:3000
+   }
+   ```
+3. **Confianza en la Raspberry** (solo si la CA es propia). Copia el
+   certificado **raíz** de la CA (no la clave) a `/etc/vigilia/ca.crt` y
+   agrégalo a la unidad systemd:
+
+   ```ini
+   Environment="NODE_EXTRA_CA_CERTS=/etc/vigilia/ca.crt"
+   ```
+
+   Node lo lee al arrancar y lo usan tanto `axios` (HTTPS) como socket.io
+   (`wss`). **Nunca** uses `NODE_TLS_REJECT_UNAUTHORIZED=0`.
+4. **`.env` del hub:** `NODE_ENV=production` y `BACKEND_URL=https://vigilia.lan`
+   (solo el origen, sin `/api/v1`).
+5. **Verificación** (en la Raspberry):
+
+   ```bash
+   # Cadena válida para el nombre: "Verify return code: 0 (ok)"
+   openssl s_client -connect vigilia.lan:443 -servername vigilia.lan \
+     -CAfile /etc/vigilia/ca.crt </dev/null | grep "Verify return code"
+
+   # El backend responde por HTTPS con la CA y acepta la credencial del hub:
+   # HTTP 200 con {hubId, type, organizationId}; 401 si hubId/secret son
+   # incorrectos (límite: 10/min). No hay un /health público: este endpoint
+   # valida TLS y credencial a la vez. Las credenciales se leen del .env y el
+   # secret viaja por stdin (no queda en el historial ni en `ps`).
+   HUB_ID=$(grep '^HUB_ID=' /opt/vigilia-hub/.env | cut -d= -f2-)
+   grep '^HUB_SECRET=' /opt/vigilia-hub/.env | sed 's/^HUB_SECRET=/X-Hub-Secret: /' \
+     | curl -sS --cacert /etc/vigilia/ca.crt https://vigilia.lan/api/v1/concierge/device \
+         -H "X-Hub-Id: $HUB_ID" -H @- -w '\nHTTP %{http_code}\n'
+
+   # Node confía en la CA igual que el hub (cualquier respuesta HTTP, incluso 401,
+   # prueba que el TLS valida; un error de certificado lanza excepción)
+   NODE_EXTRA_CA_CERTS=/etc/vigilia/ca.crt node -e \
+     "fetch('https://vigilia.lan/api/v1/concierge/device').then(r => console.log(r.status))"
+
+   # El hub conectó por wss
+   sudo journalctl -u vigilia-hub -n 50 | grep -E "Conectando a wss://|Conectado al backend"
+   ```
+
+   Si el hub no arranca, el log dice qué variable falla (nunca su valor).
+
+### 6. Verificación de hardware: pigpio y usuario del servicio
+
+La unidad systemd corre como `User=pi` (no root), con acceso a GPIO por
+`/dev/gpiomem`. El autor de `pigpio` indica que las aplicaciones que lo usan
+suelen correr como root, y esto **no se ha probado en hardware**: verifícalo
+la primera vez que arranques el servicio en la Raspberry.
 
 ```bash
-# .env en Hub
-BACKEND_URL=https://api.vigilia.com:3000
-
-# Verificar certificados
-curl -v https://api.vigilia.com:3000/health
+sudo systemctl restart vigilia-hub
+sudo journalctl -u vigilia-hub -n 100 | grep -i "pigpio"
 ```
+
+- El log **no** debe mostrar `pigpio no se pudo cargar o inicializar`.
+- Si lo muestra, relés y teclado quedan **simulados** y el portón **no abre**.
+  Cambia `User=pi` por `User=root` en `/etc/systemd/system/vigilia-hub.service`
+  (y quita `SupplementaryGroups`/`Group` si estorban), **conservando todo el
+  endurecimiento** (`NoNewPrivileges`, `ProtectSystem=strict`,
+  `ReadWritePaths`, etc.; ahora es la única barrera), y haz
+  `sudo systemctl daemon-reload && sudo systemctl restart vigilia-hub`.
+  El `.env` debe seguir en `chmod 600`; si pasa a root, `chown root:root`.
+- Complementa con `npm run test:relays` y `npm run test:keypad` antes de
+  dejarlo en servicio.
 
 ---
 
@@ -321,11 +457,12 @@ git pull origin main
 
 # O copiar archivos manualmente
 
-# Reinstalar dependencias
-npm install
+# Reinstalar dependencias (reproducible, según package-lock.json)
+npm ci
 
-# Recompilar
+# Recompilar (necesita las devDependencies) y quitarlas después
 npm run build
+npm prune --omit=dev
 
 # Reiniciar
 sudo systemctl start vigilia-hub
@@ -342,8 +479,9 @@ echo "✅ Actualización completada"
 ```bash
 # Si la actualización falla, hacer rollback
 git reset --hard HEAD~1
-npm install
+npm ci
 npm run build
+npm prune --omit=dev
 sudo systemctl restart vigilia-hub
 ```
 
@@ -363,18 +501,22 @@ Backend
 
 ### Configuración para cada Hub
 
+Cada hub se provisiona por separado (`POST /api/v1/hubs`, ver "Autenticación
+del Backend") y recibe **su propio** secret. Nunca se reutiliza un secret entre
+hubs: si uno se compromete, se rota solo ese (`rotate-secret`).
+
 ```bash
 # Hub 1: /opt/vigilia-hub/.env
 HUB_ID=hub-main-entrance
-HUB_SECRET=shared-secret-all-hubs
+HUB_SECRET=<secret devuelto al provisionar hub-main-entrance>
 
 # Hub 2: /opt/vigilia-hub/.env
 HUB_ID=hub-parking
-HUB_SECRET=shared-secret-all-hubs
+HUB_SECRET=<secret devuelto al provisionar hub-parking>
 
 # Hub 3: /opt/vigilia-hub/.env
 HUB_ID=hub-pedestrian
-HUB_SECRET=shared-secret-all-hubs
+HUB_SECRET=<secret devuelto al provisionar hub-pedestrian>
 ```
 
 ---
@@ -398,6 +540,11 @@ NODE_ENV=staging
 BACKEND_URL=https://staging.vigilia.com:3000
 HUB_ID=hub-staging-test
 ```
+
+> **Fase 4 · P6.M:** `staging` (y cualquier valor distinto de `development` o
+> `test`, o `NODE_ENV` ausente) aplica las **reglas de producción**:
+> `https://` obligatorio, `HUB_ID` y `HUB_SECRET` obligatorios y
+> `DEBUG_OPENAI_KEY` prohibida. Solo `NODE_ENV=development` acepta `http://`.
 
 ### Production
 
@@ -481,7 +628,8 @@ CACHE_TTL_SECONDS=300
 ## ✅ Checklist de Deployment
 
 - [ ] Raspberry Pi actualizado (apt upgrade)
-- [ ] Node.js 18+ instalado
+- [ ] Raspberry Pi OS 64-bit (`uname -m` = `aarch64`; 32-bit no soportado)
+- [ ] Node.js 22 LTS (>= 22.12) instalado
 - [ ] Dependencias del sistema (ALSA, Sox)
 - [ ] Proyecto compilado (npm run build)
 - [ ] .env configurado con valores reales

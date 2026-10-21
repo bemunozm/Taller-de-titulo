@@ -1,5 +1,12 @@
-import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
-import { User } from '../../users/entities/user.entity';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  ManyToOne,
+  CreateDateColumn,
+  UpdateDateColumn,
+  Index,
+} from 'typeorm';
 import { Visit } from '../../visits/entities/visit.entity';
 
 export enum SessionStatus {
@@ -9,7 +16,20 @@ export enum SessionStatus {
   TIMEOUT = 'timeout',
 }
 
+/**
+ * Residente notificado de una solicitud del conserje digital. Fase 4 · P7.R:
+ * `name` queda en `null` cuando la sesión se anonimiza (se conserva el `id`).
+ */
+export interface NotifiedResident {
+  id: string;
+  name: string | null;
+}
+
 @Entity({ name: 'concierge_sessions' })
+// Fase 4 · P7.R: índice parcial del barrido de retención (fecha de cierre,
+// solo filas sin anonimizar). Lo crea la migración PrivacyRetention;
+// `synchronize: false` evita que `migration:check` lo reporte o lo borre.
+@Index('IDX_concierge_sessions_retention_candidates', { synchronize: false })
 export class ConciergeSession {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -39,12 +59,24 @@ export class ConciergeSession {
   @Column({ type: 'varchar', length: 50, nullable: true })
   destinationHouse: string | null;
 
-  // Residentes contactados (todos los miembros de la familia)
+  // Residentes contactados (todos los miembros de la familia). Fase 4 · P4:
+  // sin el campo `responded` (nunca se actualizaba; quién respondió vive en
+  // `visits.respondedById`). Las filas viejas que lo traen son inocuas.
   @Column({ type: 'jsonb', nullable: true })
-  residentsNotified: Array<{ id: string; name: string; responded: boolean }> | null;
+  residentsNotified: NotifiedResident[] | null;
 
   @Column({ type: 'varchar', length: 20, nullable: true })
   residentResponse: 'approved' | 'denied' | 'pending' | null;
+
+  /**
+   * Fase 4 · P4: resultado EFECTIVO de una respuesta aprobada: `true` solo si
+   * el ingreso quedó registrado por esta respuesta Y un hub físico recibió la
+   * orden de apertura. `null` mientras no hay respuesta aprobada o mientras
+   * se procesa (lo lee `/status`, el respaldo por polling del kiosko). Se
+   * escribe junto con `residentResponse`, después de decidir la apertura.
+   */
+  @Column({ type: 'boolean', nullable: true })
+  entryRegistered: boolean | null;
 
   // Socket del visitante/agente para notificaciones en tiempo real
   @Column({ type: 'varchar', length: 64, nullable: true })
@@ -86,6 +118,15 @@ export class ConciergeSession {
 
   @Column({ type: 'timestamptz', nullable: true })
   endTime: Date | null;
+
+  /**
+   * Fase 4 · P7.R (Ley 21.719): cuándo se anonimizó la sesión terminal (datos
+   * del visitante a null, nombres de `residentsNotified` a null conservando
+   * los ids, `transcript`/`functionCalls` = []), por retención
+   * (`RETENTION_VISITS_DAYS`) o por supresión. `null` = sin anonimizar.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  anonymizedAt: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

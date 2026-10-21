@@ -34,7 +34,7 @@ class LprWorker:
         self.plate_sightings = {}
         self.emitted_cache = {}
         # executor para procesar frames asincrónicamente y future de control
-        max_workers = int(os.environ.get('LPR_MAX_WORKERS', '1'))
+        max_workers = int(settings.LPR_MAX_WORKERS)
         try:
             self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
         except Exception:
@@ -145,7 +145,8 @@ class LprWorker:
         `count` refleja el paso ACTUAL de un vehículo y no su historia completa
         —sin esto, desde el 2º avistamiento histórico cualquier patente se
         confirmaba en un solo frame—. `emitted_cache` se limpia pasada la
-        ventana de dedupe, cuando ya no sirve.
+        ventana de dedupe desde la última lectura (el dedupe es deslizante),
+        cuando ya no sirve.
         """
         ttl = float(settings.LPR_SIGHTING_TTL_SECONDS)
         dedup = float(settings.LPR_DEDUP_SECONDS)
@@ -223,12 +224,17 @@ class LprWorker:
                     except Exception:
                         logging.exception('No se pudo guardar crop lowq')
                 continue
-            # dedupe
+            # dedupe DESLIZANTE: una lectura descartada refresca la marca, así
+            # que la ventana corre desde la ÚLTIMA lectura y no desde la
+            # emisión. Un auto detenido frente a la cámara no vuelve a emitir
+            # cada LPR_DEDUP_SECONDS (cada re-emisión era un evento nuevo para
+            # el backend, que no sabe si es entrada o salida).
             dedup_seconds = float(settings.LPR_DEDUP_SECONDS)
             now_ts = time.time()
-            last_emitted = self.emitted_cache.get(plate_clean)
-            if plate_clean and last_emitted and (now_ts - last_emitted) < dedup_seconds:
-                logging.info('Placa "%s" duplicada - emitida hace %.1fs', plate_clean, now_ts - last_emitted)
+            last_seen = self.emitted_cache.get(plate_clean)
+            if plate_clean and last_seen and (now_ts - last_seen) < dedup_seconds:
+                logging.info('Placa "%s" duplicada - vista hace %.1fs', plate_clean, now_ts - last_seen)
+                self.emitted_cache[plate_clean] = now_ts
                 continue
 
             # sightings
@@ -315,8 +321,11 @@ class LprWorker:
                 # subir la detección a Cloudinary si está configurado
                 if bool(settings.CLOUDINARY_UPLOAD):
                     try:
-                        from lpr.storage.fs_storage import upload_to_cloudinary
-                        public_id = f"{self.cfg.camera_id}_det_{int(time.time())}"
+                        from lpr.storage.fs_storage import (
+                            CLOUDINARY_FRAMES_FOLDER,
+                            upload_to_cloudinary,
+                        )
+                        public_id = f"{CLOUDINARY_FRAMES_FOLDER}/{self.cfg.camera_id}_det_{int(time.time())}"
                         try:
                             remote_url = upload_to_cloudinary(det_path, public_id=public_id)
                             # update payload to point to remote detection image

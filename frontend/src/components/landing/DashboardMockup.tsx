@@ -61,7 +61,8 @@ export default function DashboardMockup() {
                     <div className="p-8 rounded-[40px] border border-white/5 bg-zinc-900/80 shadow-inner flex flex-col justify-between">
                        <div>
                           <p className="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-2">Visitor Analytics</p>
-                          <h4 className="text-2xl font-black text-white tracking-tighter">+420% Accuracy</h4>
+                          {/* Antes "+420% Accuracy": una cifra sin medición que la respalde. */}
+                          <h4 className="text-2xl font-black text-white tracking-tighter">Visitas por día</h4>
                        </div>
                        <div className="flex items-end gap-1 h-32 mt-8">
                           {[40, 60, 45, 80, 55, 90, 70].map((h, i) => (

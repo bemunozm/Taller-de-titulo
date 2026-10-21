@@ -1,5 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { isToolAvailableFor } from './tool-access.util';
 import { VIGILIA_TOOLS } from './tool-registry.token';
+import type { AuthorizedContext } from './types/authorized-context.type';
 import type { VigiliaTool } from './types/vigilia-tool.type';
 
 /**
@@ -31,5 +33,17 @@ export class ToolRegistryService {
 
   getAll(): VigiliaTool<unknown, unknown>[] {
     return [...this.tools.values()];
+  }
+
+  /**
+   * Fase 4 · P4.B (D8): tools que este contexto puede ejecutar (canal Y
+   * scopes, mismo criterio que el dispatcher). Es lo único que ve el modelo:
+   * `agent-config` (voz Realtime) y el `ToolSet` del canal de texto se arman
+   * con esta lista, así el modelo no conoce tools que no puede usar.
+   */
+  getAvailableFor(
+    ctx: Pick<AuthorizedContext, 'channel' | 'scopes'>,
+  ): VigiliaTool<unknown, unknown>[] {
+    return this.getAll().filter((tool) => isToolAvailableFor(tool, ctx));
   }
 }

@@ -1,0 +1,21 @@
+# Normaliza finales de línea: el repo se guarda en LF y se trabaja en LF
+# (Windows y la Raspberry Pi). Evita el ruido de CRLF en lint y diffs.
+* text=auto eol=lf
+
+# Scripts de Windows conservan CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binarios
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.pt binary
+*.onnx binary
+*.exe binary
+*.zip binary
+*.sr binary

@@ -8,6 +8,10 @@ import { NON_TERMINAL_VISIT_STATUSES } from '../../visits/visits.constants';
 import { VisitsService } from '../../visits/visits.service';
 import type { AuthorizedContext } from '../types/authorized-context.type';
 import type { VigiliaTool } from '../types/vigilia-tool.type';
+import { isInTenantScope } from '../../common/tenant/tenant-context.util';
+
+/** Nombre de la tool en el catálogo (lo lee `PendingActionsService`). */
+export const ABRIR_ACCESO_TOOL_NAME = 'abrir_acceso';
 
 const inputSchema = z.object({
   tipo: z
@@ -89,16 +93,11 @@ type VerifiedVisitorIdentity =
  * `consultar_visitas`, exige `ctx.sessionId` (igual que `finalizar_llamada`/
  * `notificar_residente`) — no tiene sentido fuera de una sesión física real.
  *
- * EMISIÓN AL HUB: reusa `HubGateway.sendToHub`/`sendToOrganization` +
- * `DigitalConciergeService.findSessionForTenant` (misma dupla que ya usan
- * `finalizar_llamada`/`notificar_residente` para resolver+validar tenant de
- * la sesión) — dirigido por `session.hubId` (o, si no está conectado, por
- * `session.organizationId`), NUNCA un broadcast global (hallazgo H2, ya
- * corregido en A1.1). La lógica de "hub propio vs. broadcast al condominio"
- * duplica ~4 líneas de `DigitalConciergeService.notifyHub` (privado, no
- * exportado) en vez de tocar ese archivo — fuera del alcance de coordinación
- * de esta tarea (solo módulo `agent` + `hub.gateway`); ver "deuda" en el
- * reporte.
+ * EMISIÓN AL HUB: `HubGateway.sendDoorOpen` + `findSessionForTenant` (resuelve
+ * y valida el tenant de la sesión). Fase 4 · P4 (D7): la orden va solo a hubs
+ * físicos (el de la sesión si es físico y está conectado; si no, los del
+ * condominio), nunca a un kiosko web ni a otro condominio. Si ningún hub
+ * físico la recibe, la tool responde `abierto: false`.
  *
  * IDEMPOTENCIA: reabrir por un retry (o por `PendingActionsService.approve`
  * reintentando tras un `failed`, ver su FIX 2) solo reactiva el relé del hub
@@ -118,13 +117,18 @@ type VerifiedVisitorIdentity =
 export class AbrirAccesoTool
   implements VigiliaTool<AbrirAccesoInput, AbrirAccesoOutput>
 {
-  readonly name = 'abrir_acceso';
+  readonly name = ABRIR_ACCESO_TOOL_NAME;
   readonly description =
     'Abre el portón vehicular o la puerta peatonal del condominio para el visitante de esta llamada. Si el visitante no tiene una visita pre-aprobada vigente, la solicitud queda pendiente de aprobación de un residente o conserje — nunca prometas la apertura antes de que la herramienta confirme que se abrió.';
   readonly inputSchema = inputSchema;
   readonly outputSchema = outputSchema;
   readonly access = 'write' as const;
   readonly requiredScopes = ['digital-concierge.access'];
+  /**
+   * Fase 4 · P4.B (D8): el kiosko web (navegador público, sin relés) nunca
+   * abre ni escala una apertura; solo el citófono físico y un humano.
+   */
+  readonly allowedChannels = ['physical-hub', 'human'] as const;
 
   constructor(
     private readonly conciergeService: DigitalConciergeService,
@@ -187,17 +191,26 @@ export class AbrirAccesoTool
       ctx,
     );
 
-    const hubEvent = 'hub:door_open';
-    const payload = {
+    // Fase 4 · P4 (D7): `sendDoorOpen` entrega solo a hubs físicos (el de la
+    // sesión o, si no, los del condominio), nunca a un kiosko web.
+    const delivered = this.hubGateway.sendDoorOpen(session, {
       type: input.tipo === 'porton' ? 'vehicular' : 'pedestrian',
       // `visitId` es informativo para el hub (ver
       // websocket-client.service.ts::onDoorOpenCommand, que solo lee
       // `data.type`) — no siempre hay una `Visit` asociada (p.ej. autonomía
       // por visita pre-aprobada que aún no hizo check-in).
       visitId: session.createdVisit?.id ?? null,
-    };
+    });
 
-    this.hubGateway.sendToSession(session, hubEvent, payload);
+    if (delivered === 0) {
+      // Ningún hub físico recibió la orden: no se promete una apertura que no
+      // va a ocurrir (el agente y `notifyVisitorLive` leen `abierto`).
+      return {
+        abierto: false,
+        mensaje:
+          'No pude enviar la orden de apertura: no hay un portón o puerta conectado. Pide al visitante que espere al conserje.',
+      };
+    }
 
     return {
       abierto: true,
@@ -267,10 +280,7 @@ export class AbrirAccesoTool
 
     const family = await this.familiesService.findByDepartment(casa);
 
-    if (
-      !family ||
-      (!ctx.isSuperAdmin && family.organizationId !== ctx.tenantId)
-    ) {
+    if (!family || !isInTenantScope(family.organizationId, ctx)) {
       return false;
     }
 

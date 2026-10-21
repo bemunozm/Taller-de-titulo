@@ -24,6 +24,8 @@ export const roleSchema = z.object({
     name: z.string().max(100),
     description: z.string().optional(),
     permissions: z.array(permissionSchema).optional(),
+    // Rol de sistema (DEFAULT_ROLES del backend): inmutable por la API (403).
+    isSystem: z.boolean().optional(),
 })
 
 // Define el tipo Role que es el tipo inferido del esquema roleSchema
@@ -69,7 +71,6 @@ export const authSchema = z.object({
 })
 export type Auth = z.infer<typeof authSchema>
 export type UserLoginForm = Pick<Auth   , 'email' | 'password'>
-export type UserRegistrationForm = Pick<Auth, 'name' | 'email' | 'password' | 'password_confirmation' | 'age' | 'phone' | 'rut' >
 export type RequestConfirmationCodeForm = Pick<Auth, 'email'>
 export type ForgotPasswordForm = Pick<Auth, 'email'>
 export type NewPasswordForm = Pick<Auth, 'password' | 'password_confirmation'>
@@ -78,8 +79,13 @@ export type ConfirmToken = Pick<Auth, 'token'>
 export type CheckPasswordForm = Pick<Auth, 'password'>
 
 // Unit schema básico (para evitar circular dependency con familyBasicSchema)
+// Condominio dueño del recurso (columna `organizationId` de la entidad); el
+// super-admin lo usa para no elegir unidades/familias de otro condominio.
+const organizationIdSchema = z.string().uuid().nullable().optional()
+
 const unitBasicSchema = z.object({
     id: z.string().uuid(),
+    organizationId: organizationIdSchema,
     identifier: z.string().max(32),
     block: z.string().max(16).nullable().optional(),
     number: z.string().max(16),
@@ -90,6 +96,7 @@ const unitBasicSchema = z.object({
 // Family schema básico (sin members para evitar circular dependency)
 const familyBasicSchema = z.object({
     id: z.string().uuid(),
+    organizationId: organizationIdSchema,
     name: z.string().max(128),
     description: z.string().max(256).nullable().optional(),
     unit: unitBasicSchema.nullable().optional(),
@@ -100,10 +107,12 @@ const familyBasicSchema = z.object({
 
 export const userSchema = z.object({
     id: z.string().uuid(),
-    rut: z.string().max(50),
+    // `null` en una cuenta anonimizada (Ley 21.719, P7.R): nombre "Usuario
+    // eliminado", email no entregable y RUT/teléfono/edad/foto a null.
+    rut: z.string().max(50).nullable(),
     name: z.string().max(100),
     email: z.string().email(),
-    phone: z.string().max(15),
+    phone: z.string().max(15).nullable(),
     password: z.string().optional(), // Opcional porque no siempre se incluye en las respuestas
     age: z.number().int().positive().nullable().optional(),
     profilePicture: z.string().nullable().optional(),
@@ -111,6 +120,8 @@ export const userSchema = z.object({
     createdAt: z.string().transform((date) => new Date(date)),
     updatedAt: z.string().transform((date) => new Date(date)),
     deletedAt: z.string().transform((date) => new Date(date)).nullable(),
+    /** Cuándo se anonimizó la cuenta deshabilitada; una cuenta anonimizada no se vuelve a habilitar. */
+    anonymizedAt: z.string().nullable().optional(),
     roles: z.array(roleSchema).optional(),
     tokens: z.array(tokenSchema).optional(),
     family: familyBasicSchema.nullable().optional(),
@@ -122,8 +133,27 @@ export type User = z.infer<typeof userSchema>
 
 // UserWithFamily es ahora solo un alias de User (mantener por compatibilidad)
 export type UserWithFamily = User
-export type UserFormData = Pick<User, 'name' | 'email' | 'password'  | 'age' | 'phone' | 'rut'>
-export type UserUpdateData = Pick<User, 'name' | 'email' | 'age' | 'phone' | 'rut'> & {
+
+/**
+ * Usuario embebido en otra entidad: miembro de una familia, anfitrión de una
+ * visita, propietario de un vehículo. Quien no tiene `users.update` lo recibe
+ * como `{ id, name }` (P5): todo lo demás (email, RUT, teléfono, familia,
+ * confirmación) es opcional y la UI no debe asumirlo.
+ */
+export const embeddedUserSchema = userSchema.partial().required({ id: true, name: true })
+export type EmbeddedUser = z.infer<typeof embeddedUserSchema>
+/** Formulario de alta/edición: RUT y teléfono siempre se piden (solo una cuenta anonimizada los tiene en null). */
+export type UserFormData = Pick<User, 'name' | 'email' | 'password' | 'age'> & {
+    phone: string
+    rut: string
+}
+/** Body de `PATCH /users/:id`: solo viajan los campos presentes. */
+export interface UserUpdateData {
+    name?: string
+    email?: string
+    rut?: string
+    phone?: string
+    age?: number | null
     roleIds?: string[]
     familyId?: string | null
 }
@@ -131,6 +161,40 @@ export type UserLoginData = Pick<User, 'email' | 'password'>
 export type UserAuthResponse = Omit<User, 'password' | 'tokens'> & {
     token?: string
 }
+
+/**
+ * Proyección mínima de `GET /users` (P5.C) para quien no tiene `users.update`:
+ * `{ id, name, family }`. El detalle (`User`) es compatible con este tipo, así
+ * que los selectores (anfitrión, propietario) solo dependen de estos campos.
+ */
+export interface UserSummary {
+    id: string
+    name: string
+    family?: { id: string; name: string; organizationId?: string | null } | null
+    /** Solo en el detalle (con `users.update`): la cuenta está deshabilitada. */
+    deletedAt?: string | Date | null
+    /** Solo en el detalle (con `users.update`): la cuenta se anonimizó. */
+    anonymizedAt?: string | null
+}
+
+/**
+ * `organizationId` de las creaciones de recursos del condominio: obligatorio
+ * para el super-admin y rechazado (403) para cualquier otro actor. Nunca va
+ * en una edición (400).
+ */
+export interface OrganizationScoped {
+    organizationId?: string
+}
+
+/** Condominio del selector del super-admin al crear usuarios. */
+export interface CondominiumOption {
+    id: string
+    name: string
+    slug: string
+}
+
+// Un <select> sin elección envía '': se acepta aquí y se limpia al enviar.
+export const optionalUuidField = z.union([z.literal(''), z.string().uuid()]).optional()
 
 // User Admin Form Data - Para creación de cuentas por admin
 export const userAdminFormSchema = z.object({
@@ -143,10 +207,25 @@ export const userAdminFormSchema = z.object({
     phone: z.string().max(15).optional(),
     age: z.number().int().min(16, 'La edad mínima es 16 años').max(100, 'La edad máxima es 100 años').optional(),
     roleIds: z.array(z.string().uuid()).min(1, 'Debe seleccionar al menos un rol'),
-    familyId: z.string().uuid().optional(),
+    familyId: optionalUuidField,
+    // Solo lo usa el super-admin (el backend responde 403 a cualquier otro).
+    organizationId: optionalUuidField,
 })
 
 export type UserAdminFormData = z.infer<typeof userAdminFormSchema>
+
+/** Body de `POST /users/create-by-admin`. */
+export interface CreateUserByAdminPayload {
+    name: string
+    email: string
+    rut: string
+    phone?: string
+    age?: number
+    roleIds: string[]
+    familyId?: string
+    /** Solo del super-admin; otro actor que lo envíe recibe 403. */
+    organizationId?: string
+}
 
 // Camera schemas and types
 
@@ -185,6 +264,9 @@ export const createCameraSchema = z.object({
 })
 
 export type CreateCameraFormData = z.infer<typeof createCameraSchema>
+
+/** Body de `POST /cameras` (el super-admin indica el condominio). */
+export type CreateCameraPayload = CreateCameraFormData & OrganizationScoped
 
 export type UpdateCameraFormData = Partial<CreateCameraFormData> & {
     // mountPath cannot be updated via API
@@ -263,6 +345,7 @@ export type AppNotification = z.infer<typeof notificationSchema>
 // Unit Schema
 export const unitSchema = z.object({
     id: z.string().uuid(),
+    organizationId: organizationIdSchema,
     block: z.string().max(16).nullable().optional(),
     number: z.string().max(16),
     identifier: z.string().max(32),
@@ -285,6 +368,8 @@ export const createUnitSchema = z.object({
 
 export type CreateUnitFormData = z.infer<typeof createUnitSchema>
 export type UpdateUnitFormData = Partial<CreateUnitFormData>
+/** Body de `POST /units` (el super-admin indica el condominio). */
+export type CreateUnitPayload = CreateUnitFormData & OrganizationScoped
 
 export const createBulkUnitsSchema = z.object({
     block: z.string().max(16).optional(),
@@ -293,12 +378,16 @@ export const createBulkUnitsSchema = z.object({
     floor: z.number().int().optional(),
     type: z.string().max(32).optional(),
     active: z.boolean().default(true).optional(),
+    // Solo el super-admin (ver OrganizationScoped); se limpia al enviar.
+    organizationId: optionalUuidField,
 }).refine(data => data.numberFrom <= data.numberTo, {
     message: 'El número inicial debe ser menor o igual al número final',
     path: ['numberFrom'],
 })
 
 export type CreateBulkUnitsFormData = z.infer<typeof createBulkUnitsSchema>
+/** Body de `POST /units/bulk`. */
+export type CreateBulkUnitsPayload = Omit<CreateBulkUnitsFormData, 'organizationId'> & OrganizationScoped
 
 export const bulkUnitsResultSchema = z.object({
     created: z.array(unitSchema),
@@ -320,13 +409,16 @@ export type UnitStats = z.infer<typeof unitStatsSchema>
 // Family Schema actualizado para usar unit
 export const familySchema = z.object({
     id: z.string().uuid(),
+    organizationId: organizationIdSchema,
     name: z.string().max(128),
     description: z.string().max(256).nullable().optional(),
     unit: unitSchema.nullable().optional(),
     active: z.boolean().default(true),
+    // Conserje Digital (IA del citófono) habilitado para la unidad de la familia.
+    digitalConciergeEnabled: z.boolean().optional(),
     createdAt: z.string().transform((date) => new Date(date)),
     updatedAt: z.string().transform((date) => new Date(date)),
-    members: z.array(userSchema).optional(),
+    members: z.array(embeddedUserSchema).optional(),
 })
 
 export type Family = z.infer<typeof familySchema>
@@ -334,12 +426,34 @@ export type Family = z.infer<typeof familySchema>
 export const createFamilySchema = z.object({
     name: z.string().min(1, 'El nombre es requerido').max(128),
     description: z.string().max(256).optional(),
-    unitId: z.string().uuid().optional(),
+    // '' = "Sin unidad asignada"; el formulario lo limpia antes de enviar.
+    unitId: optionalUuidField,
     active: z.boolean().default(true).optional(),
+    // Solo el super-admin al crear (ver OrganizationScoped).
+    organizationId: optionalUuidField,
+    // Solo al editar y con families.update (no existe en CreateFamilyDto).
+    digitalConciergeEnabled: z.boolean().optional(),
 })
 
 export type CreateFamilyFormData = z.infer<typeof createFamilySchema>
-export type UpdateFamilyFormData = Partial<CreateFamilyFormData>
+/** Body de `POST /families`. */
+export interface CreateFamilyPayload extends OrganizationScoped {
+    name: string
+    description?: string
+    unitId?: string
+    active?: boolean
+}
+/**
+ * Body de `PATCH /families/:id` (`UpdateFamilyDto`): un campo extra o
+ * `organizationId` → 400. `digitalConciergeEnabled` exige families.update.
+ */
+export interface UpdateFamilyFormData {
+    name?: string
+    description?: string
+    unitId?: string
+    active?: boolean
+    digitalConciergeEnabled?: boolean
+}
 
 // Add/Remove members from family
 export const addMemberSchema = z.object({
@@ -358,7 +472,7 @@ export const availableUserSchema = z.object({
     id: z.string().uuid(),
     name: z.string(),
     email: z.string().email(),
-    rut: z.string().optional(),
+    rut: z.string().nullable().optional(),
 })
 
 export type AvailableUser = z.infer<typeof availableUserSchema>
@@ -377,10 +491,20 @@ export const vehicleSchema = z.object({
     active: z.boolean().nullable().optional(),
     createdAt: z.string().transform((date) => new Date(date)),
     updatedAt: z.string().transform((date) => new Date(date)),
-    owner: userSchema.nullable().optional(),
+    owner: embeddedUserSchema.nullable().optional(),
 })
 
 export type Vehicle = z.infer<typeof vehicleSchema>
+
+// P5.C: `vehicleType` es solo la carrocería (descriptivo); `accessLevel` es lo
+// único que decide el portón. El backend rechaza (400) cualquier otro literal.
+export const VEHICLE_TYPES = ['auto', 'camioneta', 'moto', 'camion', 'otro'] as const
+export const vehicleTypeSchema = z.enum(VEHICLE_TYPES)
+export type VehicleType = z.infer<typeof vehicleTypeSchema>
+
+export const VEHICLE_ACCESS_LEVELS = ['residente', 'visitante', 'servicio'] as const
+export const vehicleAccessLevelSchema = z.enum(VEHICLE_ACCESS_LEVELS)
+export type VehicleAccessLevel = z.infer<typeof vehicleAccessLevelSchema>
 
 export const createVehicleSchema = z.object({
     plate: z.string()
@@ -392,21 +516,62 @@ export const createVehicleSchema = z.object({
     model: z.string().max(64).optional(),
     color: z.string().max(32).optional(),
     year: z.number().int().min(1900).max(new Date().getFullYear() + 1).optional(),
-    vehicleType: z.string().max(32).optional(),
-    accessLevel: z.string().max(64).optional(),
+    // '' = "sin elegir" en el <select>; el payload lo traduce (ver toVehiclePayload).
+    vehicleType: z.union([z.literal(''), vehicleTypeSchema]).optional(),
+    accessLevel: z.union([z.literal(''), vehicleAccessLevelSchema]).optional(),
     ownerId: z.string().optional().transform(val => !val || val === '' ? undefined : val),
     active: z.boolean().default(true).optional(),
+    // Solo el super-admin al crear (ver OrganizationScoped).
+    organizationId: optionalUuidField,
 })
 
+/** Valores del formulario (antes de las transformaciones de zod). */
+export type VehicleFormValues = z.input<typeof createVehicleSchema>
 export type CreateVehicleFormData = z.infer<typeof createVehicleSchema>
-export type UpdateVehicleFormData = Partial<CreateVehicleFormData>
+
+/** Body de `POST /vehicles`: sin elegir = campo ausente. */
+export interface CreateVehiclePayload {
+    plate: string
+    brand?: string
+    model?: string
+    color?: string
+    year?: number
+    vehicleType?: VehicleType
+    accessLevel?: VehicleAccessLevel
+    ownerId?: string
+    active?: boolean
+    /** Solo el super-admin (ver OrganizationScoped). */
+    organizationId?: string
+}
+
+/**
+ * Body de `PUT /vehicles/:id`: `null` limpia carrocería, nivel de acceso o
+ * propietario (este último solo con `condominium.view-all`); nunca `organizationId`.
+ */
+export interface UpdateVehiclePayload
+    extends Omit<Partial<CreateVehiclePayload>, 'vehicleType' | 'accessLevel' | 'organizationId' | 'ownerId'> {
+    vehicleType?: VehicleType | null
+    accessLevel?: VehicleAccessLevel | null
+    ownerId?: string | null
+}
 
 // Visit schemas and types
 
 export const visitTypeSchema = z.enum(['vehicular', 'pedestrian'])
 export type VisitType = z.infer<typeof visitTypeSchema>
 
-export const visitStatusSchema = z.enum(['pending', 'active', 'ready', 'completed', 'cancelled', 'expired', 'denied'])
+// Orden del ciclo de vida: `awaiting_approval` es una solicitud del conserje
+// digital que el residente todavía no aprueba (no admite check-in ni QR).
+export const visitStatusSchema = z.enum([
+    'awaiting_approval',
+    'pending',
+    'active',
+    'ready',
+    'completed',
+    'cancelled',
+    'expired',
+    'denied',
+])
 export type VisitStatus = z.infer<typeof visitStatusSchema>
 
 export const visitSchema = z.object({
@@ -426,9 +591,11 @@ export const visitSchema = z.object({
     exitTime: z.string().transform((date) => new Date(date)).nullable().optional(),
     createdAt: z.string().transform((date) => new Date(date)),
     updatedAt: z.string().transform((date) => new Date(date)),
-    host: userSchema.optional(),
+    host: embeddedUserSchema.optional(),
     family: familySchema.nullable().optional(),
     vehicle: vehicleSchema.nullable().optional(),
+    // Patente de una solicitud sin `vehicle` aún (el backend lo crea al aprobar).
+    requestedPlate: z.string().max(16).nullable().optional(),
 })
 
 export type Visit = z.infer<typeof visitSchema>

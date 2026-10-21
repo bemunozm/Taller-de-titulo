@@ -138,10 +138,13 @@ export default function DashboardView() {
           color="amber"
           loading={summaryLoading}
         />
+        {/* pendingVisits = pending + ready; las solicitudes sin aprobar se cuentan aparte. */}
         <StatsCard
           title="Visitas Activas"
           value={summary?.security.activeVisits ?? 0}
-          description={`${summary?.security.pendingVisits ?? 0} esperando ingreso`}
+          description={`${summary?.security.pendingVisits ?? 0} esperando ingreso · ${
+            summary?.security.awaitingApprovalVisits ?? 0
+          } esperando aprobación`}
           icon={<UsersIcon className="h-6 w-6" />}
           color="blue"
           loading={summaryLoading}

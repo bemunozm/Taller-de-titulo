@@ -1,18 +1,35 @@
 import { RelayControllerService } from '../../src/services/relay-controller.service';
+import { Gpio } from '../../src/utils/gpio-wrapper';
 
 // Helper para flush de promesas con fake timers
-const flushPromises = () => new Promise(jest.requireActual('timers').setImmediate);
+const flushPromises = (): Promise<void> =>
+  new Promise<void>(jest.requireActual<typeof import('timers')>('timers').setImmediate);
 
-// Mock de onoff
-jest.mock('onoff', () => {
-  return {
-    Gpio: jest.fn().mockImplementation(() => ({
+interface MockGpioInstance {
+  writeSync: jest.Mock;
+  readSync: jest.Mock;
+  unexport: jest.Mock;
+}
+
+// Instancias creadas por el mock de Gpio (el prefijo `mock` permite referenciarla
+// desde la factory de jest.mock).
+const mockGpioInstances: MockGpioInstance[] = [];
+
+// El servicio importa Gpio desde ../utils/gpio-wrapper (pigpio o simulación
+// interna), NO desde `onoff`.
+jest.mock('../../src/utils/gpio-wrapper', () => ({
+  Gpio: jest.fn().mockImplementation(() => {
+    const instance: MockGpioInstance = {
       writeSync: jest.fn(),
       readSync: jest.fn().mockReturnValue(0),
       unexport: jest.fn(),
-    })),
-  };
-});
+    };
+    mockGpioInstances.push(instance);
+    return instance;
+  }),
+}));
+
+const GpioMock = Gpio as unknown as jest.Mock;
 
 describe('RelayControllerService', () => {
   let service: RelayControllerService;
@@ -20,8 +37,12 @@ describe('RelayControllerService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockGpioInstances.length = 0;
     jest.useFakeTimers();
-    
+
+    // El servicio registra handlers de señales del proceso: no los instalamos de verdad.
+    jest.spyOn(process, 'on').mockImplementation(() => process);
+
     // Configurar env vars para testing
     process.env = {
       ...originalEnv,
@@ -38,22 +59,35 @@ describe('RelayControllerService', () => {
     service.cleanup();
     jest.clearAllTimers();
     jest.useRealTimers();
+    jest.restoreAllMocks();
     process.env = originalEnv;
   });
 
   describe('Initialization', () => {
-    it('debe inicializar los relés en estado LOW (OFF)', () => {
-      const { Gpio } = require('onoff');
-      const mockWriteSync = jest.fn();
-      
-      // Verificar que se llamó con 2 parámetros (sin el tercer parámetro 'low')
-      expect(Gpio).toHaveBeenCalledWith(17, 'out');
-      expect(Gpio).toHaveBeenCalledWith(27, 'out');
+    it('debe inicializar los relés en HIGH (OFF, Active LOW)', () => {
+      expect(GpioMock).toHaveBeenCalledWith(17, 'out');
+      expect(GpioMock).toHaveBeenCalledWith(27, 'out');
+      expect(mockGpioInstances).toHaveLength(2);
+      mockGpioInstances.forEach((gpio) => {
+        expect(gpio.writeSync).toHaveBeenCalledWith(1);
+      });
+      expect(service.isRelayAvailable()).toBe(true);
     });
 
     it('debe configurar handlers de seguridad', () => {
-      // Verificar que no lanza errores al inicializar
-      expect(() => new RelayControllerService()).not.toThrow();
+      const registered = (process.on as unknown as jest.Mock).mock.calls.map(
+        (call: unknown[]) => call[0],
+      );
+
+      expect(registered).toEqual(
+        expect.arrayContaining([
+          'SIGINT',
+          'SIGTERM',
+          'exit',
+          'uncaughtException',
+          'unhandledRejection',
+        ]),
+      );
     });
 
     it('debe leer los pines desde variables de entorno', () => {
@@ -61,42 +95,49 @@ describe('RelayControllerService', () => {
       process.env.RELAY_PIN_2 = '23';
 
       const customService = new RelayControllerService();
-      const { Gpio } = require('onoff');
 
-      expect(Gpio).toHaveBeenCalledWith(22, 'out');
-      expect(Gpio).toHaveBeenCalledWith(23, 'out');
+      expect(GpioMock).toHaveBeenCalledWith(22, 'out');
+      expect(GpioMock).toHaveBeenCalledWith(23, 'out');
 
       customService.cleanup();
     });
   });
 
   describe('enableInterception', () => {
-    it('debe activar ambos relés', async () => {
+    it('debe activar ambos relés (LOW) tras el settling time', async () => {
       const promise = service.enableInterception();
-      
+
       // Avanzar timers para el settling time
       jest.advanceTimersByTime(200);
-      
+
       await promise;
 
       expect(service.isActive()).toBe(true);
+      mockGpioInstances.forEach((gpio) => {
+        expect(gpio.writeSync).toHaveBeenLastCalledWith(0);
+      });
     });
 
     it('debe esperar el settling time configurado', async () => {
-      const settlingTime = 200;
+      const settlingTime = 300;
       process.env.RELAY_SETTLING_TIME_MS = String(settlingTime);
 
       const newService = new RelayControllerService();
-      const promise = newService.enableInterception();
+      let resolved = false;
+      const promise = newService.enableInterception().then(() => {
+        resolved = true;
+      });
 
       // No debería completarse antes del settling time
       jest.advanceTimersByTime(settlingTime - 1);
-      
+      await flushPromises();
+      expect(resolved).toBe(false);
+
       // Avanzar el tiempo restante
       jest.advanceTimersByTime(1);
-      
       await promise;
 
+      expect(resolved).toBe(true);
       expect(newService.isActive()).toBe(true);
       newService.cleanup();
     });
@@ -106,11 +147,16 @@ describe('RelayControllerService', () => {
       jest.advanceTimersByTime(200);
       await firstPromise;
 
+      const writesBefore = mockGpioInstances.map((gpio) => gpio.writeSync.mock.calls.length);
+
       // Intentar activar de nuevo
       await service.enableInterception();
 
-      // No debería lanzar error ni cambiar estado
+      // No debería lanzar error, cambiar estado ni volver a escribir
       expect(service.isActive()).toBe(true);
+      expect(mockGpioInstances.map((gpio) => gpio.writeSync.mock.calls.length)).toEqual(
+        writesBefore,
+      );
     });
 
     it('debe iniciar watchdog timer', async () => {
@@ -123,7 +169,7 @@ describe('RelayControllerService', () => {
       // Avanzar hasta el watchdog timeout (180000ms)
       jest.advanceTimersByTime(180000);
       await flushPromises();
-      
+
       // Avanzar el delay interno de disableInterception (500ms)
       jest.advanceTimersByTime(500);
       await flushPromises();
@@ -140,15 +186,18 @@ describe('RelayControllerService', () => {
       await promise;
     });
 
-    it('debe desactivar los relés correctamente', async () => {
+    it('debe desactivar los relés correctamente (HIGH)', async () => {
       const promise = service.disableInterception();
-      
+
       // Esperar el delay de 500ms
       jest.advanceTimersByTime(500);
-      
+
       await promise;
 
       expect(service.isActive()).toBe(false);
+      mockGpioInstances.forEach((gpio) => {
+        expect(gpio.writeSync).toHaveBeenLastCalledWith(1);
+      });
     });
 
     it('debe cancelar el watchdog timer', async () => {
@@ -156,11 +205,19 @@ describe('RelayControllerService', () => {
       jest.advanceTimersByTime(500);
       await promise;
 
+      const writesAfterDisable = mockGpioInstances.map(
+        (gpio) => gpio.writeSync.mock.calls.length,
+      );
+
       // Avanzar tiempo más allá del watchdog
       jest.advanceTimersByTime(180000);
+      await flushPromises();
 
       // No debería hacer nada porque ya está desactivado
       expect(service.isActive()).toBe(false);
+      expect(mockGpioInstances.map((gpio) => gpio.writeSync.mock.calls.length)).toEqual(
+        writesAfterDisable,
+      );
     });
 
     it('debe ignorar si ya está desactivado', async () => {
@@ -207,7 +264,7 @@ describe('RelayControllerService', () => {
   describe('Watchdog Safety', () => {
     it('debe auto-desactivar después del timeout máximo', async () => {
       const maxTime = 180000;
-      
+
       const enablePromise = service.enableInterception();
       jest.advanceTimersByTime(200);
       await enablePromise;
@@ -250,23 +307,25 @@ describe('RelayControllerService', () => {
   });
 
   describe('cleanup', () => {
-    it('debe desactivar relés al limpiar', () => {
+    it('debe desactivar relés al limpiar', async () => {
+      const promise = service.enableInterception();
+      jest.advanceTimersByTime(200);
+      await promise;
+
       service.cleanup();
 
       expect(service.isActive()).toBe(false);
+      mockGpioInstances.forEach((gpio) => {
+        expect(gpio.writeSync).toHaveBeenLastCalledWith(1);
+      });
     });
 
     it('debe unexport los GPIO', () => {
       service.cleanup();
 
-      // Verificar que se llamó unexport (mock)
-      const { Gpio } = require('onoff');
-      const instances = Gpio.mock.results;
-      
-      instances.forEach((instance: any) => {
-        if (instance.value) {
-          expect(instance.value.unexport).toHaveBeenCalled();
-        }
+      expect(mockGpioInstances).toHaveLength(2);
+      mockGpioInstances.forEach((gpio) => {
+        expect(gpio.unexport).toHaveBeenCalled();
       });
     });
 
@@ -279,20 +338,26 @@ describe('RelayControllerService', () => {
   });
 
   describe('Error Handling', () => {
-    it('debe manejar errores de GPIO gracefully', () => {
-      const { Gpio } = require('onoff');
-      
-      // Simular error en writeSync
-      Gpio.mockImplementationOnce(() => ({
+    // Comportamiento actual: si el GPIO falla al inicializar, el servicio NO
+    // lanza; queda no disponible (modo desarrollo sin hardware) y las
+    // operaciones de intercepción son no-ops.
+    it('no debe lanzar si el GPIO falla y debe quedar no disponible', async () => {
+      GpioMock.mockImplementationOnce(() => ({
         writeSync: jest.fn(() => {
           throw new Error('GPIO error');
         }),
         unexport: jest.fn(),
       }));
 
+      let degradedService: RelayControllerService | undefined;
       expect(() => {
-        new RelayControllerService();
-      }).toThrow();
+        degradedService = new RelayControllerService();
+      }).not.toThrow();
+
+      expect(degradedService?.isRelayAvailable()).toBe(false);
+
+      await degradedService?.enableInterception();
+      expect(degradedService?.isActive()).toBe(false);
     });
   });
 });

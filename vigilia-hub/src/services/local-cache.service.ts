@@ -1,7 +1,9 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import axios from 'axios';
+import type { HubConfig } from '../config';
 import { Logger } from '../utils/logger';
+import { hubAuthHeaders } from '../utils/hub-auth-headers';
 
 interface CachedUnit {
   houseNumber: string;
@@ -15,6 +17,14 @@ export class LocalCacheService {
   private readonly CACHE_FILE = path.join(__dirname, '../../data/ai-units.json');
   private cache: Map<string, CachedUnit> = new Map();
   private syncInterval: NodeJS.Timeout | null = null;
+
+  /**
+   * @param config configuración validada al arrancar (`loadHubConfig`): URL
+   *   del backend y credencial del hub.
+   */
+  constructor(
+    private readonly config: Pick<HubConfig, 'backendUrl' | 'hubId' | 'hubSecret'>,
+  ) {}
 
   async initialize() {
     this.logger.log('Inicializando cache local...');
@@ -63,19 +73,17 @@ export class LocalCacheService {
    * Sincronización con backend
    */
   async syncWithBackend(): Promise<void> {
-    const backendUrl = process.env.BACKEND_URL;
-    const hubSecret = process.env.HUB_SECRET;
-
-    if (!backendUrl || !hubSecret) {
-      this.logger.error('BACKEND_URL o HUB_SECRET no configurado');
-      return;
-    }
+    // Fase 4 · P5 (corrección QA A3): `HubAuthGuard` exige `X-Hub-Id` además
+    // de `X-Hub-Secret`; con solo el secret respondía 401 y el hub se quedaba
+    // sin caché de IA (no interceptaba ninguna llamada). Fase 4 · P6.M: ambos
+    // (y la URL) vienen de la config validada al arrancar.
+    const { backendUrl, hubId, hubSecret } = this.config;
 
     try {
       this.logger.log('🔄 Sincronizando con backend...');
-      
+
       const response = await axios.get(`${backendUrl}/api/v1/units/ai-enabled`, {
-        headers: { 'X-Hub-Secret': hubSecret },
+        headers: hubAuthHeaders({ hubId, hubSecret }),
         timeout: 5000,
       });
 

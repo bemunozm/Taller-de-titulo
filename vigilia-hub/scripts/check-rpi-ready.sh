@@ -42,6 +42,18 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# Solo 64-bit (Fase 4 · P8.C): Node.js >= 22.12 no se publica para armv7l.
+ARCH=$(uname -m)
+DPKG_ARCH=$(dpkg --print-architecture 2>/dev/null || echo "desconocida")
+if [ "$ARCH" == "aarch64" ] && [ "$DPKG_ARCH" == "arm64" ]; then
+    echo -e "${GREEN}✓${NC} Sistema 64-bit ($ARCH/$DPKG_ARCH)"
+    PASS=$((PASS + 1))
+else
+    echo -e "${RED}✗${NC} Sistema no soportado (uname -m: $ARCH, paquetes: $DPKG_ARCH): se requiere Raspberry Pi OS 64-bit"
+    echo "  Solución: reinstala la microSD con 'Raspberry Pi OS (64-bit)' (Bookworm) desde Raspberry Pi Imager"
+    FAIL=$((FAIL + 1))
+fi
+
 # ============================================================================
 # Test 2: Hardware (Raspberry Pi)
 # ============================================================================
@@ -114,19 +126,18 @@ if command -v node &> /dev/null; then
     NODE_VERSION=$(node -v)
     echo -e "${GREEN}✓${NC} Node.js instalado: $NODE_VERSION"
     
-    # Verificar versión >= 18
-    MAJOR_VERSION=$(echo $NODE_VERSION | cut -d'v' -f2 | cut -d'.' -f1)
-    if [ "$MAJOR_VERSION" -ge 18 ]; then
-        echo -e "${GREEN}✓${NC} Versión suficiente (requiere v18+)"
+    # Verificar versión >= 22.12 (engines del hub)
+    if node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 12) ? 0 : 1)'; then
+        echo -e "${GREEN}✓${NC} Versión suficiente (requiere v22.12+)"
         PASS=$((PASS + 1))
     else
-        echo -e "${RED}✗${NC} Versión insuficiente (requiere v18+)"
-        echo "  Instalación: curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - && sudo apt install -y nodejs"
+        echo -e "${RED}✗${NC} Versión insuficiente (requiere v22.12+)"
+        echo "  Instalación: curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs"
         FAIL=$((FAIL + 1))
     fi
 else
     echo -e "${RED}✗${NC} Node.js NO instalado"
-    echo "  Instalación: curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - && sudo apt install -y nodejs"
+    echo "  Instalación: curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs"
     FAIL=$((FAIL + 1))
 fi
 

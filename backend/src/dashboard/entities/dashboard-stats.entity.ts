@@ -6,7 +6,10 @@ export interface SecurityStats {
   detectionsWeek: number;
   detectionsMonth: number;
   activeVisits: number;
+  /** Programadas sin ingresar (PENDING) + listas para reingresar (READY_FOR_REENTRY). */
   pendingVisits: number;
+  /** Solicitudes del conserje digital esperando al residente (AWAITING_APPROVAL). */
+  awaitingApprovalVisits: number;
   completedVisitsToday: number;
   unauthorizedVehicles: number;
   alertsPending: number;

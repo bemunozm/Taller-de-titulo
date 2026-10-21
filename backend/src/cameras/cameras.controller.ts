@@ -1,19 +1,46 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+  UseGuards,
+  ParseUUIDPipe,
+} from '@nestjs/common';
 import { CamerasService } from './cameras.service';
 import { CreateCameraDto } from './dto/create-camera.dto';
 import { UpdateCameraDto } from './dto/update-camera.dto';
-import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse, ApiBadRequestResponse, ApiUnauthorizedResponse, ApiNotFoundResponse, ApiForbiddenResponse, ApiParam, ApiBody } from '@nestjs/swagger';
+import { UpdateGuardianZonesDto } from './dto/update-guardian-zones.dto';
+import {
+  ApiTags,
+  ApiBearerAuth,
+  ApiOperation,
+  ApiResponse,
+  ApiBadRequestResponse,
+  ApiUnauthorizedResponse,
+  ApiNotFoundResponse,
+  ApiForbiddenResponse,
+  ApiParam,
+  ApiBody,
+} from '@nestjs/swagger';
 import { AuthGuard } from 'src/auth/auth.guard';
 import { AuthorizationGuard } from 'src/auth/guards/authorization.guard';
 import { RequirePermissions } from 'src/auth/decorators/permissions.decorator';
 import { Auditable } from '../audit/decorators/auditable.decorator';
 import { AuditModule, AuditAction } from '../audit/entities/audit-log.entity';
 
+// Fase 4 · P5.B (D12): toda ruta por `:id` (o mountPath) se acota al
+// condominio del actor dentro de `CamerasService`; una cámara de otro
+// condominio responde 404 (super-admin: todas).
 @ApiTags('Gestión de Cámaras')
 @ApiBearerAuth('JWT-auth')
 @UseGuards(AuthGuard, AuthorizationGuard)
 @ApiUnauthorizedResponse({ description: 'Token JWT inválido o expirado' })
-@ApiForbiddenResponse({ description: 'No tiene permisos suficientes para esta operación' })
+@ApiForbiddenResponse({
+  description: 'No tiene permisos suficientes para esta operación',
+})
 @Controller('cameras')
 export class CamerasController {
   constructor(private readonly camerasService: CamerasService) {}
@@ -25,14 +52,17 @@ export class CamerasController {
     action: AuditAction.CREATE,
     entityType: 'Camera',
     description: 'Cámara creada en el sistema',
-    captureResponse: true
+    captureResponse: true,
   })
-  @ApiOperation({ 
-    summary: 'Crear una nueva cámara', 
-    description: 'Crea una nueva cámara en el sistema y opcionalmente la registra en MediaMTX. Permite asignar roles con permisos de visualización. Requiere permiso "cameras.create".'
+  @ApiOperation({
+    summary: 'Crear una nueva cámara',
+    description:
+      'Crea una nueva cámara en el sistema y opcionalmente la registra en MediaMTX. Permite asignar roles con permisos de visualización. Requiere permiso "cameras.create".',
   })
   @ApiResponse({ status: 201, description: 'Cámara creada exitosamente' })
-  @ApiBadRequestResponse({ description: 'Datos inválidos o mountPath ya existe' })
+  @ApiBadRequestResponse({
+    description: 'Datos inválidos o mountPath ya existe',
+  })
   @ApiBody({ type: CreateCameraDto })
   create(@Body() createCameraDto: CreateCameraDto) {
     return this.camerasService.create(createCameraDto);
@@ -40,12 +70,13 @@ export class CamerasController {
 
   @Get()
   @RequirePermissions('cameras.read')
-  @ApiOperation({ 
-    summary: 'Listar todas las cámaras', 
-    description: 'Retorna la lista completa de cámaras registradas en el sistema con su información y roles asignados. Requiere permiso "cameras.read".'
+  @ApiOperation({
+    summary: 'Listar todas las cámaras',
+    description:
+      'Retorna la lista completa de cámaras registradas en el sistema con su información y roles asignados. Requiere permiso "cameras.read".',
   })
-  @ApiResponse({ 
-    status: 200, 
+  @ApiResponse({
+    status: 200,
     description: 'Lista de cámaras obtenida exitosamente',
     schema: {
       type: 'array',
@@ -59,10 +90,10 @@ export class CamerasController {
           registeredInMediamtx: { type: 'boolean' },
           enableLpr: { type: 'boolean' },
           active: { type: 'boolean' },
-          roles: { type: 'array' }
-        }
-      }
-    }
+          roles: { type: 'array' },
+        },
+      },
+    },
   })
   findAll() {
     return this.camerasService.findAll();
@@ -70,14 +101,15 @@ export class CamerasController {
 
   @Get(':id')
   @RequirePermissions('cameras.read')
-  @ApiOperation({ 
-    summary: 'Obtener cámara por ID', 
-    description: 'Retorna la información detallada de una cámara específica. Requiere permiso "cameras.read".'
+  @ApiOperation({
+    summary: 'Obtener cámara por ID',
+    description:
+      'Retorna la información detallada de una cámara específica. Requiere permiso "cameras.read".',
   })
   @ApiParam({ name: 'id', description: 'ID único de la cámara', type: String })
   @ApiResponse({ status: 200, description: 'Cámara encontrada exitosamente' })
   @ApiNotFoundResponse({ description: 'Cámara no encontrada' })
-  findOne(@Param('id') id: string) {
+  findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.camerasService.findOne(id);
   }
 
@@ -89,18 +121,22 @@ export class CamerasController {
     entityType: 'Camera',
     description: 'Configuración de cámara actualizada',
     captureOldValue: true,
-    captureResponse: true
+    captureResponse: true,
   })
-  @ApiOperation({ 
-    summary: 'Actualizar cámara', 
-    description: 'Actualiza la información de una cámara existente y sus roles asignados. Requiere permiso "cameras.update".'
+  @ApiOperation({
+    summary: 'Actualizar cámara',
+    description:
+      'Actualiza la información de una cámara existente y sus roles asignados. Requiere permiso "cameras.update".',
   })
   @ApiParam({ name: 'id', description: 'ID único de la cámara', type: String })
   @ApiResponse({ status: 200, description: 'Cámara actualizada exitosamente' })
   @ApiNotFoundResponse({ description: 'Cámara no encontrada' })
   @ApiBadRequestResponse({ description: 'Datos inválidos' })
   @ApiBody({ type: UpdateCameraDto })
-  update(@Param('id') id: string, @Body() updateCameraDto: UpdateCameraDto) {
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() updateCameraDto: UpdateCameraDto,
+  ) {
     return this.camerasService.update(id, updateCameraDto);
   }
 
@@ -111,16 +147,17 @@ export class CamerasController {
     action: AuditAction.DELETE,
     entityType: 'Camera',
     description: 'Cámara eliminada del sistema',
-    captureOldValue: true
+    captureOldValue: true,
   })
-  @ApiOperation({ 
-    summary: 'Eliminar cámara', 
-    description: 'Elimina una cámara del sistema y la desregistra de MediaMTX si estaba registrada. Requiere permiso "cameras.delete".'
+  @ApiOperation({
+    summary: 'Eliminar cámara',
+    description:
+      'Elimina una cámara del sistema y la desregistra de MediaMTX si estaba registrada. Requiere permiso "cameras.delete".',
   })
   @ApiParam({ name: 'id', description: 'ID único de la cámara', type: String })
   @ApiResponse({ status: 200, description: 'Cámara eliminada exitosamente' })
   @ApiNotFoundResponse({ description: 'Cámara no encontrada' })
-  remove(@Param('id') id: string) {
+  remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.camerasService.remove(id);
   }
 
@@ -131,22 +168,26 @@ export class CamerasController {
     action: AuditAction.CAMERA_REGISTER,
     entityType: 'Camera',
     description: 'Cámara registrada en MediaMTX',
-    captureResponse: true
+    captureResponse: true,
   })
-  @ApiOperation({ 
-    summary: 'Registrar cámara en MediaMTX', 
-    description: 'Registra o reintenta el registro de la cámara en MediaMTX para streaming. Requiere permiso "cameras.update".'
+  @ApiOperation({
+    summary: 'Registrar cámara en MediaMTX',
+    description:
+      'Registra o reintenta el registro de la cámara en MediaMTX para streaming. Requiere permiso "cameras.update".',
   })
   @ApiParam({ name: 'id', description: 'ID único de la cámara', type: String })
-  @ApiResponse({ 
-    status: 200, 
+  @ApiResponse({
+    status: 200,
     description: 'Operación completada',
     schema: {
       type: 'object',
       properties: {
-        registered: { type: 'boolean', description: 'Indica si el registro fue exitoso' }
-      }
-    }
+        registered: {
+          type: 'boolean',
+          description: 'Indica si el registro fue exitoso',
+        },
+      },
+    },
   })
   @ApiNotFoundResponse({ description: 'Cámara no encontrada' })
   async register(@Param('id') id: string) {
@@ -154,22 +195,26 @@ export class CamerasController {
     return { registered: ok };
   }
 
+  // Fase 4 · P5.B: la URL de origen es una CREDENCIAL (RTSP con usuario y
+  // contraseña del NVR): exige `cameras.update`, no `cameras.read`, y la
+  // cámara debe ser del condominio del actor (otra: 404).
   @Get(':id/source')
-  @RequirePermissions('cameras.read')
-  @ApiOperation({ 
-    summary: 'Obtener URL de origen de la cámara', 
-    description: 'Retorna la URL RTSP desencriptada de la cámara. Solo para administradores. Requiere permiso "cameras.read".'
+  @RequirePermissions('cameras.update')
+  @ApiOperation({
+    summary: 'Obtener URL de origen de la cámara',
+    description:
+      'Retorna la URL RTSP desencriptada de una cámara del condominio del usuario. Requiere permiso "cameras.update" (es una credencial).',
   })
   @ApiParam({ name: 'id', description: 'ID único de la cámara', type: String })
-  @ApiResponse({ 
-    status: 200, 
+  @ApiResponse({
+    status: 200,
     description: 'URL de origen obtenida',
     schema: {
       type: 'object',
       properties: {
-        sourceUrl: { type: 'string', description: 'URL RTSP desencriptada' }
-      }
-    }
+        sourceUrl: { type: 'string', description: 'URL RTSP desencriptada' },
+      },
+    },
   })
   @ApiNotFoundResponse({ description: 'Cámara no encontrada' })
   async getSource(@Param('id') id: string) {
@@ -179,20 +224,24 @@ export class CamerasController {
 
   @Get(':id/has-source')
   @RequirePermissions('cameras.read')
-  @ApiOperation({ 
-    summary: 'Verificar si la cámara tiene URL de origen', 
-    description: 'Indica si la cámara tiene una URL de origen almacenada sin exponerla. Requiere permiso "cameras.read".'
+  @ApiOperation({
+    summary: 'Verificar si la cámara tiene URL de origen',
+    description:
+      'Indica si la cámara tiene una URL de origen almacenada sin exponerla. Requiere permiso "cameras.read".',
   })
   @ApiParam({ name: 'id', description: 'ID único de la cámara', type: String })
-  @ApiResponse({ 
-    status: 200, 
+  @ApiResponse({
+    status: 200,
     description: 'Estado verificado',
     schema: {
       type: 'object',
       properties: {
-        hasSource: { type: 'boolean', description: 'Indica si tiene URL almacenada' }
-      }
-    }
+        hasSource: {
+          type: 'boolean',
+          description: 'Indica si tiene URL almacenada',
+        },
+      },
+    },
   })
   @ApiNotFoundResponse({ description: 'Cámara no encontrada' })
   async hasSource(@Param('id') id: string) {
@@ -207,38 +256,42 @@ export class CamerasController {
     action: AuditAction.UPDATE,
     entityType: 'Camera',
     description: 'Estado de LPR actualizado en cámara',
-    captureResponse: true
+    captureResponse: true,
   })
-  @ApiOperation({ 
-    summary: 'Habilitar/deshabilitar IA en cámara', 
-    description: 'Activa o desactiva el reconocimiento de placas (LPR) mediante IA en la cámara. Requiere permiso "cameras.enable-ia".'
+  @ApiOperation({
+    summary: 'Habilitar/deshabilitar IA en cámara',
+    description:
+      'Activa o desactiva el reconocimiento de placas (LPR) mediante IA en la cámara. Requiere permiso "cameras.enable-ia".',
   })
   @ApiParam({ name: 'id', description: 'ID único de la cámara', type: String })
   @ApiBody({
     schema: {
       type: 'object',
       properties: {
-        enableLpr: { type: 'boolean', description: 'true para habilitar, false para deshabilitar' }
+        enableLpr: {
+          type: 'boolean',
+          description: 'true para habilitar, false para deshabilitar',
+        },
       },
-      required: ['enableLpr']
-    }
+      required: ['enableLpr'],
+    },
   })
-  @ApiResponse({ 
-    status: 200, 
+  @ApiResponse({
+    status: 200,
     description: 'Estado de IA actualizado exitosamente',
     schema: {
       type: 'object',
       properties: {
         id: { type: 'string' },
         name: { type: 'string' },
-        enableLpr: { type: 'boolean' }
-      }
-    }
+        enableLpr: { type: 'boolean' },
+      },
+    },
   })
   @ApiNotFoundResponse({ description: 'Cámara no encontrada' })
   async enableLpr(
-    @Param('id') id: string, 
-    @Body('enableLpr') enableLpr: boolean
+    @Param('id') id: string,
+    @Body('enableLpr') enableLpr: boolean,
   ) {
     return this.camerasService.updateLprStatus(id, enableLpr);
   }
@@ -250,25 +303,26 @@ export class CamerasController {
     action: AuditAction.UPDATE,
     entityType: 'Camera',
     description: 'Estado de Guardián actualizado en cámara',
-    captureResponse: true
+    captureResponse: true,
   })
-  @ApiOperation({ 
-    summary: 'Habilitar/deshabilitar Guardián Visual en cámara', 
-    description: 'Activa o desactiva la analítica de visión (YOLO Intrusión) en la cámara.'
+  @ApiOperation({
+    summary: 'Habilitar/deshabilitar Guardián Visual en cámara',
+    description:
+      'Activa o desactiva la analítica de visión (YOLO Intrusión) en la cámara.',
   })
   @ApiParam({ name: 'id', description: 'ID único de la cámara' })
   @ApiBody({
     schema: {
       type: 'object',
       properties: {
-        enableGuardian: { type: 'boolean', description: 'true para habilitar' }
+        enableGuardian: { type: 'boolean', description: 'true para habilitar' },
       },
-      required: ['enableGuardian']
-    }
+      required: ['enableGuardian'],
+    },
   })
   async enableGuardian(
-    @Param('id') id: string, 
-    @Body('enableGuardian') enableGuardian: boolean
+    @Param('id') id: string,
+    @Body('enableGuardian') enableGuardian: boolean,
   ) {
     return this.camerasService.updateGuardianStatus(id, enableGuardian);
   }
@@ -280,26 +334,25 @@ export class CamerasController {
     action: AuditAction.UPDATE,
     entityType: 'Camera',
     description: 'Zonas del guardián visual actualizadas',
-    captureResponse: true
+    captureResponse: true,
   })
-  @ApiOperation({ 
-    summary: 'Actualizar polígonos del Guardián Visual', 
-    description: 'Sobrescribe las coordenadas de los polígonos de alarma.'
+  @ApiOperation({
+    summary: 'Actualizar polígonos del Guardián Visual',
+    description:
+      'Sobrescribe los polígonos de alarma (coordenadas normalizadas 0 a 1).',
   })
   @ApiParam({ name: 'id', description: 'ID único de la cámara' })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      properties: {
-        zones: { type: 'array', description: 'Arreglo JSON con polígonos' }
-      },
-      required: ['zones']
-    }
+  @ApiBody({ type: UpdateGuardianZonesDto })
+  @ApiBadRequestResponse({
+    description:
+      'Zonas inválidas (forma, cantidad de zonas o puntos, coordenadas no numéricas) o id no UUID',
   })
+  // Fase 4 · P9: el body se valida con `UpdateGuardianZonesDto` (antes
+  // `zones: any[]` sin validar) y el id con ParseUUIDPipe (400 en vez de 500).
   async updateZones(
-    @Param('id') id: string, 
-    @Body('zones') zones: any[]
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateGuardianZonesDto,
   ) {
-    return this.camerasService.updateGuardianZones(id, zones);
+    return this.camerasService.updateGuardianZones(id, dto.zones);
   }
 }

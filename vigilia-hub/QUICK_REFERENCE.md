@@ -145,8 +145,8 @@ sudo reboot
 # Verificar URL en .env
 grep BACKEND_URL /opt/vigilia-hub/.env
 
-# Probar conectividad
-curl http://tu-backend:3000/health
+# Probar TLS + credencial del hub (no hay /health público): 200 o 401.
+# Procedimiento sin exponer el secret: INSTALLATION.md, "6.4 Test de Conectividad"
 
 # Ver logs de conexión
 sudo journalctl -u vigilia-hub | grep -i "websocket\|backend"

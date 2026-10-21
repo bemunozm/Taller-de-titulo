@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { validateEnv } from './config/env.validation';
+import { buildTypeOrmOptions } from './database/typeorm-options';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
 import { AuthModule as BetterAuthModule } from '@thallesp/nestjs-better-auth';
@@ -8,6 +10,7 @@ import { RolesModule } from './roles/roles.module';
 import { TokensModule } from './tokens/tokens.module';
 import { AuthModule } from './auth/auth.module';
 import { auth } from './auth/better-auth';
+import { clientIpHeaderMiddleware } from './auth/middleware/client-ip.middleware';
 import { PermissionsModule } from './permissions/permissions.module';
 import { StreamsModule } from './streams/streams.module';
 import { DataInitializationService } from './common/services/data-initialization.service';
@@ -17,6 +20,7 @@ import { Permission } from './permissions/entities/permission.entity';
 import { AccessAttempt } from './detections/entities/access-attempt.entity';
 import { Notification } from './notifications/entities/notification.entity';
 import { Visit } from './visits/entities/visit.entity';
+import { ConciergeSession } from './digital-concierge/entities/concierge-session.entity';
 import { CamerasModule } from './cameras/cameras.module';
 import { DetectionsModule } from './detections/detections.module';
 import { VehiclesModule } from './vehicles/vehicles.module';
@@ -34,28 +38,30 @@ import { AnomaliesModule } from './anomalies/anomalies.module';
 import { TenantModule } from './common/tenant/tenant.module';
 import { OnboardingModule } from './onboarding/onboarding.module';
 import { AgentModule } from './agent/agent.module';
+import { PrivacyModule } from './privacy/privacy.module';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }), // Carga las variables de entorno y las hace globales
+    // Carga las variables de entorno, las hace globales y las VALIDA al arrancar
+    // (P2: falla si faltan, si hay placeholders o si los secretos son débiles).
+    ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
     ScheduleModule.forRoot(), // Habilita las tareas programadas
-    TypeOrmModule.forRoot({
-      type: 'postgres',
-      host: process.env.DB_HOST,
-      port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 5432,
-      username: process.env.DB_USER,
-      password: process.env.DB_PASSWORD,
-      database: process.env.DB_NAME,
-      autoLoadEntities: true, // Carga automaticamente las entidades
-      // Tarea #21 (hardening): `synchronize: true` en producción puede alterar
-      // el schema de forma destructiva en cada arranque (drop/recreate de
-      // columnas, pérdida de datos) — solo debe usarse en dev. Producción
-      // necesita migraciones reales de TypeORM (`typeorm migration:generate` +
-      // `migration:run`), que hoy NO existen en este repo — son prerequisito
-      // antes de desplegar con NODE_ENV=production (ver reporte de la tarea).
-      synchronize: process.env.NODE_ENV !== 'production',
+    // Fuente única de opciones (src/database/typeorm-options.ts), compartida con
+    // el CLI de migraciones (src/database/data-source.ts). El esquema lo crean
+    // las migraciones; `synchronize` solo con DB_SYNCHRONIZE=true (nunca en prod).
+    TypeOrmModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => buildTypeOrmOptions(config),
     }),
-    TypeOrmModule.forFeature([Role, Permission, AccessAttempt, Notification, Visit]),
+    TypeOrmModule.forFeature([
+      Role,
+      Permission,
+      AccessAttempt,
+      Notification,
+      Visit,
+      // Fase 4 · P7 (QA A2): ExpirationService cierra las sesiones abandonadas.
+      ConciergeSession,
+    ]),
     // POC Fase 0 (docs/modulos/auth-multitenant.md): better-auth montado EN
     // PARALELO al AuthModule propio (JWT+RBAC, sigue intacto más abajo).
     // `disableGlobalAuthGuard: true` es CRÍTICO: sin esto la librería registra
@@ -63,7 +69,15 @@ import { AgentModule } from './agent/agent.module';
     // las rutas existentes, que hoy usan su propio guard. Con el guard global
     // deshabilitado, better-auth solo expone sus endpoints (/api/auth/*) y no
     // interfiere con el resto de la API.
-    BetterAuthModule.forRoot({ auth, disableGlobalAuthGuard: true }),
+    //
+    // `middleware` corre justo antes del handler de /api/auth (hallazgo M1):
+    // fija `x-client-ip = req.ip` (respeta TRUST_PROXY) y borra los headers
+    // de IP del cliente, para que el rate-limit de better-auth vea la IP real.
+    BetterAuthModule.forRoot({
+      auth,
+      disableGlobalAuthGuard: true,
+      middleware: clientIpHeaderMiddleware,
+    }),
     // Tarea #19 (docs/modulos/auth-multitenant.md §7): mecanismo de tenant
     // scoping reutilizable (TenantContextService + interceptor global).
     // Global, así que no hace falta re-importarlo en cada módulo de dominio.
@@ -75,21 +89,23 @@ import { AgentModule } from './agent/agent.module';
     PermissionsModule,
     StreamsModule,
     CamerasModule,
-  DetectionsModule,
-  VehiclesModule,
-  WorkersModule,
-  FamiliesModule,
-  UnitsModule,
-  VisitsModule,
-  NotificationsModule,
-  DigitalConciergeModule,
-  AuditModule,
-  LogsModule,
-  DashboardModule,
-  HubModule,
-  AnomaliesModule,
-  OnboardingModule,
-  AgentModule,
+    DetectionsModule,
+    VehiclesModule,
+    WorkersModule,
+    FamiliesModule,
+    UnitsModule,
+    VisitsModule,
+    NotificationsModule,
+    DigitalConciergeModule,
+    AuditModule,
+    LogsModule,
+    DashboardModule,
+    HubModule,
+    AnomaliesModule,
+    OnboardingModule,
+    AgentModule,
+    // Fase 4 · P7.R: retención diaria y supresión (Ley 21.719).
+    PrivacyModule,
   ],
   controllers: [],
   providers: [DataInitializationService, ExpirationService],

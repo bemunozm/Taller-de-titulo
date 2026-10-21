@@ -5,9 +5,17 @@ import { StreamsService } from './streams.service';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { User } from 'src/users/entities/user.entity';
 import { CamerasModule } from 'src/cameras/cameras.module';
+import { MediamtxModule } from 'src/mediamtx/mediamtx.module';
 
 @Module({
-  imports: [HttpModule, TypeOrmModule.forFeature([User]), CamerasModule],
+  // Fase 4 · P6.M: MediamtxModule para esperar el stream tras re-registrar
+  // una cámara que MediaMTX perdió al reiniciarse.
+  imports: [
+    HttpModule,
+    TypeOrmModule.forFeature([User]),
+    CamerasModule,
+    MediamtxModule,
+  ],
   controllers: [StreamsController],
   providers: [StreamsService],
   exports: [StreamsService],

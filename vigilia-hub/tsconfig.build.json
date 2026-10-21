@@ -1,0 +1,14 @@
+// Build de producción (`npm run build`): solo `src/` con `rootDir: src`, así
+// tsc emite `dist/main.js`, que es lo que ejecutan `npm start`, install.sh y la
+// unidad systemd. `tsconfig.json` incluye `tests/` para el typecheck y Jest; si
+// se compilara con él, la salida quedaría en `dist/src/main.js` (Fase 4 · P6.M).
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "types": ["node"]
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "tests"]
+}

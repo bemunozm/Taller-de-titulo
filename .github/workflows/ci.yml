@@ -1,0 +1,262 @@
+# CI de Vigilia (Fase 4 · P8.C, docs/modulos/hardening-pre-piloto.md, "Detalle de la P8").
+#
+# Bloqueantes: backend (typecheck, build, unit, migraciones contra Postgres 15
+# y e2e), vigilia-hub (typecheck, test con umbral de cobertura, build),
+# frontend (test y build) y lpr (pytest con el set liviano requirements-ci.txt).
+# No bloqueantes (pasos con continue-on-error, resumidos en el Summary del job):
+# `lint:check` del backend, `lint` del frontend y `npm audit --audit-level=high`.
+#
+# Sin secretos: la contraseña del Postgres del service es de un contenedor
+# efímero que solo vive durante el job. Para correr lo mismo en local:
+# scripts/gate.sh (ver scripts/README.md).
+name: CI
+
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+    branches: [main, 'feature/**']
+
+# Un push nuevo a la misma rama/PR cancela la corrida anterior; en main no se
+# cancela (cada commit de main queda verificado).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: vigilia_ci
+          POSTGRES_PASSWORD: vigilia_ci
+          POSTGRES_DB: vigilia_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vigilia_ci -d vigilia_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # Los lee src/database/data-source.ts (CLI de migraciones). Sin
+      # synchronize: el esquema lo crean SOLO las migraciones.
+      DB_HOST: localhost
+      DB_PORT: '5432'
+      DB_USER: vigilia_ci
+      DB_PASSWORD: vigilia_ci
+      DB_NAME: vigilia_ci
+      DB_SYNCHRONIZE: 'false'
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Instalar dependencias
+        id: install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Tests unitarios
+        run: npm test
+
+      - name: Migraciones (BD vacía)
+        run: npm run migration:run
+
+      - name: Drift entre entidades y migraciones
+        run: npm run migration:check
+
+      # E2E de caja negra (P8.B, test/e2e/harness): el globalSetup toma la
+      # conexión de los DB_* del job (vigilia_ci es superusuario: crea y borra
+      # su BD `vigilia_e2e_*` desde la BD de mantenimiento `postgres`), corre
+      # las migraciones, arranca la app compilada con un env de prueba y
+      # secretos que genera el propio harness, y apunta OpenAI y SMTP a
+      # servidores falsos locales. Sin secretos en el workflow.
+      # `test:e2e:run` usa el `dist/` del paso Build (`test:e2e` compilaría de
+      # nuevo). Alternativa a los DB_*:
+      # E2E_DATABASE_URL=postgres://vigilia_ci:vigilia_ci@localhost:5432/postgres
+      - name: Tests e2e
+        env:
+          E2E_ARTIFACTS_DIR: ${{ runner.temp }}/vigilia-e2e
+        run: npm run test:e2e:run
+
+      - name: Logs de los e2e (si fallan)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vigilia-e2e-logs
+          path: ${{ runner.temp }}/vigilia-e2e
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # --- No bloqueantes -------------------------------------------------
+      - name: Lint (no bloqueante)
+        id: lint
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        continue-on-error: true
+        run: npm run lint:check
+
+      - name: npm audit (no bloqueante)
+        id: audit
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: npm audit --audit-level=high
+
+      - name: Resumen no bloqueante
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo "### backend: chequeos no bloqueantes"
+            echo "| chequeo | resultado |"
+            echo "| --- | --- |"
+            echo "| lint:check | ${{ steps.lint.outcome }} |"
+            echo "| npm audit --audit-level=high | ${{ steps.audit.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  hub:
+    name: vigilia-hub
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: vigilia-hub
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: vigilia-hub/package-lock.json
+
+      # `pigpio` es opcional: aquí no compila (no hay librería C de pigpio) y
+      # npm sigue; el gpio-wrapper simula el GPIO.
+      - name: Instalar dependencias
+        id: install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Corre toda la suite y aplica el umbral de cobertura (jest.config.js).
+      - name: Tests (con umbral de cobertura)
+        run: npm run test:coverage
+
+      - name: Build
+        run: npm run build
+
+      - name: npm audit (no bloqueante)
+        id: audit
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: npm audit --audit-level=high
+
+      - name: Resumen no bloqueante
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo "### vigilia-hub: chequeos no bloqueantes"
+            echo "| chequeo | resultado |"
+            echo "| --- | --- |"
+            echo "| npm audit --audit-level=high | ${{ steps.audit.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Instalar dependencias
+        id: install
+        run: npm ci
+
+      - name: Tests
+        run: npm run test:run
+
+      - name: Build
+        run: npm run build
+
+      # --- No bloqueantes -------------------------------------------------
+      - name: Lint (no bloqueante)
+        id: lint
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        continue-on-error: true
+        run: npm run lint
+
+      - name: npm audit (no bloqueante)
+        id: audit
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: npm audit --audit-level=high
+
+      - name: Resumen no bloqueante
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo "### frontend: chequeos no bloqueantes"
+            echo "| chequeo | resultado |"
+            echo "| --- | --- |"
+            echo "| lint | ${{ steps.lint.outcome }} |"
+            echo "| npm audit --audit-level=high | ${{ steps.audit.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  lpr:
+    name: lpr
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: lpr/requirements-ci.txt
+
+      # Set liviano (sin torch/ultralytics): ver el comentario en el archivo.
+      - name: Instalar dependencias de test
+        run: python -m pip install -r lpr/requirements-ci.txt
+
+      # Desde la raíz del repo: tests/conftest.py agrega la raíz al sys.path.
+      - name: Tests
+        run: python -m pytest lpr/tests

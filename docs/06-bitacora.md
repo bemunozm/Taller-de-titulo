@@ -4,6 +4,43 @@ Registro cronológico de conversaciones, decisiones y avances. Lo más reciente 
 
 ---
 
+## 2026-10-08 → 2026-10-09 — Fase 4: hardening pre-piloto ✅ (código + gate)
+
+**Metodología de Benjamin.** Todas las fases siguieron estos pasos:
+1. Exploración con `codebase-explorer` y CodeGraph.
+2. Plan en Plan Mode, con fases P0 a P10 y decisiones D1 a D16.
+3. Cada fase delegada a agentes especializados.
+4. Revisión de Nova con ciberseguridad y QA, por rondas hasta aprobar.
+5. Tests unitarios por fase y e2e solo en el gate.
+
+**Avance por fase:**
+- **P1, red de tests:** 67 tests rojos reparados y Vitest en el frontend.
+- **P2, base de producción:** migración base, validación de env y retiro del JWT legacy. El LPR pasó a `x-api-key`.
+- **P3, máquina de estados de visitas:** nuevo estado `AWAITING_APPROVAL` y LPR que falla cerrado. Benjamin decidió hacer check-in al aprobar, con una espera de salida.
+- **P4:** `/respond` solo con sesión humana, emparejamiento del kiosko en runtime, tools por canal, throttling y lista blanca HTTP de better-auth.
+- **P5:** roles inmutables con `RoleAssignmentPolicy`, aislamiento por condominio y alcance por familia. Benjamin decidió que el vehículo de un residente abre de inmediato.
+- **P6:** sockets autenticados con salas del servidor. MediaMTX ahora autentica contra el backend: cerraba un RCE local vía su API. Calce exacto de casa.
+- **P7, privacidad (Ley 21.719):** retención y anonimización, derechos, aviso de IA y un ReDoS cerrado.
+- **P8:** CI en GitHub Actions, e2e de caja negra y gate local.
+- **P9:** gate completo en verde. Los e2e pasaron 33/33 a la primera; su único fallo fue el JSON de configuración. Revisión final de ciberseguridad y QA, más una ronda de higiene: límite de body con key verificada, `HOST`, Swagger, cookies, DTO de zonas, headers de Vercel e `install.sh` endurecido.
+
+**Números finales:**
+- backend: 130 suites / 2823 tests, cobertura 82,6/74,1/80,0/82,4;
+- e2e: 36;
+- hub: 176;
+- frontend: 627;
+- lpr: 53.
+
+**Detalle:** [modulos/hardening-pre-piloto.md](modulos/hardening-pre-piloto.md) §7 · Privacidad: [modulos/privacidad-ley-21719.md](modulos/privacidad-ley-21719.md) · Smoke: [modulos/smoke-pre-piloto.md](modulos/smoke-pre-piloto.md).
+
+**Pendientes:**
+- **P10:** commits y PR (los dispara Benjamin).
+- **Smoke manual.**
+- **Operación:** secretos nuevos, BD limpia, backfill de membresías, hubs con condominio, `VITE_KIOSK_*` fuera de Vercel, ruleset en `main`, secret scanning y Raspberry de 64 bits.
+- **Hardware:** conflicto de GPIO 22 (hangup y relé de puerta) y si `pigpio` exige root.
+
+---
+
 ## 2026-07-12 — Fase 0 #20: frontend a cookies ✅ → FASE 0 COMPLETA (7/7)
 - Delegado a frontend-senior-dev, más fixes de regresión (CameraPlayer/useNotifications/WebSocketService) y verificación en navegador por Nova.
 - Cutover a cookies httpOnly de better-auth: axios withCredentials, login/logout/getUser por cookie, vistas reset/confirm con token opaco. `seed-admin` provisiona la cuenta better-auth (prereq). Cero `AUTH_TOKEN` en el frontend.

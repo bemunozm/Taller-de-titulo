@@ -5,7 +5,10 @@ import {
 } from '@nestjs/common';
 import { z } from 'zod';
 import type { Repository } from 'typeorm';
-import { PendingActionsService } from './pending-actions.service';
+import {
+  PENDING_ACTION_MAX_AGE_MS,
+  PendingActionsService,
+} from './pending-actions.service';
 import {
   PendingAction,
   PendingActionStatus,
@@ -83,12 +86,7 @@ describe('PendingActionsService', () => {
   let conciergeService: jest.Mocked<
     Pick<DigitalConciergeService, 'findSessionForTenant'>
   >;
-  let hubGateway: jest.Mocked<
-    Pick<
-      HubGateway,
-      'isHubConnected' | 'sendToHub' | 'sendToOrganization' | 'sendToSession'
-    >
-  >;
+  let hubGateway: jest.Mocked<Pick<HubGateway, 'sendVisitorResponse'>>;
   let idCounter: number;
 
   const baseCtx: AuthorizedContext = {
@@ -96,6 +94,7 @@ describe('PendingActionsService', () => {
     isSuperAdmin: false,
     userId: undefined,
     role: 'hub',
+    channel: 'physical-hub',
     scopes: ['digital-concierge.access'],
     requestId: 'req-1',
     sessionId: 'session-1',
@@ -107,6 +106,7 @@ describe('PendingActionsService', () => {
     status: SessionStatus.ACTIVE,
     organizationId: 'condo-A',
     hubId: null,
+    startTime: new Date(),
   } as ConciergeSession;
 
   function makeTool(
@@ -120,6 +120,7 @@ describe('PendingActionsService', () => {
       access: 'write',
       requiresApproval: true,
       requiredScopes: ['digital-concierge.access'],
+      allowedChannels: ['physical-hub', 'web-kiosk', 'human'],
       execute: jest.fn().mockResolvedValue({ ok: true }),
       ...overrides,
     };
@@ -135,7 +136,12 @@ describe('PendingActionsService', () => {
       ),
       save: jest.fn((entity: PendingAction) => {
         const id = entity.id ?? `pending-${++idCounter}`;
-        const saved = { ...entity, id } as PendingAction;
+        // Réplica de `@CreateDateColumn`: la BD fija `createdAt` al insertar.
+        const saved = {
+          ...entity,
+          id,
+          createdAt: entity.createdAt ?? new Date(),
+        };
         store.set(id, saved);
         return Promise.resolve(saved);
       }),
@@ -175,29 +181,10 @@ describe('PendingActionsService', () => {
     conciergeService = {
       findSessionForTenant: jest.fn().mockResolvedValue(activeSession),
     };
-    hubGateway = {
-      isHubConnected: jest.fn().mockReturnValue(false),
-      sendToHub: jest.fn().mockReturnValue(true),
-      sendToOrganization: jest.fn(),
-      // Réplica fiel de `HubGateway.sendToSession` real (limpieza post-
-      // auditoría, dedup DUP1): delega en los mocks de arriba en vez de
-      // mockearse por separado, así las aserciones existentes sobre
-      // `sendToHub`/`sendToOrganization` siguen validando el mismo criterio
-      // (hub propio conectado vs. broadcast por organización) sin cambios.
-      sendToSession: jest.fn(
-        (
-          session: { hubId: string | null; organizationId: string | null },
-          event: string,
-          data: unknown,
-        ) => {
-          if (session.hubId && hubGateway.isHubConnected(session.hubId)) {
-            hubGateway.sendToHub(session.hubId, event, data);
-            return;
-          }
-          hubGateway.sendToOrganization(session.organizationId, event, data);
-        },
-      ),
-    };
+    // Fase 4 · P4 (D7): el enrutamiento de visitor:response (solo al dueño de
+    // la sesión, sin caer al condominio) vive en HubGateway.sendVisitorResponse
+    // y se prueba en hub.gateway.spec.ts.
+    hubGateway = { sendVisitorResponse: jest.fn().mockReturnValue(true) };
 
     service = new PendingActionsService(
       repo as unknown as Repository<PendingAction>,
@@ -443,7 +430,7 @@ describe('PendingActionsService', () => {
         conciergeService.findSessionForTenant.mockResolvedValue({
           ...activeSession,
           status: SessionStatus.COMPLETED,
-        } as ConciergeSession);
+        });
 
         const tool = makeTool();
         toolRegistry.get.mockReturnValue(tool);
@@ -507,6 +494,97 @@ describe('PendingActionsService', () => {
         expect(conciergeService.findSessionForTenant).not.toHaveBeenCalled();
         // eslint-disable-next-line @typescript-eslint/unbound-method -- jest.fn() mock, no `this` binding involved
         expect(tool.execute).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    /**
+     * Fase 4 · P4.B (cyber B1, QA B9): el replay respeta el canal del
+     * snapshot y una antigüedad máxima de 15 min.
+     */
+    describe('replay: canal del snapshot y antigüedad máxima', () => {
+      const tenantScope = { tenantId: 'condo-A', isSuperAdmin: false };
+
+      /** Crea la acción y le reescribe campos en el "store" (la fila en BD). */
+      async function storedAction(
+        tool: VigiliaTool<{ x: string }, { ok: boolean }>,
+        patch: Partial<PendingAction> = {},
+      ): Promise<PendingAction> {
+        toolRegistry.get.mockReturnValue(tool);
+        const action = await service.create(tool, baseCtx, { x: 'a' });
+        const updated = { ...action, ...patch };
+        store.set(action.id, updated);
+        return updated;
+      }
+
+      async function expectExpiredWithoutExecuting(
+        tool: VigiliaTool<{ x: string }, { ok: boolean }>,
+        action: PendingAction,
+        lastError: string,
+      ): Promise<void> {
+        await expect(
+          service.approve(action.id, tenantScope, 'user-1'),
+        ).rejects.toThrow(BadRequestException);
+
+        // eslint-disable-next-line @typescript-eslint/unbound-method -- jest.fn() mock, no `this` binding involved
+        expect(tool.execute).not.toHaveBeenCalled();
+        const stored = store.get(action.id);
+        expect(stored?.status).toBe(PendingActionStatus.EXPIRED);
+        expect(stored?.lastError).toContain(lastError);
+        expect(hubGateway.sendVisitorResponse).not.toHaveBeenCalled();
+      }
+
+      it('snapshot SIN canal (anterior a P4.B o alterado): cuenta como unknown y expira sin ejecutar', async () => {
+        const tool = makeTool();
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars -- se destructura solo para quitar `channel` del snapshot.
+        const { channel: _omitted, ...withoutChannel } = baseCtx;
+        const action = await storedAction(tool, {
+          contextSnapshot: withoutChannel,
+        });
+
+        await expectExpiredWithoutExecuting(tool, action, 'canal "unknown"');
+      });
+
+      it('snapshot de un canal que la tool no permite (kiosko + apertura): expira sin ejecutar', async () => {
+        const tool = makeTool({ allowedChannels: ['physical-hub', 'human'] });
+        const action = await storedAction(tool, {
+          contextSnapshot: { ...baseCtx, channel: 'web-kiosk' },
+        });
+
+        await expectExpiredWithoutExecuting(tool, action, 'canal "web-kiosk"');
+      });
+
+      it('acción con más de 15 min: expira sin ejecutar (sin depender del timeout de la sesión)', async () => {
+        const tool = makeTool();
+        const action = await storedAction(tool, {
+          createdAt: new Date(Date.now() - PENDING_ACTION_MAX_AGE_MS - 1_000),
+        });
+
+        await expectExpiredWithoutExecuting(tool, action, 'más de 15 minutos');
+        expect(conciergeService.findSessionForTenant).not.toHaveBeenCalled();
+      });
+
+      it('sesión ACTIVE pero con más de 15 min (timeout aún no aplicado): expira sin ejecutar', async () => {
+        conciergeService.findSessionForTenant.mockResolvedValue({
+          ...activeSession,
+          startTime: new Date(Date.now() - PENDING_ACTION_MAX_AGE_MS - 1_000),
+        });
+        const tool = makeTool();
+        const action = await storedAction(tool);
+
+        await expectExpiredWithoutExecuting(tool, action, 'más de 15 minutos');
+      });
+
+      it('canal permitido y dentro de plazo: ejecuta con el canal del snapshot', async () => {
+        const tool = makeTool({ allowedChannels: ['physical-hub', 'human'] });
+        const action = await storedAction(tool);
+
+        await service.approve(action.id, tenantScope, 'user-1');
+
+        // eslint-disable-next-line @typescript-eslint/unbound-method -- jest.fn() mock, no `this` binding involved
+        expect(tool.execute).toHaveBeenCalledWith(
+          expect.objectContaining({ channel: 'physical-hub' }),
+          { x: 'a' },
+        );
       });
     });
   });
@@ -600,17 +678,21 @@ describe('PendingActionsService', () => {
   });
 
   /**
-   * Gap de UX cerrado en esta tarea: hasta ahora `approve`/`reject` solo
-   * notificaban a los conserjes (in-app) — el visitante que sigue en la
-   * llamada de citófono nunca se enteraba en vivo. `notifyVisitorLive` reusa
-   * el MISMO canal (`visitor:response:<sessionId>`) y mecanismo
-   * (`HubGateway.sendToHub`/`sendToOrganization`) que
-   * `DigitalConciergeService.respondToVisitor` — acá se mockea `HubGateway`
-   * directo (mismo patrón que `abrir-acceso.tool.spec.ts`), NO
-   * `DigitalConciergeService.respondToVisitor`.
+   * `notifyVisitorLive` avisa al visitante que sigue en la llamada por el
+   * MISMO canal que `DigitalConciergeService.respondToVisitor`
+   * (`visitor:response:<sessionId>`). Fase 4 · P4: va por
+   * `HubGateway.sendVisitorResponse` (solo al dueño de la sesión) y todo
+   * payload lleva `approved` y `entryRegistered`; `entryRegistered` es `true`
+   * solo si la tool realmente abrió el acceso.
    */
   describe('aviso en vivo al visitante (visitor:response:<sessionId>)', () => {
-    it('approve() con sessionId y sesión ACTIVE emite visitor:response:<sessionId> con outcome "approved"', async () => {
+    function lastVisitorResponse(): [unknown, Record<string, unknown>] {
+      const calls = hubGateway.sendVisitorResponse.mock.calls as unknown[][];
+      expect(calls).toHaveLength(1);
+      return calls[0] as [unknown, Record<string, unknown>];
+    }
+
+    it('approve() de una tool que no abre: approved true y entryRegistered false (nunca "pase")', async () => {
       const tool = makeTool();
       toolRegistry.get.mockReturnValue(tool);
       const action = await service.create(tool, baseCtx, { x: 'a' }); // baseCtx.sessionId === 'session-1'
@@ -621,26 +703,27 @@ describe('PendingActionsService', () => {
         'user-1',
       );
 
-      expect(hubGateway.sendToOrganization).toHaveBeenCalledWith(
-        'condo-A',
-        'visitor:response:session-1',
+      const [target, payload] = lastVisitorResponse();
+      expect(target).toBe(activeSession);
+      expect(payload).toEqual(
         expect.objectContaining({
-          sessionId: 'session-1',
+          approved: true,
+          entryRegistered: false,
           outcome: 'approved',
           toolName: 'abrir_porton_test',
+          pendingActionId: action.id,
         }),
       );
-      expect(hubGateway.sendToHub).not.toHaveBeenCalled();
     });
 
-    it('approve() dirige el evento al hub propio de la sesión cuando está conectado (mismo criterio que abrir_acceso)', async () => {
-      conciergeService.findSessionForTenant.mockResolvedValue({
-        ...activeSession,
-        hubId: 'hub-1',
-      } as ConciergeSession);
-      hubGateway.isHubConnected.mockReturnValue(true);
-
-      const tool = makeTool();
+    it('approve() de abrir_acceso que abrió (abierto: true): approved y entryRegistered true', async () => {
+      const tool = makeTool({
+        name: 'abrir_acceso',
+        outputSchema: z.object({ abierto: z.boolean(), mensaje: z.string() }),
+        execute: jest
+          .fn()
+          .mockResolvedValue({ abierto: true, mensaje: 'Listo' }),
+      } as unknown as Partial<VigiliaTool<{ x: string }, { ok: boolean }>>);
       toolRegistry.get.mockReturnValue(tool);
       const action = await service.create(tool, baseCtx, { x: 'a' });
 
@@ -650,15 +733,36 @@ describe('PendingActionsService', () => {
         'user-1',
       );
 
-      expect(hubGateway.sendToHub).toHaveBeenCalledWith(
-        'hub-1',
-        'visitor:response:session-1',
-        expect.objectContaining({ outcome: 'approved' }),
+      const [, payload] = lastVisitorResponse();
+      expect(payload).toEqual(
+        expect.objectContaining({ approved: true, entryRegistered: true }),
       );
-      expect(hubGateway.sendToOrganization).not.toHaveBeenCalled();
     });
 
-    it('reject() con sessionId y sesión ACTIVE emite visitor:response:<sessionId> con outcome "rejected"', async () => {
+    it('approve() de abrir_acceso sin hub físico (abierto: false): entryRegistered false', async () => {
+      const tool = makeTool({
+        name: 'abrir_acceso',
+        outputSchema: z.object({ abierto: z.boolean(), mensaje: z.string() }),
+        execute: jest
+          .fn()
+          .mockResolvedValue({ abierto: false, mensaje: 'No pude' }),
+      } as unknown as Partial<VigiliaTool<{ x: string }, { ok: boolean }>>);
+      toolRegistry.get.mockReturnValue(tool);
+      const action = await service.create(tool, baseCtx, { x: 'a' });
+
+      await service.approve(
+        action.id,
+        { tenantId: 'condo-A', isSuperAdmin: false },
+        'user-1',
+      );
+
+      const [, payload] = lastVisitorResponse();
+      expect(payload).toEqual(
+        expect.objectContaining({ approved: true, entryRegistered: false }),
+      );
+    });
+
+    it('reject() con sessionId y sesión ACTIVE: approved false, entryRegistered false, outcome "rejected"', async () => {
       const tool = makeTool();
       const action = await service.create(tool, baseCtx, { x: 'a' });
 
@@ -668,11 +772,11 @@ describe('PendingActionsService', () => {
         'user-1',
       );
 
-      expect(hubGateway.sendToOrganization).toHaveBeenCalledWith(
-        'condo-A',
-        'visitor:response:session-1',
+      const [, payload] = lastVisitorResponse();
+      expect(payload).toEqual(
         expect.objectContaining({
-          sessionId: 'session-1',
+          approved: false,
+          entryRegistered: false,
           outcome: 'rejected',
         }),
       );
@@ -701,8 +805,7 @@ describe('PendingActionsService', () => {
         'user-1',
       );
 
-      expect(hubGateway.sendToHub).not.toHaveBeenCalled();
-      expect(hubGateway.sendToOrganization).not.toHaveBeenCalled();
+      expect(hubGateway.sendVisitorResponse).not.toHaveBeenCalled();
       expect(conciergeService.findSessionForTenant).not.toHaveBeenCalled();
     });
 
@@ -712,7 +815,7 @@ describe('PendingActionsService', () => {
       conciergeService.findSessionForTenant.mockResolvedValue({
         ...activeSession,
         status: SessionStatus.COMPLETED,
-      } as ConciergeSession);
+      });
 
       const rejected = await service.reject(
         action.id,
@@ -721,8 +824,7 @@ describe('PendingActionsService', () => {
       );
 
       expect(rejected.status).toBe(PendingActionStatus.REJECTED);
-      expect(hubGateway.sendToHub).not.toHaveBeenCalled();
-      expect(hubGateway.sendToOrganization).not.toHaveBeenCalled();
+      expect(hubGateway.sendVisitorResponse).not.toHaveBeenCalled();
     });
 
     it('la sesión ya no existe/no pertenece al tenant al momento de avisar: no emite ni rompe el reject', async () => {
@@ -739,8 +841,171 @@ describe('PendingActionsService', () => {
       );
 
       expect(rejected.status).toBe(PendingActionStatus.REJECTED);
-      expect(hubGateway.sendToHub).not.toHaveBeenCalled();
-      expect(hubGateway.sendToOrganization).not.toHaveBeenCalled();
+      expect(hubGateway.sendVisitorResponse).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * Fase 4 · P7.L (docs/modulos/privacidad-ley-21719.md §3): `pending_actions`
+   * con los datos personales minimizados, sin romper el replay. Ver el
+   * docstring de `replaySnapshotOf` en el servicio.
+   */
+  describe('datos personales al persistir (Fase 4 · P7.L)', () => {
+    const tenantScope = { tenantId: 'condo-A', isSuperAdmin: false };
+    const PII_INPUT = {
+      nombre: 'Juan Pérez',
+      rut: '12.345.678-5',
+      tipo: 'porton',
+    };
+    const REDACTED_INPUT = {
+      nombre: '[REDACTED]',
+      rut: '***-5',
+      tipo: 'porton',
+    };
+    const PII_OUTPUT = { ok: true, propietario: 'Ana Soto', patente: 'ABCD12' };
+
+    /** Tool de prueba que escala, con datos personales en input y salida. */
+    function makePiiTool(execute: jest.Mock): VigiliaTool<unknown, unknown> {
+      return {
+        name: 'registrar_visitante_test',
+        description: 'tool de test con datos personales',
+        inputSchema: z.object({
+          nombre: z.string(),
+          rut: z.string(),
+          tipo: z.string(),
+        }),
+        outputSchema: z.object({
+          ok: z.boolean(),
+          propietario: z.string(),
+          patente: z.string(),
+        }),
+        access: 'write',
+        requiresApproval: true,
+        requiredScopes: ['digital-concierge.access'],
+        allowedChannels: ['physical-hub', 'web-kiosk', 'human'],
+        execute,
+      };
+    }
+
+    it('contextSnapshot: solo los campos del replay, copiados uno a uno', async () => {
+      const ctxWithExtra = {
+        ...baseCtx,
+        userId: 'user-1',
+        visitorName: 'Juan Pérez',
+      } as AuthorizedContext;
+
+      const action = await service.create(makeTool(), ctxWithExtra, {
+        x: 'a',
+      });
+
+      expect(store.get(action.id)?.contextSnapshot).toStrictEqual({
+        tenantId: 'condo-A',
+        isSuperAdmin: false,
+        userId: 'user-1',
+        role: 'hub',
+        channel: 'physical-hub',
+        scopes: ['digital-concierge.access'],
+        requestId: 'req-1',
+        sessionId: 'session-1',
+      });
+    });
+
+    it('input íntegro hasta ejecutar; al terminar, input y result redactados (la respuesta al aprobador no)', async () => {
+      const execute = jest.fn().mockResolvedValue(PII_OUTPUT);
+      const tool = makePiiTool(execute);
+      toolRegistry.get.mockReturnValue(tool);
+      const action = await service.create(tool, baseCtx, PII_INPUT);
+      expect(store.get(action.id)?.input).toEqual(PII_INPUT);
+
+      const first = await service.approve(action.id, tenantScope, 'user-1');
+
+      expect(execute).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tenantId: 'condo-A',
+          channel: 'physical-hub',
+        }),
+        PII_INPUT,
+      );
+      expect(first.result).toEqual(PII_OUTPUT);
+      const stored = store.get(action.id);
+      expect(stored?.status).toBe(PendingActionStatus.EXECUTED);
+      expect(stored?.input).toEqual(REDACTED_INPUT);
+      expect(stored?.result).toEqual({
+        ok: true,
+        propietario: '[REDACTED]',
+        patente: 'AB**12',
+      });
+
+      const second = await service.approve(action.id, tenantScope, 'user-2');
+
+      expect(second.alreadyExecuted).toBe(true);
+      expect(second.result).toEqual(stored?.result);
+      expect(execute).toHaveBeenCalledTimes(1);
+    });
+
+    it('failed: el input sigue íntegro para el reintento y lastError no guarda la patente', async () => {
+      const execute = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('El hub no abrió para ABCD12'))
+        .mockResolvedValueOnce(PII_OUTPUT);
+      const tool = makePiiTool(execute);
+      toolRegistry.get.mockReturnValue(tool);
+      const action = await service.create(tool, baseCtx, PII_INPUT);
+
+      await expect(
+        service.approve(action.id, tenantScope, 'user-1'),
+      ).rejects.toThrow('El hub no abrió');
+      const failed = store.get(action.id);
+      expect(failed?.status).toBe(PendingActionStatus.FAILED);
+      expect(failed?.input).toEqual(PII_INPUT);
+      expect(failed?.lastError).toBe('El hub no abrió para AB**12');
+
+      await service.approve(action.id, tenantScope, 'user-2');
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(execute).toHaveBeenLastCalledWith(expect.anything(), PII_INPUT);
+      expect(store.get(action.id)?.input).toEqual(REDACTED_INPUT);
+    });
+
+    it('rejected y expired (terminales): input redactado', async () => {
+      const execute = jest.fn();
+      const tool = makePiiTool(execute);
+      toolRegistry.get.mockReturnValue(tool);
+
+      const toReject = await service.create(tool, baseCtx, PII_INPUT);
+      await service.reject(toReject.id, tenantScope, 'user-1');
+      expect(store.get(toReject.id)?.status).toBe(PendingActionStatus.REJECTED);
+      expect(store.get(toReject.id)?.input).toEqual(REDACTED_INPUT);
+
+      conciergeService.findSessionForTenant.mockResolvedValue({
+        ...activeSession,
+        status: SessionStatus.COMPLETED,
+      });
+      const toExpire = await service.create(tool, baseCtx, PII_INPUT);
+      await expect(
+        service.approve(toExpire.id, tenantScope, 'user-1'),
+      ).rejects.toThrow(BadRequestException);
+      expect(store.get(toExpire.id)?.status).toBe(PendingActionStatus.EXPIRED);
+      expect(store.get(toExpire.id)?.input).toEqual(REDACTED_INPUT);
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('la auditoría de la ejecución (system_logs) guarda input y output redactados', async () => {
+      const tool = makePiiTool(jest.fn().mockResolvedValue(PII_OUTPUT));
+      toolRegistry.get.mockReturnValue(tool);
+      const action = await service.create(tool, baseCtx, PII_INPUT);
+
+      await service.approve(action.id, tenantScope, 'user-1');
+
+      expect(logsService.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: expect.objectContaining({
+            toolName: 'registrar_visitante_test',
+            input: REDACTED_INPUT,
+            output: { ok: true, propietario: '[REDACTED]', patente: 'AB**12' },
+          }) as unknown,
+        }),
+      );
     });
   });
 });

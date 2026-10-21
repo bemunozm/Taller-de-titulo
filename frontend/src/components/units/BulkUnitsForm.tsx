@@ -1,7 +1,10 @@
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMemo } from 'react'
-import { createBulkUnitsSchema, type CreateBulkUnitsFormData } from '@/types/index'
+import { createBulkUnitsSchema, type CreateBulkUnitsFormData, type CreateBulkUnitsPayload } from '@/types/index'
+import { CONDOMINIUM_REQUIRED_MESSAGE, scopeCreatePayload } from '@/helpers/condominium'
+import { useCondominiumScope } from '@/hooks/useCondominiumScope'
+import { CondominiumSelect } from '@/components/condominiums/CondominiumSelect'
 import { Button } from '@/components/ui/Button'
 import { Field, Label } from '@/components/ui/Fieldset'
 import { Input } from '@/components/ui/Input'
@@ -9,30 +12,36 @@ import { Select } from '@/components/ui/Select'
 import { Switch } from '@/components/ui/Switch'
 
 type BulkUnitsFormProps = {
-    onSubmit: (formData: CreateBulkUnitsFormData) => void
+    /** Recibe el body listo para `POST /units/bulk` (con condominio solo si es super-admin). */
+    onSubmit: (payload: CreateBulkUnitsPayload) => void
     onCancel: () => void
 }
 
 export default function BulkUnitsForm({ onSubmit, onCancel }: BulkUnitsFormProps) {
+    // Super-admin: elige el condominio (obligatorio); nadie más lo envía.
+    const { chooseCondominium } = useCondominiumScope(false)
+
     const {
         register,
         handleSubmit,
         watch,
         setValue,
+        setError,
         formState: { errors, isSubmitting },
     } = useForm<CreateBulkUnitsFormData>({
         resolver: zodResolver(createBulkUnitsSchema),
         defaultValues: {
             active: true,
+            organizationId: '',
         },
     })
 
     const formValues = watch()
     const active = watch('active')
+    const { block, numberFrom, numberTo } = formValues
 
     // Calcular preview de unidades que se crearán
     const preview = useMemo(() => {
-        const { block, numberFrom, numberTo } = formValues
 
         if (!numberFrom || !numberTo || numberFrom > numberTo) {
             return { identifiers: [], count: 0, isValid: false }
@@ -54,19 +63,31 @@ export default function BulkUnitsForm({ onSubmit, onCancel }: BulkUnitsFormProps
         }
 
         return { identifiers, count, isValid: true }
-    }, [formValues.block, formValues.numberFrom, formValues.numberTo])
+    }, [block, numberFrom, numberTo])
 
     const handleFormSubmit = (data: CreateBulkUnitsFormData) => {
         // Validar que el rango sea válido
         if (data.numberFrom > data.numberTo) {
             return
         }
-        
-        onSubmit(data)
+        if (chooseCondominium && !data.organizationId) {
+            setError('organizationId', { type: 'required', message: CONDOMINIUM_REQUIRED_MESSAGE })
+            return
+        }
+
+        onSubmit(scopeCreatePayload(data, chooseCondominium))
     }
 
     return (
         <form onSubmit={handleSubmit(handleFormSubmit)} className="space-y-6">
+            {chooseCondominium && (
+                <CondominiumSelect
+                    {...register('organizationId')}
+                    errorMessage={errors.organizationId?.message}
+                    description="Las unidades se crean en este condominio."
+                />
+            )}
+
             {/* Bloque (opcional) */}
             <Field>
                 <Label>Bloque (Opcional)</Label>

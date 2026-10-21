@@ -11,7 +11,7 @@ from ultralytics import YOLO
 
 from lpr.utils.images import frame_to_pil, pil_to_base64
 from lpr.utils.capture import reconnect_capture
-from lpr.api.client import post_event, post_anomaly
+from lpr.api.client import post_event, post_anomaly, service_headers
 from lpr.settings import settings
 import requests
 
@@ -22,7 +22,7 @@ class GuardianWorker:
         self.model = YOLO('yolo11n.pt') 
         self.sightings = {} # track_id -> {'first_seen': float, 'last_seen': float}
         
-        max_workers = int(os.environ.get('LPR_MAX_WORKERS', '1'))
+        max_workers = int(settings.LPR_MAX_WORKERS)
         try:
             self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
         except Exception:
@@ -69,7 +69,16 @@ class GuardianWorker:
             # Backend url normally ends with /api/v1... We need /anomalies/cameras/:id/zones
             base = self.cfg.backend_url.replace('/detections', '').rstrip('/')
             url = f"{base}/anomalies/cameras/{self.cfg.camera_id}/zones"
-            resp = requests.get(url, timeout=5)
+            # Fase 4 · P5.B/P5.C: la ruta exige la API key de servicio
+            # (ServiceApiKeyGuard, acotada al condominio de la key). Sin el
+            # header respondía 401 y el Guardián corría SIN zonas (todo el
+            # cuadro). Misma credencial que la ingesta (`service_headers`).
+            resp = requests.get(url, headers=service_headers(), timeout=5)
+            if resp.status_code != 200:
+                logging.warning(
+                    'GET de zonas del Guardián para %s respondió %s: se mantienen las zonas anteriores',
+                    self.cfg.camera_id, resp.status_code,
+                )
             if resp.status_code == 200:
                 data = resp.json()
                 logging.info(f"[VIGILIA-DEBUG] [ZONE-FETCH] Raw data received: {json.dumps(data)}")

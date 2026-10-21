@@ -1,6 +1,16 @@
-import { Injectable, NotFoundException, forwardRef, Inject, Logger, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  forwardRef,
+  Inject,
+  Logger,
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, type SelectQueryBuilder } from 'typeorm';
 import { PlateDetection } from './entities/plate-detection.entity';
 import { AccessAttempt } from './entities/access-attempt.entity';
 import { Camera } from '../cameras/entities/camera.entity';
@@ -12,14 +22,62 @@ import { VisitsService } from '../visits/visits.service';
 import { User } from '../users/entities/user.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { UsersService } from '../users/users.service';
-import { NotificationType, NotificationPriority } from '../notifications/entities/notification.entity';
+import {
+  NotificationType,
+  NotificationPriority,
+} from '../notifications/entities/notification.entity';
 import { HubGateway } from '../hub/hub.gateway';
-import { applyTenantFilter } from '../common/tenant/tenant-context.util';
+import {
+  applyTenantFilter,
+  scopeWhere,
+} from '../common/tenant/tenant-context.util';
 import type { TenantContext } from '../common/tenant/tenant-context.types';
+import type { FamilyScope } from '../common/tenant/tenant-actor';
+import { Visit, VisitStatus } from '../visits/entities/visit.entity';
+import { Vehicle } from '../vehicles/entities/vehicle.entity';
+import {
+  VehicleAccessLevel,
+  vehicleAccessRuleFor,
+} from '../vehicles/vehicle-access';
+import {
+  CHECKIN_FROM,
+  describeVisitStatus,
+} from '../visits/visit-state-machine';
+import { VisitEntryAlreadyRegisteredException } from '../visits/visit-entry-already-registered.exception';
+import { VisitExitAlreadyRegisteredException } from '../visits/visit-exit-already-registered.exception';
+import { errorMessage } from '../common/utils/error-message.util';
+import { maskPlate } from '../common/privacy/pii-mask';
+import { parseVisitExitCooldownMinutes } from '../config/env.validation';
+import {
+  DUPLICATE_ACCESS_DECISION,
+  type AccessDecision,
+} from './access-decision';
+
+/** Usuario de la sesión que responde una detección pendiente. */
+export interface PendingDetectionResponder {
+  id: string;
+  name: string;
+}
+
+/** Motivo con el que escala una visita cuyo anfitrión ya no está activo. */
+const INACTIVE_HOST_REASON =
+  'Anfitrión de la visita inactivo o fuera del condominio - requiere aprobación';
+
+interface AccessOutcome {
+  decision: AccessDecision;
+  reason: string;
+  residente: User | null;
+  isExit: boolean;
+}
 
 @Injectable()
 export class DetectionsService {
   private readonly logger = new Logger(DetectionsService.name);
+  /**
+   * Espera tras el ingreso (o la salida) de una visita en la que el LPR no
+   * registra el paso contrario (ms, VISIT_EXIT_COOLDOWN_MINUTES).
+   */
+  private readonly exitCooldownMs: number;
 
   constructor(
     @InjectRepository(PlateDetection)
@@ -34,36 +92,73 @@ export class DetectionsService {
     private readonly hubGateway: HubGateway,
     @Inject(forwardRef(() => VisitsService))
     private readonly visitsService: VisitsService,
-  ) {}
-
-  /**
-   * Tarea #19 (docs/modulos/auth-multitenant.md §7): resuelve el
-   * `organizationId` de la cámara asociada a una detección. RESOURCE-DERIVED
-   * (no TenantContext): estos endpoints los llama el worker LPR sin sesión de
-   * usuario (`POST /detections/plates`, sin AuthGuard — ver
-   * DetectionsController). Réplica minimalista de
-   * `CamerasService.resolveCameraByIdOrMount` (id UUID o mountPath, limpiando
-   * el sufijo `_guardia` del worker manager) para no acoplar módulos.
-   */
-  private async resolveCameraOrganizationId(cameraIdOrMount: string): Promise<string | null> {
-    if (!cameraIdOrMount) return null;
-    const cleanId = cameraIdOrMount.replace('_guardia', '');
-    const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(cleanId);
-
-    const camera = isUuid
-      ? await this.cameraRepository.findOne({ where: { id: cleanId } })
-      : await this.cameraRepository.findOne({ where: { mountPath: cleanId } });
-
-    return camera?.organizationId ?? null;
+    configService: ConfigService,
+  ) {
+    this.exitCooldownMs =
+      parseVisitExitCooldownMinutes(
+        configService.get<string>('VISIT_EXIT_COOLDOWN_MINUTES'),
+      ) *
+      60 *
+      1000;
   }
 
-  async createDetection(dto: CreatePlateDetectionDto) {
+  /**
+   * Cámara de una detección (id UUID o mountPath, limpiando el sufijo
+   * `_guardia` del worker manager). Réplica minimalista de
+   * `CamerasService.resolveCameraByIdOrMount` para no acoplar módulos.
+   */
+  private async resolveCamera(cameraIdOrMount: string): Promise<Camera | null> {
+    if (!cameraIdOrMount) return null;
+    const cleanId = cameraIdOrMount.replace('_guardia', '');
+    const isUuid =
+      /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(
+        cleanId,
+      );
+
+    return isUuid
+      ? this.cameraRepository.findOne({ where: { id: cleanId } })
+      : this.cameraRepository.findOne({ where: { mountPath: cleanId } });
+  }
+
+  /**
+   * Hallazgo A2 (Fase 4 · P2): la ingesta usa el condominio de la API key de
+   * servicio. La cámara debe existir y ser de ESE condominio antes de
+   * cualquier efecto (guardar, check-in/out, notificar, abrir el portón);
+   * si no, 403 y nada más. Una key del condominio A ya no puede inyectar
+   * eventos en una cámara de B. Inexistente y ajena responden igual (no
+   * revela qué cámaras existen en otros condominios).
+   */
+  private async requireCameraOfOrganization(
+    cameraIdOrMount: string,
+    keyOrganizationId: string,
+  ): Promise<Camera> {
+    const camera = await this.resolveCamera(cameraIdOrMount);
+    if (!camera || camera.organizationId !== keyOrganizationId) {
+      this.logger.warn(
+        `Ingesta rechazada: la cámara ${cameraIdOrMount} no pertenece al condominio de la API key`,
+      );
+      throw new ForbiddenException(
+        'La cámara no pertenece al condominio de la API key de servicio',
+      );
+    }
+    return camera;
+  }
+
+  async createDetection(
+    dto: CreatePlateDetectionDto,
+    keyOrganizationId: string,
+  ) {
+    const camera = await this.requireCameraOfOrganization(
+      dto.cameraId,
+      keyOrganizationId,
+    );
+
     // Mapear DTO a la entidad PlateDetection. Usamos el campo `meta` como JSONB
     // para guardar bbox, snapshot y estadísticas de caracteres.
     const ent = this.detectionsRepo.create(dto);
-    // Tarea #19: estampar organizationId derivado de la cámara (ver docstring
-    // de resolveCameraOrganizationId arriba).
-    ent.organizationId = await this.resolveCameraOrganizationId(dto.cameraId);
+    // Tarea #19 + A2: el condominio es el de la cámara, que ya se verificó
+    // igual al de la API key.
+    ent.organizationId = camera.organizationId;
 
     // `create()` solo instancia la entidad; `save()` persiste en la BD.
     const saved = await this.detectionsRepo.save(ent);
@@ -81,47 +176,61 @@ export class DetectionsService {
     // `VisitsService.findByPlate`/`validateAccess`, que ahora aceptan este
     // scope explícito además de `skipTenantScope`.
     //
-    // Fail-closed: si la cámara no tiene organizationId (legacy, pre-tarea
-    // #19), no hay ningún tenant confiable con el cual acotar la búsqueda —
-    // abrir igual (o buscar sin scope) reintroduciría el mismo leak. Se
-    // deriva directo a aprobación manual del conserje, sin ejecutar ninguna
-    // búsqueda de vehículo/visita (createPendingDetectionForConcierge ya
-    // maneja bien organizationId === null, ver sendDetectionNotifications).
-    if (!saved.organizationId) {
-      this.logger.warn(
-        `Detección de patente ${dto.plate} en cámara sin organizationId (legacy, pre-tarea #19) — fail-closed, requiere aprobación manual del conserje`,
-      );
-      return await this.createPendingDetectionForConcierge(
-        saved,
-        'Cámara sin condominio asignado - requiere aprobación manual',
-      );
-    }
+    // Una cámara sin organizationId (legacy, pre-tarea #19) ya no llega acá:
+    // `requireCameraOfOrganization` la rechaza con 403 (A2), porque nunca
+    // coincide con el condominio de la API key.
+    const cameraOrganizationId = keyOrganizationId;
 
-    const cameraOrganizationId = saved.organizationId;
+    // Validar acceso siguiendo este orden de prioridad (Fase 4 · P3, D4:
+    // fail-closed — "Permitido" SOLO en las ramas explícitas de abajo). Fase
+    // 4 · P5.C: la regla de un vehículo registrado sale SOLO de su
+    // `accessLevel` (`vehicleAccessRuleFor`); la carrocería (`vehicleType`)
+    // no interviene.
+    // 1. Vehículo registrado y activo con nivel `residente`
+    // 2. Visita vehicular válida y dentro del período:
+    //    - entrada: PENDING/READY_FOR_REENTRY → check-in, salvo una
+    //      READY_FOR_REENTRY dentro de la espera posterior a la salida
+    //      (VISIT_EXIT_COOLDOWN_MINUTES) → Duplicado, sin efectos
+    //    - salida: ACTIVE → check-out, salvo dentro de la espera posterior al
+    //      ingreso (VISIT_EXIT_COOLDOWN_MINUTES) → Duplicado, sin efectos
+    //    - check-in o check-out que pierde la carrera con otra detección →
+    //      Duplicado
+    //    - cualquier otro estado → Denegado
+    // 3. Vehículo activo de `servicio` o sin nivel de acceso, inactivo, o
+    //    patente sin vehículo ni visita válida → aprobación del conserje
+    // 4. Denegado en cualquier otro caso
 
-    // Validar acceso siguiendo este orden de prioridad:
-    // 1. Vehículo residente registrado y activo
-    // 2. Visita vehicular válida y dentro del período
-    // 3. Auto check-in si es entrada (PENDING → ACTIVE)
-    // 4. Auto check-out si es salida (ACTIVE → COMPLETED)
-    // 5. Denegado en cualquier otro caso
-
-    let decision: string;
-    let reason: string;
-    let residente: User | null = null;
-    let isExit = false; // Flag para identificar si es una salida
+    let outcome: AccessOutcome;
 
     // 1. Verificar si es un vehículo registrado (scopeado al condominio de la cámara)
-    const vehicle = await this.vehiclesService.findByPlate(dto.plate, { organizationId: cameraOrganizationId });
-    
+    const vehicle = await this.vehiclesService.findByPlate(dto.plate, {
+      organizationId: cameraOrganizationId,
+    });
+
     if (vehicle && vehicle.active) {
-      // Verificar el tipo de vehículo
-      if (vehicle.vehicleType === 'residente' || vehicle.accessLevel === 'permanente') {
-        // Vehículo residente con acceso permanente
-        decision = 'Permitido';
-        reason = 'Vehículo residente registrado y activo';
-        residente = vehicle.owner;
-      } else if (vehicle.vehicleType === 'visitante' || vehicle.accessLevel === 'temporal') {
+      const accessRule = vehicleAccessRuleFor(vehicle.accessLevel);
+      if (
+        accessRule === 'allow' &&
+        !(await this.hasActiveOwner(vehicle, cameraOrganizationId))
+      ) {
+        // Corrección P5 (cyber A1): un vehículo de residente abre solo si su
+        // propietario sigue siendo miembro ACTIVO del condominio de la
+        // cámara. Sin propietario, propietario deshabilitado o que dejó el
+        // condominio -> lo decide el conserje (el portón no abre solo).
+        return await this.createPendingDetectionForConcierge(
+          saved,
+          'Vehículo de residente sin propietario activo en el condominio - requiere aprobación',
+        );
+      }
+      if (accessRule === 'allow') {
+        // Vehículo con nivel de acceso de residente y propietario activo
+        outcome = {
+          decision: 'Permitido',
+          reason: 'Vehículo residente registrado y activo',
+          residente: vehicle.owner,
+          isExit: false,
+        };
+      } else if (accessRule === 'requires-visit') {
         // Vehículo de visitante, verificar si tiene visita válida
         try {
           // Fix cross-tenant (rama feature/cierre-fases-1-2 — ver docstring
@@ -132,88 +241,117 @@ export class DetectionsService {
           // búsqueda de la visita a ESE condominio en vez de saltarse el
           // scoping (antes `skipTenantScope: true` buscaba en TODOS los
           // condominios — la causa raíz del leak).
-          const visitValidation = await this.visitsService.validateAccess(dto.plate, 'plate', { organizationId: cameraOrganizationId });
+          const visitValidation = await this.visitsService.validateAccess(
+            dto.plate,
+            'plate',
+            { organizationId: cameraOrganizationId },
+          );
 
+          if (
+            visitValidation.valid &&
+            visitValidation.visit &&
+            !(await this.hasActiveHost(
+              visitValidation.visit,
+              cameraOrganizationId,
+            ))
+          ) {
+            return await this.createPendingDetectionForConcierge(
+              saved,
+              INACTIVE_HOST_REASON,
+            );
+          }
           if (visitValidation.valid && visitValidation.visit) {
-            const visit = visitValidation.visit;
-            decision = 'Permitido';
-            residente = visit.host; // El anfitrión es el residente
-
-            // Determinar si es entrada o salida basado en el estado de la visita
-            if (visit.status === 'pending' || visit.status === 'ready') {
-              // Entrada: Visita pendiente o lista para reingreso → registrar check-in
-              await this.visitsService.checkIn(visit.id, { organizationId: cameraOrganizationId });
-              reason = visit.status === 'pending'
-                ? `Entrada autorizada - ${visit.visitorName}`
-                : `Reingreso autorizado - ${visit.visitorName}`;
-              isExit = false;
-            } else if (visit.status === 'active') {
-              // Salida: Visita activa → registrar check-out
-              await this.visitsService.checkOut(visit.id, { organizationId: cameraOrganizationId });
-              reason = `Salida registrada - ${visit.visitorName}`;
-              isExit = true;
-            } else {
-              // Visita ya completada o en otro estado
-              reason = `Visita ${visit.status} - ${visit.visitorName}`;
-              isExit = false;
-            }
+            outcome = await this.applyVisitPassage(
+              visitValidation.visit,
+              cameraOrganizationId,
+            );
           } else {
-            decision = 'Denegado';
-            reason = visitValidation.message || 'Visita no válida o expirada';
+            outcome = {
+              decision: 'Denegado',
+              reason: visitValidation.message || 'Visita no válida o expirada',
+              residente: null,
+              isExit: false,
+            };
           }
         } catch (error) {
-          this.logger.error(`Error al validar visita para vehículo visitante ${dto.plate}:`, error);
-          decision = 'Denegado';
-          reason = 'Error al validar visita';
+          this.logger.error(
+            `Error al validar visita para vehículo visitante ${maskPlate(dto.plate)}: ${errorMessage(error)}`,
+          );
+          outcome = {
+            decision: 'Denegado',
+            reason: 'Error al validar visita',
+            residente: null,
+            isExit: false,
+          };
         }
       } else {
-        // Vehículo activo pero sin tipo específico, permitir por defecto
-        decision = 'Permitido';
-        reason = 'Vehículo registrado y activo';
-        residente = vehicle.owner;
+        // D4: un vehículo activo de servicio o SIN nivel de acceso no se
+        // permite por defecto (fail-closed): lo decide el conserje.
+        return await this.createPendingDetectionForConcierge(
+          saved,
+          vehicle.accessLevel === VehicleAccessLevel.SERVICE
+            ? 'Vehículo de servicio - requiere aprobación'
+            : 'Vehículo registrado sin nivel de acceso - requiere aprobación',
+        );
       }
     } else if (!vehicle) {
-      // No existe el vehículo, verificar si hay una visita programada
+      // No existe el vehículo, verificar si hay una visita programada. Una
+      // solicitud del conserje digital sin aprobar (AWAITING_APPROVAL) cae
+      // acá: no tiene Vehicle y `validateAccess` no la encuentra → conserje.
       try {
         // Ver comentario equivalente más arriba: mismo fix cross-tenant,
         // scopeado explícitamente al condominio de la cámara.
-        const visitValidation = await this.visitsService.validateAccess(dto.plate, 'plate', { organizationId: cameraOrganizationId });
+        const visitValidation = await this.visitsService.validateAccess(
+          dto.plate,
+          'plate',
+          { organizationId: cameraOrganizationId },
+        );
 
+        if (
+          visitValidation.valid &&
+          visitValidation.visit &&
+          !(await this.hasActiveHost(
+            visitValidation.visit,
+            cameraOrganizationId,
+          ))
+        ) {
+          return await this.createPendingDetectionForConcierge(
+            saved,
+            INACTIVE_HOST_REASON,
+          );
+        }
         if (visitValidation.valid && visitValidation.visit) {
-          const visit = visitValidation.visit;
-          decision = 'Permitido';
-          residente = visit.host;
-
-          // Determinar si es entrada o salida basado en el estado de la visita
-          if (visit.status === 'pending' || visit.status === 'ready') {
-            // Entrada: Visita pendiente o lista para reingreso → registrar check-in
-            await this.visitsService.checkIn(visit.id, { organizationId: cameraOrganizationId });
-            reason = visit.status === 'pending'
-              ? `Entrada autorizada - ${visit.visitorName}`
-              : `Reingreso autorizado - ${visit.visitorName}`;
-            isExit = false;
-          } else if (visit.status === 'active') {
-            // Salida: Visita activa → registrar check-out
-            await this.visitsService.checkOut(visit.id, { organizationId: cameraOrganizationId });
-            reason = `Salida registrada - ${visit.visitorName}`;
-            isExit = true;
-          } else {
-            reason = `Visita ${visit.status} - ${visit.visitorName}`;
-            isExit = false;
-          }
+          outcome = await this.applyVisitPassage(
+            visitValidation.visit,
+            cameraOrganizationId,
+          );
         } else {
           // No hay visita válida, enviar a aprobación del conserje
-          return await this.createPendingDetectionForConcierge(saved, visitValidation.message || 'Vehículo no registrado y sin visita autorizada');
+          return await this.createPendingDetectionForConcierge(
+            saved,
+            visitValidation.message ||
+              'Vehículo no registrado y sin visita autorizada',
+          );
         }
       } catch (error) {
-        this.logger.error(`Error al validar visita para patente ${dto.plate}:`, error);
+        this.logger.error(
+          `Error al validar visita para patente ${maskPlate(dto.plate)}: ${errorMessage(error)}`,
+        );
         // En caso de error, enviar a aprobación del conserje
-        return await this.createPendingDetectionForConcierge(saved, 'Error al validar - requiere aprobación manual');
+        return await this.createPendingDetectionForConcierge(
+          saved,
+          'Error al validar - requiere aprobación manual',
+        );
       }
     } else {
       // Vehículo existe pero está inactivo, enviar a aprobación del conserje
-      return await this.createPendingDetectionForConcierge(saved, 'Vehículo inactivo - requiere aprobación');
+      return await this.createPendingDetectionForConcierge(
+        saved,
+        'Vehículo inactivo - requiere aprobación',
+      );
     }
+
+    const { decision, reason, residente, isExit } = outcome;
 
     // Calcular tiempo de respuesta: T2 (ahora) - T1 (detectionTimestamp del LPR o createdAt como fallback)
     // Si el LPR envió detectionTimestamp, usar ese valor para mayor precisión
@@ -236,74 +374,312 @@ export class DetectionsService {
     // Log de rendimiento si el tiempo supera el umbral de 5 segundos
     if (responseTimeMs > 5000) {
       this.logger.warn(
-        `⚠️ Tiempo de respuesta alto: ${responseTimeMs}ms para detección ${saved.id} (${dto.plate})`
+        `⚠️ Tiempo de respuesta alto: ${responseTimeMs}ms para detección ${saved.id} (${maskPlate(dto.plate)})`,
       );
     }
 
-    // Enviar notificaciones según el tipo de detección
-    await this.sendDetectionNotifications(dto.plate, decision, reason, isExit, residente, vehicle, saved.organizationId);
+    // Enviar notificaciones según el tipo de detección. Una lectura duplicada
+    // no notifica: el paso original ya avisó al anfitrión y a los conserjes.
+    if (decision !== DUPLICATE_ACCESS_DECISION) {
+      await this.sendDetectionNotifications(
+        dto.plate,
+        decision,
+        reason,
+        isExit,
+        residente,
+        vehicle,
+        saved.organizationId,
+      );
+    }
 
     // AUTO-APERTURA INTEGRADADA AL HUB:
     // Si la placa está autorizada, mandamos evento directo a la Raspberry Pi saltándonos a Sofía
     if (decision === 'Permitido') {
-      this.logger.log(`🚗 Placa autorizada (${dto.plate}) detectada. Enviando comando de apertura al Portón Vehicular...`);
-      // Fase 1, Bloque A1.1 (docs/modulos/agente-cerebro.md §7/§11 — hallazgo
-      // H2 de la auditoría, reportado también aquí aunque no era el foco del
-      // bloque): mismo patrón que `DigitalConciergeService.respondToVisitor` —
-      // antes `broadcastToAllHubs` abría el portón físico de TODOS los
-      // condominios ante una patente autorizada en UNO solo. Se dirige por
-      // `organizationId` de la detección (`saved.organizationId`, tarea #19).
-      this.hubGateway.sendToOrganization(saved.organizationId, 'hub:door_open', {
-        type: 'vehicular',
-        plate: dto.plate,
-      });
+      this.logger.log(
+        `🚗 Placa autorizada (${maskPlate(dto.plate)}) detectada en la detección ${saved.id}. Enviando comando de apertura al Portón Vehicular...`,
+      );
+      // Fase 1, Bloque A1.1 (H2): dirigido por el `organizationId` de la
+      // detección (`saved.organizationId`, tarea #19), nunca un broadcast
+      // global. Fase 4 · P4 (D7): `sendDoorOpen` entrega solo a los hubs
+      // FÍSICOS del condominio, nunca a un kiosko web.
+      this.hubGateway.sendDoorOpen(
+        { hubId: null, organizationId: saved.organizationId },
+        {
+          type: 'vehicular',
+          plate: dto.plate,
+        },
+      );
     }
 
     return { detection: saved, attempt: savedAtt, isExit };
   }
 
-  async listDetections(filters?: { familyId?: string }, limit = 50) {
+  /**
+   * Corrección P5 (cyber A1): ¿el propietario del vehículo es miembro ACTIVO
+   * (membresía + cuenta no deshabilitada) del condominio de la cámara?
+   * Fail-closed: sin propietario, `false`.
+   */
+  private async hasActiveOwner(
+    vehicle: Vehicle,
+    organizationId: string,
+  ): Promise<boolean> {
+    const ownerId = vehicle.ownerId ?? vehicle.owner?.id ?? null;
+    if (!ownerId) {
+      return false;
+    }
+    return this.usersService.isActiveMemberOfOrganization(
+      ownerId,
+      organizationId,
+    );
+  }
+
+  /**
+   * Corrección P5 (cyber A1, rama de visitas): `validateAccess` valida el
+   * estado y la ventana de la visita, pero NO que su anfitrión siga activo
+   * (solo se validó al crearla). Una visita cuyo anfitrión fue deshabilitado
+   * (el join lo excluye: `visit.host` null) o dejó el condominio no abre
+   * sola: la decide el conserje.
+   */
+  private async hasActiveHost(
+    visit: Visit,
+    organizationId: string,
+  ): Promise<boolean> {
+    const hostId = visit.host?.id ?? null;
+    if (!hostId) {
+      return false;
+    }
+    return this.usersService.isActiveMemberOfOrganization(
+      hostId,
+      organizationId,
+    );
+  }
+
+  /**
+   * Fase 4 · P3 (D4): decide el paso de una visita YA validada por
+   * `validateAccess`, según su estado. "Permitido" solo sale de las dos ramas
+   * explícitas, y solo después de que el check-in/check-out se registró (si
+   * lanza, el caller lo trata como error: nunca abre):
+   *  - entrada: `CHECKIN_FROM` (PENDING, READY_FOR_REENTRY) → `checkIn`;
+   *  - salida: ACTIVE → `checkOut`.
+   * Cualquier otro estado → "Denegado" (sin `hub:door_open`).
+   *
+   * "Duplicado" (sin cambio de estado, sin apertura ni alertas):
+   *  - ACTIVE dentro de la espera posterior al ingreso: las cámaras no saben
+   *    si miran la entrada o la salida, y esa lectura casi siempre es el mismo
+   *    auto que todavía está pasando (decisión de Benjamin);
+   *  - READY_FOR_REENTRY dentro de la espera posterior a la salida: el caso
+   *    simétrico, el mismo auto saliendo no se lee como reingreso;
+   *  - el check-in o el check-out pierde la carrera con otra detección que ya
+   *    registró ese paso (seguridad B4 / QA N5).
+   */
+  private async applyVisitPassage(
+    visit: Visit,
+    organizationId: string,
+  ): Promise<AccessOutcome> {
+    if (CHECKIN_FROM.includes(visit.status)) {
+      if (
+        visit.status === VisitStatus.READY_FOR_REENTRY &&
+        this.isWithinCooldown(visit.exitTime)
+      ) {
+        return this.duplicateOutcome(
+          visit,
+          'Salida ya registrada, dentro del período de espera',
+          true,
+        );
+      }
+      try {
+        await this.visitsService.checkIn(visit.id, { organizationId });
+      } catch (error) {
+        if (error instanceof VisitEntryAlreadyRegisteredException) {
+          return this.duplicateOutcome(
+            visit,
+            'Ingreso ya registrado por otra detección',
+            false,
+          );
+        }
+        throw error;
+      }
+      return {
+        decision: 'Permitido',
+        reason:
+          visit.status === VisitStatus.PENDING
+            ? `Entrada autorizada - ${visit.visitorName}`
+            : `Reingreso autorizado - ${visit.visitorName}`,
+        residente: visit.host ?? null,
+        isExit: false,
+      };
+    }
+
+    if (visit.status === VisitStatus.ACTIVE) {
+      if (this.isWithinCooldown(visit.entryTime)) {
+        return this.duplicateOutcome(
+          visit,
+          'Ingreso ya registrado, dentro del período de espera',
+          false,
+        );
+      }
+      try {
+        await this.visitsService.checkOut(visit.id, { organizationId });
+      } catch (error) {
+        if (error instanceof VisitExitAlreadyRegisteredException) {
+          return this.duplicateOutcome(
+            visit,
+            'Salida ya registrada por otra detección',
+            true,
+          );
+        }
+        throw error;
+      }
+      return {
+        decision: 'Permitido',
+        reason: `Salida registrada - ${visit.visitorName}`,
+        residente: visit.host ?? null,
+        isExit: true,
+      };
+    }
+
+    return {
+      decision: 'Denegado',
+      reason: `Visita ${describeVisitStatus(visit.status)} - ${visit.visitorName}`,
+      residente: visit.host ?? null,
+      isExit: false,
+    };
+  }
+
+  /**
+   * `true` si `since` (el ingreso o la salida de la visita) fue hace menos de
+   * `VISIT_EXIT_COOLDOWN_MINUTES`; en el borde exacto ya no hay espera. Sin
+   * marca (`null`, solo datos previos a P3: `checkIn`/`checkOut` siempre la
+   * escriben) no hay paso reciente que proteger.
+   */
+  private isWithinCooldown(since: Date | null): boolean {
+    if (!since) {
+      return false;
+    }
+    return Date.now() - since.getTime() < this.exitCooldownMs;
+  }
+
+  /** `isExit`: la lectura repite una salida (no una entrada). */
+  private duplicateOutcome(
+    visit: Visit,
+    reason: string,
+    isExit: boolean,
+  ): AccessOutcome {
+    return {
+      decision: DUPLICATE_ACCESS_DECISION,
+      reason: `${reason} - ${visit.visitorName}`,
+      residente: visit.host ?? null,
+      isExit,
+    };
+  }
+
+  /**
+   * Patentes (en mayúsculas) de los vehículos de la familia de un actor
+   * acotado a su familia (Fase 4 · P5.C), con la fecha desde la que la
+   * familia puede ver su historial: el registro del vehículo (corrección P5,
+   * cyber M3). Sin familia, ninguna: un residente sin familia no ve
+   * detecciones. Si la familia registró dos veces la misma patente, cuenta la
+   * fecha más antigua.
+   */
+  private async familyPlates(
+    scope: FamilyScope,
+  ): Promise<Array<{ plate: string; since: Date }>> {
+    if (!scope.familyId) {
+      return [];
+    }
+    const members = await this.usersService.findByFamily(scope.familyId);
+    const ownerIds = members.map((member) => member.id);
+    if (ownerIds.length === 0) {
+      return [];
+    }
+    const vehicles = await this.vehiclesService.findByOwnerIds(ownerIds);
+    const sinceByPlate = new Map<string, Date>();
+    for (const vehicle of vehicles) {
+      const plate = vehicle.plate.toUpperCase();
+      const since = vehicle.createdAt;
+      const current = sinceByPlate.get(plate);
+      if (!current || since < current) {
+        sinceByPlate.set(plate, since);
+      }
+    }
+    return [...sinceByPlate].map(([plate, since]) => ({ plate, since }));
+  }
+
+  /**
+   * Restringe `query` a las detecciones de las patentes de la familia del
+   * actor (`detection.plate`), y solo las POSTERIORES al registro de cada
+   * vehículo (`detection.createdAt`, corrección P5 · cyber M3): registrar la
+   * patente de un tercero no revela su historial anterior en el condominio.
+   * `false` si no hay patentes: el caller responde vacío.
+   */
+  private async restrictToFamilyPlates<T extends object>(
+    query: SelectQueryBuilder<T>,
+    scope: FamilyScope | null,
+  ): Promise<boolean> {
+    if (!scope) {
+      return true;
+    }
+    const plates = await this.familyPlates(scope);
+    if (plates.length === 0) {
+      return false;
+    }
+    const conditions: string[] = [];
+    const parameters: Record<string, string | Date> = {};
+    plates.forEach(({ plate, since }, index) => {
+      conditions.push(
+        `(UPPER(detection.plate) = :familyPlate${index} AND detection.createdAt >= :familyPlateSince${index})`,
+      );
+      parameters[`familyPlate${index}`] = plate;
+      parameters[`familyPlateSince${index}`] = since;
+    });
+    query.andWhere(`(${conditions.join(' OR ')})`, parameters);
+    return true;
+  }
+
+  /**
+   * Detecciones del condominio del actor (Fase 4 · P5.B, D12: `tenantScope`
+   * lo pasa el controller; super-admin: todas).
+   *
+   * Fase 4 · P5.C: con `familyScope` (actor sin `condominium.view-all`),
+   * solo las de las patentes de los vehículos de su familia; sin familia,
+   * vacío. El filtro se SUMA al de tenant. Reemplaza al
+   * `UserFilterInterceptor` (por nombre de rol, y sin filtro para un no-admin
+   * sin familia).
+   */
+  async listDetections(
+    tenantScope: TenantContext,
+    familyScope: FamilyScope | null,
+    limit = 50,
+  ) {
     const query = this.detectionsRepo
       .createQueryBuilder('detection')
       .leftJoinAndSelect('detection.accessAttempts', 'attempts')
       .orderBy('detection.createdAt', 'DESC')
       .take(limit);
 
-    // Si hay filtro por familyId, obtener solo detecciones de vehículos de esa familia
-    if (filters?.familyId) {
-      // Obtener usuarios de la familia
-      const familyUsers = await this.usersService.findByFamily(filters.familyId);
-      const userIds = familyUsers.map(u => u.id);
-      
-      if (userIds.length === 0) {
-        return [];
-      }
-      
-      // Obtener patentes de vehículos de esos usuarios
-      const vehicles = await this.vehiclesService.findByOwnerIds(userIds);
-      const plates = vehicles.map(v => v.plate.toUpperCase());
-      
-      if (plates.length === 0) {
-        return [];
-      }
-      
-      // Filtrar detecciones por esas patentes
-      query.where('UPPER(detection.plate) IN (:...plates)', { plates });
-      
-      this.logger.debug(`🔍 Filtrando detecciones por familia ${filters.familyId}: ${plates.length} patentes`);
+    applyTenantFilter(query, 'detection', tenantScope);
+
+    if (!(await this.restrictToFamilyPlates(query, familyScope))) {
+      return [];
     }
 
     return query.getMany();
   }
 
-  async createAttempt(dto: CreateAccessAttemptDto) {
-    const det = await this.detectionsRepo.findOne({ where: { id: dto.detectionId } });
+  /**
+   * Hallazgo A2: la detección debe ser del condominio de la API key. Una
+   * detección de otro condominio responde igual que una inexistente (404).
+   */
+  async createAttempt(dto: CreateAccessAttemptDto, keyOrganizationId: string) {
+    const det = await this.detectionsRepo.findOne({
+      where: { id: dto.detectionId, organizationId: keyOrganizationId },
+    });
     if (!det) throw new NotFoundException('detection not found');
-    
+
     // Calcular tiempo de respuesta usando detectionTimestamp si está disponible
     const t1 = det.detectionTimestamp || det.createdAt.getTime();
     const responseTimeMs = Date.now() - t1;
-    
+
     const att = this.attemptsRepo.create({
       detection: det,
       decision: dto.decision,
@@ -313,21 +689,30 @@ export class DetectionsService {
       organizationId: det.organizationId, // Tarea #19: hereda de la detección
     });
     if (dto.residenteId) {
-      (att as any).residente = { id: dto.residenteId };
+      // Referencia por id: TypeORM solo necesita la clave foránea.
+      att.residente = { id: dto.residenteId } as User;
     }
     return this.attemptsRepo.save(att);
   }
 
   /**
-   * Fase 2, Bloque F2.1 (docs/modulos/agente-cerebro.md §12): `tenantScope`
-   * es OPCIONAL y ADITIVO — el caller existente (`DetectionsController`,
-   * gap conocido de tarea #19: "filtrado por tenant... queda PENDIENTE")
-   * sigue llamando sin este parámetro y mantiene su comportamiento actual
-   * (sin filtrar). La tool `consultar_accesos_recientes` es la primera en
-   * pasarlo, porque SÍ tiene un `AuthorizedContext` con tenant resuelto y NO
-   * puede confiar en el default sin filtro.
+   * Intentos de acceso del condominio de `tenantScope` (super-admin: todos).
+   *
+   * Fase 4 · P5.B (D12): `tenantScope` pasa a ser OBLIGATORIO. Antes era
+   * opcional y `DetectionsController` llamaba sin él (sin filtro: intentos de
+   * todos los condominios). Lo pasan el controller (contexto del actor) y la
+   * tool `consultar_accesos_recientes` (su `AuthorizedContext`).
+   *
+   * Fase 4 · P5.C: con `familyScope` (actor sin `condominium.view-all`, que
+   * pasa el controller), solo los intentos de las patentes de su familia,
+   * igual que `listDetections`. La tool no lo pasa: exige
+   * `digital-concierge.manage` y ve todo el condominio.
    */
-  async listAttempts(limit = 50, tenantScope?: TenantContext) {
+  async listAttempts(
+    limit: number,
+    tenantScope: TenantContext,
+    familyScope: FamilyScope | null = null,
+  ) {
     const query = this.attemptsRepo
       .createQueryBuilder('attempt')
       .leftJoinAndSelect('attempt.detection', 'detection')
@@ -336,8 +721,10 @@ export class DetectionsService {
       .orderBy('attempt.createdAt', 'DESC')
       .take(limit);
 
-    if (tenantScope) {
-      applyTenantFilter(query, 'attempt', tenantScope);
+    applyTenantFilter(query, 'attempt', tenantScope);
+
+    if (!(await this.restrictToFamilyPlates(query, familyScope))) {
+      return [];
     }
 
     return query.getMany();
@@ -363,7 +750,7 @@ export class DetectionsService {
     reason: string,
     isExit: boolean,
     residente: User | null,
-    vehicle: any,
+    vehicle: Vehicle | null,
     organizationId: string | null,
   ) {
     try {
@@ -371,17 +758,20 @@ export class DetectionsService {
       const actionCapitalized = isExit ? 'Salida' : 'Entrada';
 
       // Determinar el tipo de notificación según la decisión
-      const notificationType = decision === 'Permitido'
-        ? NotificationType.VEHICLE_DETECTED
-        : NotificationType.UNKNOWN_VEHICLE;
+      const notificationType =
+        decision === 'Permitido'
+          ? NotificationType.VEHICLE_DETECTED
+          : NotificationType.UNKNOWN_VEHICLE;
 
       // Prioridad alta para accesos denegados, normal para permitidos
-      const priority = decision === 'Permitido'
-        ? NotificationPriority.NORMAL
-        : NotificationPriority.HIGH;
+      const priority =
+        decision === 'Permitido'
+          ? NotificationPriority.NORMAL
+          : NotificationPriority.HIGH;
 
-      // Si el vehículo es de tipo visitante y hay un residente (host) asociado
-      if (vehicle?.vehicleType === 'visitante' && residente) {
+      // Si el vehículo es de visitante y hay un residente (host) asociado
+      // (P5.C: por su nivel de acceso; la carrocería no dice si es de visita)
+      if (vehicle?.accessLevel === VehicleAccessLevel.VISITOR && residente) {
         // Notificar solo al host (creador de la visita) — recipientId puntual,
         // no un broadcast por rol, no requiere scoping por organización.
         await this.notificationsService.create({
@@ -399,7 +789,9 @@ export class DetectionsService {
           },
         });
 
-        this.logger.log(`Notificación de visita enviada al host para patente ${plate}`);
+        this.logger.log(
+          `Notificación de visita enviada al host para patente ${maskPlate(plate)}`,
+        );
       }
 
       // Notificar a los conserjes del MISMO condominio que la detección.
@@ -411,7 +803,7 @@ export class DetectionsService {
       // broadcast o un match accidental cross-tenant.
       if (organizationId === null) {
         this.logger.warn(
-          `Detección de patente ${plate} sin organizationId (cámara legacy) — no se notifica a conserjes (fail-closed)`,
+          `Detección de patente ${maskPlate(plate)} sin organizationId (cámara legacy) — no se notifica a conserjes (fail-closed)`,
         );
       } else {
         await this.notificationsService.notifyByRoleForOrganization(
@@ -423,10 +815,15 @@ export class DetectionsService {
           { priority },
         );
 
-        this.logger.log(`Notificación enviada a conserjes para detección ${plate}`);
+        this.logger.log(
+          `Notificación enviada a conserjes para detección ${maskPlate(plate)}`,
+        );
       }
     } catch (error) {
-      this.logger.error(`Error al enviar notificaciones de detección: ${error.message}`, error.stack);
+      this.logger.error(
+        `Error al enviar notificaciones de detección: ${errorMessage(error)}`,
+        error instanceof Error ? error.stack : undefined,
+      );
       // No lanzar el error para no interrumpir el flujo de detección
     }
   }
@@ -434,17 +831,24 @@ export class DetectionsService {
   /**
    * Crear una detección pendiente que requiere aprobación del conserje
    */
-  private async createPendingDetectionForConcierge(detection: PlateDetection, reason: string) {
-    this.logger.log(`🔔 Creando detección pendiente para patente ${detection.plate} - Razón: ${reason}`);
-    
+  private async createPendingDetectionForConcierge(
+    detection: PlateDetection,
+    reason: string,
+  ) {
+    // Fase 4 · P7.L: sin `reason` (puede traer el nombre del visitante) y con
+    // la patente parcial.
+    this.logger.log(
+      `🔔 Creando detección pendiente para la detección ${detection.id} (patente ${maskPlate(detection.plate)})`,
+    );
+
     // Calcular tiempo de respuesta: tiempo desde detección hasta envío de notificación al conserje
     const t1 = detection.detectionTimestamp || detection.createdAt.getTime();
     const responseTimeMs = Date.now() - t1;
-    
+
     // Crear AccessAttempt con decisión "Pendiente" (expira en 5 minutos)
     const expiresAt = new Date();
     expiresAt.setMinutes(expiresAt.getMinutes() + 5);
-    
+
     const attempt = this.attemptsRepo.create({
       detection,
       decision: 'Pendiente',
@@ -457,50 +861,51 @@ export class DetectionsService {
       responseTimeMs, // Tiempo hasta notificación al conserje
       organizationId: detection.organizationId, // Tarea #19: hereda de la detección
     });
-    
+
     const savedAttempt = await this.attemptsRepo.save(attempt);
-    
+
     // Log de rendimiento si el tiempo supera el umbral de 5 segundos
     if (responseTimeMs > 5000) {
       this.logger.warn(
-        `⚠️ Tiempo de respuesta alto para notificación pendiente: ${responseTimeMs}ms para detección ${detection.id} (${detection.plate})`
+        `⚠️ Tiempo de respuesta alto para notificación pendiente: ${responseTimeMs}ms para detección ${detection.id} (${maskPlate(detection.plate)})`,
       );
     }
-    
+
     // Fix cross-tenant (follow-up post-auditoría Fase 0/1): notificar SOLO a
     // los conserjes del condominio de la detección (vía `notifyByRoleForOrganization`,
     // que filtra por la tabla `member`) — antes se usaba `notifyByRole`, que
     // notifica a TODOS los conserjes de la plataforma sin importar su
     // organización, filtrando conserjes de otros condominios con la
     // detección pendiente de otro.
-    const notifications = await this.notificationsService.notifyByRoleForOrganization(
-      'Conserje',
-      detection.organizationId,
-      NotificationType.UNKNOWN_VEHICLE,
-      'Vehículo No Reconocido - Requiere Aprobación',
-      `Se detectó el vehículo con patente ${detection.plate}. ${reason}. Por favor, revisa y toma una decisión.`,
-      {
-        priority: NotificationPriority.HIGH,
-        data: {
-          attemptId: savedAttempt.id,
-          detectionId: detection.id,
-          plate: detection.plate,
-          reason,
-          expiresAt: expiresAt.toISOString(),
-          fullFramePath: detection.full_frame_path,
-          requiresAction: true,
+    const notifications =
+      await this.notificationsService.notifyByRoleForOrganization(
+        'Conserje',
+        detection.organizationId,
+        NotificationType.UNKNOWN_VEHICLE,
+        'Vehículo No Reconocido - Requiere Aprobación',
+        `Se detectó el vehículo con patente ${detection.plate}. ${reason}. Por favor, revisa y toma una decisión.`,
+        {
+          priority: NotificationPriority.HIGH,
+          data: {
+            attemptId: savedAttempt.id,
+            detectionId: detection.id,
+            plate: detection.plate,
+            reason,
+            expiresAt: expiresAt.toISOString(),
+            fullFramePath: detection.full_frame_path,
+            requiresAction: true,
+          },
         },
-      },
-    );
-    
+      );
+
     // Guardar el ID de la notificación (tomamos la primera ya que notifyByRole devuelve array)
     if (notifications && notifications.length > 0) {
       savedAttempt.notificationId = notifications[0].id;
       await this.attemptsRepo.save(savedAttempt);
     }
-    
+
     this.logger.log(`✅ Detección pendiente creada con ID ${savedAttempt.id}`);
-    
+
     return {
       detection,
       attempt: savedAttempt,
@@ -509,107 +914,215 @@ export class DetectionsService {
   }
 
   /**
-   * Responder a una detección pendiente (aprobar o rechazar)
+   * Responder a una detección pendiente (aprobar o rechazar).
+   *
+   * Fase 4 · P5.B: el intento debe ser del condominio del actor
+   * (`tenantScope`, super-admin: cualquiera); uno de otro condominio responde
+   * 404, igual que uno inexistente. `responder` es el usuario de la sesión
+   * (lo pasa el controller): `respondedBy` se guarda y se devuelve solo con
+   * `id` y `name`.
+   *
+   * Fase 4 · P5.C: claim ATÓMICO. La respuesta se escribe con un único
+   * `UPDATE … WHERE id AND decision = 'Pendiente' AND no vencido AND
+   * condominio`: si dos conserjes responden a la vez, solo uno afecta la fila
+   * y el otro recibe 409 (antes ambos leían "Pendiente" y el segundo
+   * sobrescribía la decisión del primero). Uno vencido responde 400 y queda
+   * `Expirado`.
    */
   async respondToPendingDetection(
     attemptId: string,
-    userId: string,
+    responder: PendingDetectionResponder,
     dto: RespondPendingDetectionDto,
+    tenantScope: TenantContext,
   ) {
+    const scopedWhere = scopeWhere({ id: attemptId }, tenantScope);
     const attempt = await this.attemptsRepo.findOne({
-      where: { id: attemptId },
-      relations: ['detection', 'respondedBy'],
+      where: scopedWhere,
+      relations: ['detection'],
     });
-    
+
     if (!attempt) {
       throw new NotFoundException('Intento de acceso no encontrado');
     }
-    
+
     if (attempt.decision !== 'Pendiente') {
-      throw new BadRequestException(`Este intento ya fue procesado con decisión: ${attempt.decision}`);
+      throw this.alreadyProcessed(attempt.decision);
     }
-    
-    // Verificar que no haya expirado
-    if (attempt.expiresAt && new Date() > attempt.expiresAt) {
-      attempt.decision = 'Expirado';
-      attempt.reason = 'Tiempo de decisión expirado';
-      await this.attemptsRepo.save(attempt);
-      throw new BadRequestException('Esta detección ha expirado');
-    }
-    
-    // Obtener el usuario que responde (conserje)
-    const concierge = await this.usersService.findOne(userId);
-    
-    // Actualizar la decisión
+
     const decision = dto.decision === 'approved' ? 'Permitido' : 'Denegado';
-    const finalReason = dto.response || (dto.decision === 'approved' 
-      ? 'Aprobado manualmente por conserje' 
-      : 'Rechazado manualmente por conserje');
-    
+    const finalReason =
+      dto.response ||
+      (dto.decision === 'approved'
+        ? 'Aprobado manualmente por conserje'
+        : 'Rechazado manualmente por conserje');
+    const respondedAt = new Date();
+
+    const claimed = await this.claimPendingAttempt(
+      attempt,
+      tenantScope,
+      {
+        decision,
+        reason: `${attempt.reason} - ${finalReason}`,
+        method: 'Manual - Conserje',
+        respondedBy: { id: responder.id },
+        respondedAt,
+      },
+      respondedAt,
+    );
+    if (!claimed) {
+      await this.rejectLostClaim(attempt, tenantScope, respondedAt);
+    }
+
+    // Usuario que responde (conserje): solo id (FK) y nombre.
     attempt.decision = decision;
     attempt.reason = `${attempt.reason} - ${finalReason}`;
     attempt.method = 'Manual - Conserje';
-    attempt.respondedBy = concierge;
-    attempt.respondedAt = new Date();
-    
-    const savedAttempt = await this.attemptsRepo.save(attempt);
-    
+    attempt.respondedBy = { id: responder.id, name: responder.name } as User;
+    attempt.respondedAt = respondedAt;
+
     this.logger.log(
-      `✅ Detección ${attemptId} ${dto.decision === 'approved' ? 'aprobada' : 'rechazada'} por conserje ${concierge.name}`,
+      `✅ Detección ${attemptId} ${dto.decision === 'approved' ? 'aprobada' : 'rechazada'} por el usuario ${responder.id}`,
     );
-    
+
     return {
-      attempt: savedAttempt,
+      attempt,
       decision: dto.decision,
     };
   }
 
+  /** 409: el intento ya tiene una decisión (otra respuesta ganó el claim). */
+  private alreadyProcessed(decision: string): ConflictException {
+    return new ConflictException(
+      `Este intento ya fue procesado con decisión: ${decision}`,
+    );
+  }
+
   /**
-   * Listar detecciones pendientes
+   * `UPDATE` condicional del claim: solo si sigue `Pendiente`, no venció y es
+   * del condominio del actor. `true` si esta respuesta ganó.
    */
-  async listPendingDetections() {
+  private async claimPendingAttempt(
+    attempt: AccessAttempt,
+    tenantScope: TenantContext,
+    patch: Pick<
+      AccessAttempt,
+      'decision' | 'reason' | 'method' | 'respondedAt'
+    > & {
+      respondedBy: { id: string };
+    },
+    now: Date,
+  ): Promise<boolean> {
+    const query = this.attemptsRepo
+      .createQueryBuilder()
+      .update(AccessAttempt)
+      .set(patch)
+      .where('id = :attemptId', { attemptId: attempt.id })
+      .andWhere('decision = :pending', { pending: 'Pendiente' })
+      .andWhere('("expiresAt" IS NULL OR "expiresAt" >= :now)', { now });
+    if (!tenantScope.isSuperAdmin) {
+      query.andWhere('"organizationId" = :claimOrgId', {
+        claimOrgId: attempt.organizationId,
+      });
+    }
+    const result = await query.execute();
+    return Boolean(result.affected);
+  }
+
+  /**
+   * El claim no afectó la fila: lee el estado real y responde. Otra respuesta
+   * ganó → 409; venció → se marca `Expirado` (condicionado a que siga
+   * `Pendiente`) y 400; desapareció → 404.
+   */
+  private async rejectLostClaim(
+    attempt: AccessAttempt,
+    tenantScope: TenantContext,
+    now: Date,
+  ): Promise<never> {
+    const current = await this.attemptsRepo.findOne({
+      where: scopeWhere({ id: attempt.id }, tenantScope),
+    });
+    if (!current) {
+      throw new NotFoundException('Intento de acceso no encontrado');
+    }
+    if (current.decision !== 'Pendiente') {
+      throw this.alreadyProcessed(current.decision);
+    }
+    if (current.expiresAt && now > current.expiresAt) {
+      await this.attemptsRepo.update(
+        { id: current.id, decision: 'Pendiente' },
+        { decision: 'Expirado', reason: 'Tiempo de decisión expirado' },
+      );
+      throw new BadRequestException('Esta detección ha expirado');
+    }
+    throw new ConflictException(
+      'La detección cambió mientras se respondía; vuelve a intentarlo',
+    );
+  }
+
+  /**
+   * Listar detecciones pendientes del condominio del actor (super-admin:
+   * todas).
+   *
+   * Fase 4 · P5.B: el listado se acota con `tenantScope` y `respondedBy` sale
+   * solo con `id` y `name` (antes era el `User` completo). El UPDATE previo
+   * que marca las vencidas como `Expirado` sigue GLOBAL a propósito: es
+   * mantenimiento idempotente (solo toca filas `Pendiente` con `expiresAt`
+   * pasado, sin devolver nada) y da igual qué condominio lo dispare.
+   */
+  async listPendingDetections(tenantScope: TenantContext) {
     const now = new Date();
-    
-    // Primero marcar las expiradas
+
+    // Primero marcar las expiradas (global, ver docstring)
     await this.attemptsRepo
       .createQueryBuilder()
       .update(AccessAttempt)
-      .set({ 
+      .set({
         decision: 'Expirado',
-        reason: 'Tiempo de decisión expirado'
+        reason: 'Tiempo de decisión expirado',
       })
       .where('decision = :decision', { decision: 'Pendiente' })
       .andWhere('expiresAt < :now', { now })
       .execute();
-    
-    // Luego obtener las que siguen pendientes
-    return this.attemptsRepo.find({
-      where: { decision: 'Pendiente' },
-      relations: ['detection', 'respondedBy'],
-      order: { createdAt: 'DESC' },
-    });
+
+    // Luego obtener las que siguen pendientes, del condominio del actor
+    const query = this.attemptsRepo
+      .createQueryBuilder('attempt')
+      .leftJoinAndSelect('attempt.detection', 'detection')
+      .leftJoin('attempt.respondedBy', 'respondedBy')
+      .addSelect(['respondedBy.id', 'respondedBy.name'])
+      .where('attempt.decision = :pending', { pending: 'Pendiente' })
+      .orderBy('attempt.createdAt', 'DESC');
+
+    applyTenantFilter(query, 'attempt', tenantScope);
+
+    return query.getMany();
   }
 
   /**
-   * Verificar estado de una detección pendiente
+   * Verificar estado de una detección pendiente.
+   *
+   * Fase 4 · P5.B: acotado al condominio del actor; uno de otro condominio
+   * responde igual que uno inexistente.
    */
-  async checkPendingDetectionStatus(attemptId: string) {
+  async checkPendingDetectionStatus(
+    attemptId: string,
+    tenantScope: TenantContext,
+  ) {
     const attempt = await this.attemptsRepo.findOne({
-      where: { id: attemptId },
-      relations: ['detection', 'respondedBy'],
+      where: scopeWhere({ id: attemptId }, tenantScope),
     });
-    
+
     if (!attempt) {
       return { active: false, reason: 'Intento de acceso no encontrado' };
     }
-    
+
     if (attempt.decision !== 'Pendiente') {
-      return { 
-        active: false, 
-        reason: `Intento ya procesado: ${attempt.decision}` 
+      return {
+        active: false,
+        reason: `Intento ya procesado: ${attempt.decision}`,
       };
     }
-    
+
     if (attempt.expiresAt && new Date() > attempt.expiresAt) {
       // Marcar como expirado
       attempt.decision = 'Expirado';
@@ -617,8 +1130,7 @@ export class DetectionsService {
       await this.attemptsRepo.save(attempt);
       return { active: false, reason: 'Detección expirada' };
     }
-    
+
     return { active: true };
   }
 }
-

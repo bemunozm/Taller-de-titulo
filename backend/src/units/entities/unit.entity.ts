@@ -11,7 +11,23 @@ import {
 } from 'typeorm';
 import { Family } from '../../families/entities/family.entity';
 
+/** Nombre del índice UNIQUE `(organizationId, identifier)` (migración P5.B). */
+export const UNITS_ORGANIZATION_IDENTIFIER_UNIQUE =
+  'UQ_units_organization_identifier';
+
+/**
+ * Fase 4 · P5.B: el identificador es único POR CONDOMINIO (antes era único en
+ * toda la plataforma: el "A-101" de un condominio impedía crearlo en otro).
+ * En la BD el índice es `UNIQUE NULLS NOT DISTINCT` (Postgres 15, ver la
+ * migración `PerOrganizationUniqueness`): las unidades sin condominio también
+ * comparten un único espacio de identificadores. TypeORM 0.3 no expresa
+ * `NULLS NOT DISTINCT`, pero tampoco lo compara, así que `migration:check`
+ * no reporta drift.
+ */
 @Entity({ name: 'units' })
+@Index(UNITS_ORGANIZATION_IDENTIFIER_UNIQUE, ['organizationId', 'identifier'], {
+  unique: true,
+})
 export class Unit {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -28,7 +44,8 @@ export class Unit {
   @Column({ type: 'varchar', length: 10 })
   number: string; // "303", "101", "Casa 5"
 
-  @Column({ type: 'varchar', length: 20, unique: true })
+  // Único por condominio (ver docstring de la clase).
+  @Column({ type: 'varchar', length: 20 })
   identifier: string; // "A-303", "B-303", "Casa-5" (generado automáticamente)
 
   @Column({ type: 'int', nullable: true })

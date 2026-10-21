@@ -7,12 +7,14 @@ import { Role } from '../roles/entities/role.entity';
 import { Family } from '../families/entities/family.entity';
 import { TokensModule } from '../tokens/tokens.module';
 import { AuthModule } from '../auth/auth.module';
+import { OrganizationMembershipModule } from '../organization-membership/organization-membership.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([User, Role, Family]),
     forwardRef(() => TokensModule),
     forwardRef(() => AuthModule),
+    OrganizationMembershipModule,
   ],
   controllers: [UsersController],
   providers: [UsersService],

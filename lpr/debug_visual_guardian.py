@@ -10,9 +10,10 @@ from settings import settings
 
 # Configuración desde settings
 BACKEND_URL = settings.WORKER_BACKEND_URL
+# Misma credencial que el manager (Fase 4 · P2): API key de servicio en x-api-key.
 HEADERS = {}
-if settings.WORKER_BACKEND_TOKEN:
-    HEADERS['Authorization'] = f"Bearer {settings.WORKER_BACKEND_TOKEN}"
+if settings.LPR_SERVICE_API_KEY:
+    HEADERS['x-api-key'] = settings.LPR_SERVICE_API_KEY
 
 class CPUSmoother:
     def __init__(self, size=15):
@@ -30,17 +31,13 @@ def debug_guardian(camera_id, video_path=None):
     
     # 1. Obtener configuración de la cámara (Zonas)
     try:
-        url_cam = f"{BACKEND_URL}/cameras/{camera_id}"
-        resp_cam = requests.get(url_cam, headers=HEADERS, timeout=5)
-        camera_data = resp_cam.json()
-        
         url_zones = f"{BACKEND_URL}/anomalies/cameras/{camera_id}/zones"
         resp_zones = requests.get(url_zones, headers=HEADERS, timeout=5)
         zones_data = resp_zones.json().get('guardianZones', [])
         
         source_to_use = video_path
         if not source_to_use:
-            url_source = f"{BACKEND_URL}/cameras/{camera_id}/source"
+            url_source = f"{BACKEND_URL}/workers/cameras/{camera_id}/source"
             resp_source = requests.get(url_source, headers=HEADERS, timeout=5)
             source_to_use = resp_source.json().get('sourceUrl')
         

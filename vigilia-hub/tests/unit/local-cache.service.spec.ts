@@ -1,6 +1,7 @@
 import { LocalCacheService } from '../../src/services/local-cache.service';
 import * as fs from 'fs/promises';
 import axios from 'axios';
+import { testHubConfig } from './support/hub-config.fixture';
 
 // Mock del sistema de archivos promises
 jest.mock('fs/promises');
@@ -15,7 +16,7 @@ describe('LocalCacheService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    service = new LocalCacheService();
+    service = new LocalCacheService(testHubConfig());
     
     // Mock por defecto: mkdir siempre exitoso
     (mockedFs.mkdir as jest.Mock).mockResolvedValue(undefined);
@@ -147,5 +148,68 @@ describe('LocalCacheService', () => {
 
       expect(duration).toBeLessThan(1000);
     });
+  });
+});
+
+/**
+ * Fase 4 · P5 (corrección QA A3): `GET /units/ai-enabled` está detrás de
+ * `HubAuthGuard`, que exige `X-Hub-Id` + `X-Hub-Secret`. Con solo el secret
+ * el backend respondía 401 y el hub quedaba sin caché de IA.
+ */
+describe('LocalCacheService.syncWithBackend — credencial del hub', () => {
+  let service: LocalCacheService;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (mockedFs.writeFile as jest.Mock).mockResolvedValue(undefined);
+    // Fase 4 · P6.M: URL y credencial desde la config validada al arrancar.
+    service = new LocalCacheService(
+      testHubConfig({ hubId: 'hub-porton-1', hubSecret: 'secreto-del-hub' }),
+    );
+  });
+
+  afterEach(() => {
+    service.cleanup();
+  });
+
+  it('manda X-Hub-Id y X-Hub-Secret y carga las unidades', async () => {
+    mockedAxios.get = jest.fn().mockResolvedValue({
+      data: [{ houseNumber: 'A-101', hasAI: true, familyId: 'fam-1' }],
+    });
+
+    await service.syncWithBackend();
+
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      'http://backend.test/api/v1/units/ai-enabled',
+      {
+        headers: {
+          'X-Hub-Id': 'hub-porton-1',
+          'X-Hub-Secret': 'secreto-del-hub',
+        },
+        timeout: 5000,
+      },
+    );
+    expect(service.shouldInterceptCall('A-101')).toBe(true);
+  });
+
+  it('no lee el entorno: usa la config recibida aunque process.env cambie', async () => {
+    const previous = process.env.BACKEND_URL;
+    process.env.BACKEND_URL = 'http://otro-backend.test';
+    mockedAxios.get = jest.fn().mockResolvedValue({ data: [] });
+
+    try {
+      await service.syncWithBackend();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.BACKEND_URL;
+      } else {
+        process.env.BACKEND_URL = previous;
+      }
+    }
+
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      'http://backend.test/api/v1/units/ai-enabled',
+      expect.any(Object),
+    );
   });
 });

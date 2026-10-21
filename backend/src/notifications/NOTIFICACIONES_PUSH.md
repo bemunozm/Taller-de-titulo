@@ -1,5 +1,29 @@
 # Sistema de Notificaciones Push en Tiempo Real
 
+> **Vigente desde Fase 4 · P6.R (D13) — reemplaza lo que este documento dice
+> sobre la conexión.** Ya no existen `register`, `join_room`/`leave_room`,
+> `broadcast`/`broadcastAlert` ni `isUserOnline`/`getOnlineUsers`.
+>
+> - **Handshake:** el cliente conecta al namespace `/` con
+>   `withCredentials: true` desde el origen de `FRONTEND_URL`; el servidor lee
+>   la cookie de sesión de better-auth ANTES del CONNECT. Sin sesión válida:
+>   `connect_error` con `message === 'unauthorized'`. Un `Origin` ajeno se
+>   rechaza en el handshake (polling 403, WebSocket 400).
+> - **Salas (las asigna el servidor):** `user:<id>` siempre; `org:<id>:security`
+>   solo con `detections.read` + `condominium.view-all` y condominio (el
+>   super-admin no entra a ninguna sala de seguridad).
+> - **Eventos:** `notification` (a `user:<id>`), `security:anomaly_highlight`
+>   (a `org:<id>:security`, sin foto: `{ anomalyId, cameraId, cameraName,
+>   type, severity, reasoning, timestamp }`; la foto, con
+>   `GET /api/v1/anomalies/:id`) y `session:ended { reason: 'logout' |
+>   'expired' | 'revoked' }` justo antes de que el servidor corte el socket.
+> - **Fin de sesión:** logout, revocación (cambio o reset de contraseña,
+>   revocar sesiones) y expiración cortan el socket; la revalidación periódica
+>   (≤5 min) cubre lo demás (usuario deshabilitado, cambio de permisos o de
+>   condominio, que además resincroniza las salas).
+>
+> Los ejemplos de abajo con `register` son históricos.
+
 ## 📡 Tecnologías Implementadas
 
 - **WebSockets** con Socket.IO

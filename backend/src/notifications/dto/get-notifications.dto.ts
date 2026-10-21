@@ -1,20 +1,20 @@
-import { IsOptional, IsEnum, IsBoolean, IsUUID, IsInt, Min } from 'class-validator';
+import { IsOptional, IsEnum, IsBoolean, IsInt, Min } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { NotificationType } from '../entities/notification.entity';
 
 export class GetNotificationsDto {
-  @ApiPropertyOptional({ 
-    description: 'Filtrar por tipo de notificación', 
-    enum: NotificationType 
+  @ApiPropertyOptional({
+    description: 'Filtrar por tipo de notificación',
+    enum: NotificationType,
   })
   @IsOptional()
   @IsEnum(NotificationType)
   type?: NotificationType;
 
-  @ApiPropertyOptional({ 
-    description: 'Filtrar por estado de lectura', 
-    example: false 
+  @ApiPropertyOptional({
+    description: 'Filtrar por estado de lectura',
+    example: false,
   })
   @IsOptional()
   @Transform(({ value }) => {
@@ -25,18 +25,10 @@ export class GetNotificationsDto {
   @IsBoolean()
   read?: boolean;
 
-  @ApiPropertyOptional({ 
-    description: 'Filtrar por usuario receptor', 
-    example: 'uuid-del-usuario' 
-  })
-  @IsOptional()
-  @IsUUID()
-  recipientId?: string;
-
-  @ApiPropertyOptional({ 
-    description: 'Número de página', 
+  @ApiPropertyOptional({
+    description: 'Número de página',
     example: 1,
-    minimum: 1 
+    minimum: 1,
   })
   @IsOptional()
   @Transform(({ value }) => parseInt(value, 10))
@@ -44,10 +36,10 @@ export class GetNotificationsDto {
   @Min(1)
   page?: number;
 
-  @ApiPropertyOptional({ 
-    description: 'Elementos por página', 
+  @ApiPropertyOptional({
+    description: 'Elementos por página',
     example: 20,
-    minimum: 1 
+    minimum: 1,
   })
   @IsOptional()
   @Transform(({ value }) => parseInt(value, 10))

@@ -1,0 +1,36 @@
+# =============================================================================
+# lpr — dependencias para CORRER LOS TESTS en CI (Fase 4 · P8.C)
+# =============================================================================
+# Por qué existe: `requirements.txt` (runtime del edge) hoy NO es instalable
+# (ultralytics 8.3.0 exige numpy<2 y se fija numpy==2.4.4; ver el comentario
+# ahí) y además arrastra torch/torchvision/onnxruntime (cientos de MB). Los
+# tests no los necesitan: `tests/test_worker_dedupe.py` y
+# `tests/test_guardian_zones_auth.py` reemplazan `ultralytics` y
+# `huggingface_hub` por stubs si no están, y `fast-plate-ocr` se importa de
+# forma perezosa. Este set liviano alcanza para `python -m pytest lpr/tests`
+# (corrido desde la raíz del repo; `tests/conftest.py` agrega la raíz al path).
+#
+# Reglas:
+# - Mismas versiones que `requirements.txt` para lo que se comparte: si subes
+#   algo allí, súbelo aquí también (y al revés).
+# - NO agregar torch, torchvision, ultralytics, onnxruntime, fast-plate-ocr ni
+#   huggingface-hub: si un test nuevo los necesita, que use un stub.
+# - Verificado con Python 3.12 (el de CI) en un venv limpio.
+#
+# Uso: pip install -r lpr/requirements-ci.txt && python -m pytest lpr/tests
+# =============================================================================
+
+# --- Compartidas con requirements.txt (mismas versiones) ---------------------
+numpy==2.4.4
+opencv-python-headless==4.11.0.86
+Pillow==12.3.0
+requests==2.33.1
+fastapi==0.136.1
+pydantic==2.13.4
+pydantic-settings==2.14.2
+
+# --- Solo tests --------------------------------------------------------------
+# pytest: la misma versión que el extra `dev` de pyproject.toml.
+pytest==9.0.3
+# fastapi.testclient.TestClient (test_manager_*) requiere httpx.
+httpx==0.28.1

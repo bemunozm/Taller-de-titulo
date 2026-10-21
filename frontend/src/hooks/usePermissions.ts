@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { isSuperAdmin } from '@/helpers/roles'
 import { useAuth } from './useAuth'
 
 /**
@@ -70,6 +71,8 @@ export const usePermissions = () => {
     hasAllPermissions,
     hasRole,
     hasAnyRole,
+    /** Super-admin de plataforma (rol "Super Administrador"), ver `@/helpers/roles`. */
+    isSuperAdmin: isSuperAdmin(user),
     userPermissions,
     user,
     isLoading,

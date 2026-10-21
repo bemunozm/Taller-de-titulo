@@ -2,36 +2,51 @@
  * Templates HTML para los flujos de email NATIVOS de better-auth (tarea #18,
  * docs/modulos/auth-multitenant.md sección 6/objetivo 3).
  *
- * Por qué un archivo aparte de `src/auth/services/auth-email.service.ts`:
- * `better-auth.ts` construye el objeto `auth` a nivel de import, ANTES de que
- * exista el contenedor de Nest (ver cabecera de ese archivo) — no hay DI ahí,
- * así que no puede inyectar `AuthEmailService` (depende de `MailerService`/
- * `ConfigService`). Estas funciones son puras (sin DI) para poder invocarse
- * desde los hooks `emailVerification.sendVerificationEmail` /
+ * Funciones puras (sin DI): `better-auth.ts` construye el objeto `auth` a
+ * nivel de import, ANTES de que exista el contenedor de Nest (ver cabecera de
+ * ese archivo), así que no puede inyectar servicios. Se invocan desde los
+ * hooks `emailVerification.sendVerificationEmail` /
  * `emailAndPassword.sendResetPassword` de better-auth.ts, que arma su propio
  * transporter de nodemailer "a mano" (mismo patrón que el `pg.Pool` de ese
- * archivo). `AuthEmailService` (y sus templates) se mantiene intacto — sigue
- * sirviendo los flujos legacy que aún no fueron migrados/retirados.
+ * archivo). El antiguo `AuthEmailService` (códigos de 6 dígitos) se retiró en
+ * la Fase 4 (P2): estos son los únicos templates de email de auth.
  *
  * Diferencia de UX vs los templates legacy: better-auth genera links de
  * un solo uso con token OPACO (no un código de 6 dígitos "tipeable"), así que
  * estos templates solo muestran el botón de acción, no una caja de código.
+ *
+ * Fase 4 · P4.B (cyber N2): todo texto interpolado (nombre del usuario,
+ * email, nombre de la organización, del invitador, etc.) se escapa con
+ * `escapeHtml` en `renderLinkEmailTemplate`, y el link del botón solo admite
+ * URLs http(s) (`safeHttpUrl`). Los valores llegan crudos a estas funciones.
  */
+import { escapeHtml, safeHttpUrl } from '../../common/utils/escape-html.util';
 
 interface BaseTemplateOptions {
-    title: string;
-    heading: string;
-    message: string;
-    buttonText: string;
-    buttonUrl: string;
-    accentColor: string;
-    footerNote: string;
+  title: string;
+  heading: string;
+  message: string;
+  buttonText: string;
+  buttonUrl: string;
+  accentColor: string;
+  footerNote: string;
 }
 
-function renderLinkEmailTemplate(name: string, options: BaseTemplateOptions): string {
-    const { title, heading, message, buttonText, buttonUrl, accentColor, footerNote } = options;
+function renderLinkEmailTemplate(
+  rawName: string,
+  options: BaseTemplateOptions,
+): string {
+  // Texto -> HTML escapado; `accentColor` es una constante interna de este archivo.
+  const name = escapeHtml(rawName);
+  const title = escapeHtml(options.title);
+  const heading = escapeHtml(options.heading);
+  const message = escapeHtml(options.message);
+  const buttonText = escapeHtml(options.buttonText);
+  const footerNote = escapeHtml(options.footerNote);
+  const buttonUrl = safeHttpUrl(options.buttonUrl);
+  const { accentColor } = options;
 
-    return `
+  return `
     <!DOCTYPE html>
     <html lang="es">
     <head>
@@ -138,31 +153,37 @@ function renderLinkEmailTemplate(name: string, options: BaseTemplateOptions): st
 }
 
 /** Email de bienvenida tras confirmar la cuenta (hook `emailVerification.afterEmailVerification`). */
-export function buildWelcomeAfterVerificationEmailHtml(name: string, frontendUrl: string): string {
-    return renderLinkEmailTemplate(name, {
-        title: 'Bienvenido',
-        heading: '¡Cuenta confirmada!',
-        message:
-            'Tu cuenta fue verificada exitosamente. Ya puedes acceder a todas las funcionalidades de la plataforma.',
-        buttonText: 'Ir a la plataforma',
-        buttonUrl: `${frontendUrl}/auth/login`,
-        accentColor: '#4f46e5',
-        footerNote: '¡Gracias por confirmar tu cuenta!',
-    });
+export function buildWelcomeAfterVerificationEmailHtml(
+  name: string,
+  frontendUrl: string,
+): string {
+  return renderLinkEmailTemplate(name, {
+    title: 'Bienvenido',
+    heading: '¡Cuenta confirmada!',
+    message:
+      'Tu cuenta fue verificada exitosamente. Ya puedes acceder a todas las funcionalidades de la plataforma.',
+    buttonText: 'Ir a la plataforma',
+    buttonUrl: `${frontendUrl}/auth/login`,
+    accentColor: '#4f46e5',
+    footerNote: '¡Gracias por confirmar tu cuenta!',
+  });
 }
 
 /** Email de verificación de cuenta (hook `emailVerification.sendVerificationEmail`). */
-export function buildAccountVerificationEmailHtml(name: string, url: string): string {
-    return renderLinkEmailTemplate(name, {
-        title: 'Confirma tu cuenta',
-        heading: 'Verificación de cuenta',
-        message:
-            'Para completar la activación de tu cuenta, confirma tu dirección de email haciendo clic en el botón a continuación.',
-        buttonText: 'Confirmar cuenta',
-        buttonUrl: url,
-        accentColor: '#059669',
-        footerNote: 'Este enlace expira pronto por tu seguridad',
-    });
+export function buildAccountVerificationEmailHtml(
+  name: string,
+  url: string,
+): string {
+  return renderLinkEmailTemplate(name, {
+    title: 'Confirma tu cuenta',
+    heading: 'Verificación de cuenta',
+    message:
+      'Para completar la activación de tu cuenta, confirma tu dirección de email haciendo clic en el botón a continuación.',
+    buttonText: 'Confirmar cuenta',
+    buttonUrl: url,
+    accentColor: '#059669',
+    footerNote: 'Este enlace expira pronto por tu seguridad',
+  });
 }
 
 /**
@@ -173,30 +194,34 @@ export function buildAccountVerificationEmailHtml(name: string, url: string): st
  * genuino "olvidé mi contraseña", para dar el copy correcto sin necesitar un
  * hook distinto (better-auth no expone esa distinción directamente).
  */
-export function buildPasswordResetEmailHtml(name: string, url: string, isNewAccount: boolean): string {
-    if (isNewAccount) {
-        return renderLinkEmailTemplate(name, {
-            title: 'Establece tu contraseña',
-            heading: '¡Bienvenido!',
-            message:
-                'Un administrador creó una cuenta para ti en Taller de Título. Para comenzar a usar la plataforma, establece tu contraseña haciendo clic en el botón a continuación.',
-            buttonText: 'Establecer mi contraseña',
-            buttonUrl: url,
-            accentColor: '#4f46e5',
-            footerNote: 'Este enlace expira pronto por tu seguridad',
-        });
-    }
-
+export function buildPasswordResetEmailHtml(
+  name: string,
+  url: string,
+  isNewAccount: boolean,
+): string {
+  if (isNewAccount) {
     return renderLinkEmailTemplate(name, {
-        title: 'Restablecer contraseña',
-        heading: 'Recuperación de contraseña',
-        message:
-            'Recibimos una solicitud para restablecer tu contraseña. Haz clic en el botón para elegir una nueva de forma segura.',
-        buttonText: 'Restablecer contraseña',
-        buttonUrl: url,
-        accentColor: '#dc2626',
-        footerNote: 'Este enlace expira pronto por tu seguridad',
+      title: 'Establece tu contraseña',
+      heading: '¡Bienvenido!',
+      message:
+        'Un administrador creó una cuenta para ti en Taller de Título. Para comenzar a usar la plataforma, establece tu contraseña haciendo clic en el botón a continuación.',
+      buttonText: 'Establecer mi contraseña',
+      buttonUrl: url,
+      accentColor: '#4f46e5',
+      footerNote: 'Este enlace expira pronto por tu seguridad',
     });
+  }
+
+  return renderLinkEmailTemplate(name, {
+    title: 'Restablecer contraseña',
+    heading: 'Recuperación de contraseña',
+    message:
+      'Recibimos una solicitud para restablecer tu contraseña. Haz clic en el botón para elegir una nueva de forma segura.',
+    buttonText: 'Restablecer contraseña',
+    buttonUrl: url,
+    accentColor: '#dc2626',
+    footerNote: 'Este enlace expira pronto por tu seguridad',
+  });
 }
 
 /**
@@ -207,18 +232,18 @@ export function buildPasswordResetEmailHtml(name: string, url: string, isNewAcco
  * cableado por si un flujo futuro invoca `inviteMember` directamente.
  */
 export function buildOrganizationInvitationEmailHtml(
-    email: string,
-    organizationName: string,
-    inviterName: string,
-    acceptUrl: string,
+  email: string,
+  organizationName: string,
+  inviterName: string,
+  acceptUrl: string,
 ): string {
-    return renderLinkEmailTemplate(email, {
-        title: 'Invitación a un condominio',
-        heading: 'Te invitaron a un condominio',
-        message: `${inviterName} te invitó a unirte a "${organizationName}" en Taller de Título. Acepta la invitación para continuar.`,
-        buttonText: 'Aceptar invitación',
-        buttonUrl: acceptUrl,
-        accentColor: '#4f46e5',
-        footerNote: 'Esta invitación expira pronto',
-    });
+  return renderLinkEmailTemplate(email, {
+    title: 'Invitación a un condominio',
+    heading: 'Te invitaron a un condominio',
+    message: `${inviterName} te invitó a unirte a "${organizationName}" en Taller de Título. Acepta la invitación para continuar.`,
+    buttonText: 'Aceptar invitación',
+    buttonUrl: acceptUrl,
+    accentColor: '#4f46e5',
+    footerNote: 'Esta invitación expira pronto',
+  });
 }

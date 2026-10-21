@@ -37,7 +37,7 @@
 │    ├─> findAll(query)              → Query con filtros          │
 │    ├─> getStats(dates)             → Estadísticas               │
 │    ├─> getEntityHistory(type, id)  → Historial completo         │
-│    └─> cleanup(days)               → Retención (90 días)        │
+│    (retención: la hace RetentionService, privacy/ - 365 días)   │
 └─────────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────────┐
@@ -245,7 +245,7 @@ Backend: Todos los endpoints protegidos con `@RequirePermissions('audit.read')`
 1. **Logging Asíncrono**: No bloquea responses HTTP
 2. **Índices DB**: 4 índices compuestos para queries rápidas
 3. **Paginación**: Frontend y backend con límite 20/página
-4. **Cleanup Automático**: Logs > 90 días eliminados (configurable)
+4. **Retención automática**: `RetentionService` (`backend/src/privacy/`) borra por lotes los `audit_logs` más antiguos que `RETENTION_AUDIT_DAYS` (365 por defecto, máximo 3650). Corre en un cron diario a las 03:30 hora de Chile (`America/Santiago`); `RETENTION_DRY_RUN=true` solo cuenta sin borrar y `RETENTION_ENABLED=false` la desactiva. Runbook: `backend/src/privacy/README.md`. El antiguo `AuditService.cleanup(90)` se eliminó.
 
 ### Métricas Esperadas:
 - Overhead por request: ~5-15ms
@@ -316,10 +316,10 @@ frontend/src/
 - [x] Paginación
 - [x] Ruta protegida
 - [x] Link en SettingsView
+- [x] Retención automática de `audit_logs` (`RetentionService`, ver "Retención automática" arriba)
 
 ### Pendiente
 - [ ] Aplicar decoradores en controladores existentes
-- [ ] Cron job para cleanup automático
 - [ ] Exportación CSV/Excel
 - [ ] Modal de detalle expandido
 - [ ] Tests unitarios y e2e
@@ -366,3 +366,20 @@ Para más información:
 - **Guía de implementación**: `IMPLEMENTATION_GUIDE.md`
 - **Código fuente**: `backend/src/audit/`
 - **Frontend**: `frontend/src/views/AuditLogsView.tsx`
+
+## Condominio y redacción (Fase 4 · P5)
+
+- **`organizationId`:** cada registro lleva el condominio del
+  `tenantContext` de la request (o la membresía del usuario). El
+  Administrador lee solo los de su condominio (`GET /audit` y la actividad
+  reciente del dashboard); las filas sin condominio (`LOGIN_FAILED`, acciones
+  del super-admin) las lee solo el super-admin.
+- **Redacción recursiva:** `newValue` (respuesta) y `oldValue` pasan por
+  `redactSensitiveData` (`interceptors/audit.interceptor.ts`), que reemplaza
+  por `[REDACTED]` en TODOS los niveles (objetos anidados y arrays) las claves
+  `password`, `token`, `refreshToken`, `secret`, `apiKey`, `hubSecret`,
+  `secretHash`, `sourceUrl` (credencial RTSP) y `qrCode` (credencial de acceso
+  de una visita), y cualquier clave que contenga password/secret/token/api-key.
+- **Alcance por familia:** los registros de auditoría no se acotan por
+  familia (los lee quien tiene `audit.read`, hoy el Administrador de su
+  condominio).

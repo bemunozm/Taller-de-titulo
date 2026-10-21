@@ -1,4 +1,10 @@
-import { IsEnum, IsOptional, IsString, IsObject } from 'class-validator';
+import {
+  IsEnum,
+  IsOptional,
+  IsString,
+  IsObject,
+  IsUUID,
+} from 'class-validator';
 import { AuditAction, AuditModule } from '../entities/audit-log.entity';
 
 export class CreateAuditLogDto {
@@ -11,6 +17,11 @@ export class CreateAuditLogDto {
   @IsOptional()
   @IsString()
   userId?: string;
+
+  /** Condominio del evento (P5); `null`/ausente = sin condominio (solo super-admin lo lee). */
+  @IsOptional()
+  @IsUUID('all')
+  organizationId?: string | null;
 
   @IsOptional()
   @IsString()

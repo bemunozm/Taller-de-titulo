@@ -1,4 +1,10 @@
-import { PartialType } from '@nestjs/swagger';
+import { OmitType, PartialType } from '@nestjs/swagger';
 import { CreateUnitDto } from './create-unit.dto';
 
-export class UpdateUnitDto extends PartialType(CreateUnitDto) {}
+/**
+ * Body de `PATCH /units/:id`. Fase 4 · P5.C: sin `organizationId` (una
+ * unidad no cambia de condominio; `update` hace `Object.assign` del DTO).
+ */
+export class UpdateUnitDto extends PartialType(
+  OmitType(CreateUnitDto, ['organizationId'] as const),
+) {}

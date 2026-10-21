@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useCallback, useMemo, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'react-toastify'
 import {
   createColumnHelper,
@@ -11,8 +11,12 @@ import {
   type SortingState,
   type ColumnFiltersState,
 } from '@tanstack/react-table'
-import { deleteUser, disableUser, enableUser } from '@/api/UserAPI'
-import type { UserWithFamily } from '@/types/index'
+import { DELETE_USER_CONFLICT_MESSAGE, deleteUser, disableUser, enableUser } from '@/api/UserAPI'
+import { listRoles } from '@/api/RoleAPI'
+import { getApiErrorStatus } from '@/helpers/httpErrors'
+import { canManageUserWithRoles } from '@/helpers/roles'
+import { usePermissions } from '@/hooks/usePermissions'
+import type { Role, UserWithFamily } from '@/types/index'
 import { Table, TableHead, TableBody, TableRow, TableHeader, TableCell } from '@/components/ui/Table'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -31,6 +35,15 @@ import {
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline'
 import { formatDateTime } from '@/helpers/index'
+import { RETENTION_DAYS } from '@/helpers/privacyPolicy'
+import {
+  DELETED_USER_NAME,
+  MISSING_VALUE,
+  formatLongDate,
+  getAnonymizationDate,
+  isAnonymizedUser,
+  visibleUserEmail,
+} from '@/helpers/userDisplay'
 
 interface UserTableProps {
   users: UserWithFamily[]
@@ -38,18 +51,39 @@ interface UserTableProps {
 }
 
 const columnHelper = createColumnHelper<UserWithFamily>()
+const NO_ROLES: Role[] = []
 
 export function UserTable({ users, onEdit }: UserTableProps) {
   const queryClient = useQueryClient()
+  // Nadie puede borrarse ni deshabilitarse a sí mismo (403): no se ofrece.
+  const { user: currentUser, isSuperAdmin, userPermissions } = usePermissions()
+  const currentUserId = currentUser?.id
+
+  // Escribir sobre otro usuario exige que sus permisos actuales sean un
+  // subconjunto de los del actor (403 si no). `GET /users` trae los roles sin
+  // permisos: el catálogo de `GET /roles` los completa.
+  const { data: roleCatalog = NO_ROLES } = useQuery({ queryKey: ['roles'], queryFn: listRoles })
+  const canManageUser = useCallback(
+    (target: UserWithFamily) =>
+      canManageUserWithRoles(target.roles, { isSuperAdmin, permissions: userPermissions }, roleCatalog),
+    [isSuperAdmin, userPermissions, roleCatalog],
+  )
   const [sorting, setSorting] = useState<SortingState>([])
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
   const [globalFilter, setGlobalFilter] = useState('')
-  
+
   // Estados para los diálogos de confirmación
   const [deleteAlertOpen, setDeleteAlertOpen] = useState(false)
   const [disableAlertOpen, setDisableAlertOpen] = useState(false)
   const [enableAlertOpen, setEnableAlertOpen] = useState(false)
   const [selectedUserForAction, setSelectedUserForAction] = useState<UserWithFamily | null>(null)
+  // Un 409 al borrar (datos asociados) abre la deshabilitación con este motivo.
+  const [disableReason, setDisableReason] = useState<string | null>(null)
+
+  const closeDisableAlert = () => {
+    setDisableAlertOpen(false)
+    setDisableReason(null)
+  }
 
   const deleteMutation = useMutation({
     mutationFn: deleteUser,
@@ -60,8 +94,14 @@ export function UserTable({ users, onEdit }: UserTableProps) {
       setSelectedUserForAction(null)
     },
     onError: (error: Error) => {
-      toast.error(error.message || 'Error al eliminar el usuario')
       setDeleteAlertOpen(false)
+      // 409: tiene datos asociados → se sugiere deshabilitarlo (conserva los datos).
+      if (getApiErrorStatus(error) === 409 && selectedUserForAction && !selectedUserForAction.deletedAt) {
+        setDisableReason(error.message || DELETE_USER_CONFLICT_MESSAGE)
+        setDisableAlertOpen(true)
+        return
+      }
+      toast.error(error.message || 'Error al eliminar el usuario')
     },
   })
 
@@ -70,12 +110,12 @@ export function UserTable({ users, onEdit }: UserTableProps) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
       toast.success('Usuario deshabilitado exitosamente')
-      setDisableAlertOpen(false)
+      closeDisableAlert()
       setSelectedUserForAction(null)
     },
     onError: (error: Error) => {
       toast.error(error.message || 'Error al deshabilitar el usuario')
-      setDisableAlertOpen(false)
+      closeDisableAlert()
     },
   })
 
@@ -90,6 +130,11 @@ export function UserTable({ users, onEdit }: UserTableProps) {
     onError: (error: Error) => {
       toast.error(error.message || 'Error al habilitar el usuario')
       setEnableAlertOpen(false)
+      // 409: la cuenta se anonimizó mientras la lista estaba abierta; se refresca.
+      if (getApiErrorStatus(error) === 409) {
+        queryClient.invalidateQueries({ queryKey: ['users'] })
+        setSelectedUserForAction(null)
+      }
     },
   })
 
@@ -100,6 +145,7 @@ export function UserTable({ users, onEdit }: UserTableProps) {
 
   const handleDisable = (user: UserWithFamily) => {
     setSelectedUserForAction(user)
+    setDisableReason(null)
     setDisableAlertOpen(true)
   }
 
@@ -130,26 +176,39 @@ export function UserTable({ users, onEdit }: UserTableProps) {
     () => [
       columnHelper.accessor('name', {
         header: 'Nombre',
-        cell: (info) => (
-          <div className="flex flex-col">
-            <span className="font-medium text-zinc-900 dark:text-zinc-100">
-              {info.getValue()}
-            </span>
-            <span className="text-xs text-zinc-500 dark:text-zinc-400">
-              {info.row.original.email}
-            </span>
-          </div>
-        ),
+        cell: (info) => {
+          const user = info.row.original
+          // Cuenta anonimizada (Ley 21.719): nombre neutro, sin el email marcador.
+          if (isAnonymizedUser(user)) {
+            return (
+              <span className="italic text-zinc-500 dark:text-zinc-400">{DELETED_USER_NAME}</span>
+            )
+          }
+          const email = visibleUserEmail(user.email)
+          return (
+            <div className="flex flex-col">
+              <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                {info.getValue()}
+                {user.id === currentUserId ? (
+                  <Badge color="indigo" className="ml-2">Tú</Badge>
+                ) : null}
+              </span>
+              {email ? (
+                <span className="text-xs text-zinc-500 dark:text-zinc-400">{email}</span>
+              ) : null}
+            </div>
+          )
+        },
       }),
       columnHelper.accessor('rut', {
         header: 'RUT',
         cell: (info) => (
-          <span className="font-mono text-sm">{info.getValue()}</span>
+          <span className="font-mono text-sm">{info.getValue() || MISSING_VALUE}</span>
         ),
       }),
       columnHelper.accessor('phone', {
         header: 'Teléfono',
-        cell: (info) => info.getValue() || '-',
+        cell: (info) => info.getValue() || MISSING_VALUE,
       }),
       columnHelper.accessor('age', {
         header: 'Edad',
@@ -159,13 +218,21 @@ export function UserTable({ users, onEdit }: UserTableProps) {
         header: 'Estado',
         cell: (info) => {
           const user = info.row.original
-          const isDisabled = !!user.deletedAt
-          
-          if (isDisabled) {
+
+          if (isAnonymizedUser(user)) {
+            return <Badge color="zinc">Anonimizada</Badge>
+          }
+
+          if (user.deletedAt) {
             return (
-              <div className="flex items-center gap-2">
-                <LockClosedIcon className="w-5 h-5 text-red-600 dark:text-red-400" />
-                <Badge color="red">Deshabilitado</Badge>
+              <div className="flex flex-col gap-1">
+                <div className="flex items-center gap-2">
+                  <LockClosedIcon className="w-5 h-5 text-red-600 dark:text-red-400" />
+                  <Badge color="red">Deshabilitado</Badge>
+                </div>
+                <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                  Se anonimiza el {formatLongDate(getAnonymizationDate(user.deletedAt))}
+                </span>
               </div>
             )
           }
@@ -220,19 +287,37 @@ export function UserTable({ users, onEdit }: UserTableProps) {
         cell: (info) => {
           const user = info.row.original
           const isDisabled = !!user.deletedAt
-          
+          const isSelf = user.id === currentUserId
+          // Anonimizada: no se edita ni se habilita (el backend responde 409).
+          const isAnonymized = isAnonymizedUser(user)
+
+          if (!canManageUser(user)) {
+            return (
+              <div className="flex justify-end">
+                <span
+                  className="text-xs text-zinc-500 dark:text-zinc-400"
+                  title="Tiene permisos que tú no tienes: solo un administrador con esos permisos puede modificarlo"
+                >
+                  Sin acciones
+                </span>
+              </div>
+            )
+          }
+
           return (
             <div className="flex justify-end">
               <Dropdown>
-                <DropdownButton plain>
+                <DropdownButton plain aria-label={`Acciones de ${user.name}`}>
                   <EllipsisVerticalIcon className="w-5 h-5" />
                 </DropdownButton>
                 <DropdownMenu anchor="bottom end">
-                  <DropdownItem onClick={() => onEdit(user)}>
-                    <PencilIcon className="w-4 h-4" />
-                    Editar
-                  </DropdownItem>
-                  {isDisabled ? (
+                  {isAnonymized ? null : (
+                    <DropdownItem onClick={() => onEdit(user)}>
+                      <PencilIcon className="w-4 h-4" />
+                      Editar
+                    </DropdownItem>
+                  )}
+                  {isSelf || isAnonymized ? null : isDisabled ? (
                     <DropdownItem onClick={() => handleEnable(user)}>
                       <LockOpenIcon className="w-4 h-4 text-green-600" />
                       Habilitar
@@ -243,10 +328,12 @@ export function UserTable({ users, onEdit }: UserTableProps) {
                       Deshabilitar
                     </DropdownItem>
                   )}
-                  <DropdownItem onClick={() => handleDelete(user)}>
-                    <TrashIcon className="w-4 h-4 text-red-600" />
-                    Eliminar
-                  </DropdownItem>
+                  {isSelf ? null : (
+                    <DropdownItem onClick={() => handleDelete(user)}>
+                      <TrashIcon className="w-4 h-4 text-red-600" />
+                      Eliminar
+                    </DropdownItem>
+                  )}
                 </DropdownMenu>
               </Dropdown>
             </div>
@@ -254,7 +341,7 @@ export function UserTable({ users, onEdit }: UserTableProps) {
         },
       }),
     ],
-    [onEdit]
+    [onEdit, currentUserId, canManageUser]
   )
 
   const table = useReactTable({
@@ -395,22 +482,41 @@ export function UserTable({ users, onEdit }: UserTableProps) {
         </AlertActions>
       </Alert>
 
-      {/* Alert para confirmar deshabilitación */}
-      <Alert open={disableAlertOpen} onClose={() => setDisableAlertOpen(false)}>
+      {/* Alert para confirmar deshabilitación (también tras un 409 al borrar) */}
+      <Alert open={disableAlertOpen} onClose={closeDisableAlert}>
         <div className="flex items-center gap-3 mb-4">
           <div className="flex items-center justify-center w-12 h-12 rounded-full bg-amber-100 dark:bg-amber-900/20">
             <LockClosedIcon className="w-6 h-6 text-amber-600 dark:text-amber-400" />
           </div>
-          <AlertTitle>Deshabilitar Usuario</AlertTitle>
+          <AlertTitle>
+            {disableReason ? 'No se puede eliminar: deshabilítalo' : 'Deshabilitar Usuario'}
+          </AlertTitle>
         </div>
         <AlertDescription>
-          ¿Estás seguro de deshabilitar al usuario <strong>"{selectedUserForAction?.name}"</strong>?
+          {disableReason ? (
+            <>
+              {disableReason}
+              <br />
+              <br />
+              Puedes deshabilitar a <strong>"{selectedUserForAction?.name}"</strong>: no podrá iniciar sesión.
+            </>
+          ) : (
+            <>
+              ¿Estás seguro de deshabilitar al usuario <strong>"{selectedUserForAction?.name}"</strong>? No
+              podrá iniciar sesión.
+            </>
+          )}
           <br />
           <br />
-          El usuario no podrá iniciar sesión hasta que se habilite nuevamente. Los datos se conservarán.
+          {/* Ley 21.719 (P7.R): la baja no es una pausa indefinida. */}
+          Si no lo habilitas antes, en {RETENTION_DAYS.disabledUsers} días (aprox. el{' '}
+          <strong>{formatLongDate(getAnonymizationDate(new Date()))}</strong>) la cuenta se{' '}
+          <strong>anonimiza de forma irreversible</strong>: se borran su nombre, correo, RUT, teléfono y foto, y ya
+          no se podrá volver a habilitar. Además, <strong>sus vehículos se borran</strong> y sus visitas quedan sin
+          sus datos personales, asociadas a «{DELETED_USER_NAME}».
         </AlertDescription>
         <AlertActions>
-          <Button plain onClick={() => setDisableAlertOpen(false)}>
+          <Button plain onClick={closeDisableAlert}>
             Cancelar
           </Button>
           <Button color="amber" onClick={confirmDisable} disabled={disableMutation.isPending}>

@@ -1,5 +1,26 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete, UseGuards } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBody, ApiBearerAuth, ApiParam, ApiUnauthorizedResponse, ApiForbiddenResponse, ApiNotFoundResponse, ApiBadRequestResponse } from '@nestjs/swagger';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+  UseGuards,
+  ParseUUIDPipe,
+} from '@nestjs/common';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiBody,
+  ApiBearerAuth,
+  ApiParam,
+  ApiUnauthorizedResponse,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiBadRequestResponse,
+} from '@nestjs/swagger';
 import { PermissionsService } from './permissions.service';
 import { CreatePermissionDto } from './dto/create-permission.dto';
 import { UpdatePermissionDto } from './dto/update-permission.dto';
@@ -8,13 +29,22 @@ import { AuthorizationGuard } from '../auth/guards/authorization.guard';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
 import { Auditable } from '../audit/decorators/auditable.decorator';
 import { AuditModule, AuditAction } from '../audit/entities/audit-log.entity';
+import { CurrentTenant } from '../common/tenant/tenant-actor';
+import type { TenantContext } from '../common/tenant/tenant-context.types';
 
+/**
+ * Permisos (Fase 4 · P5, D10): crear, editar y borrar es solo del super-admin
+ * (chequeo explícito en PermissionsService, 403); los permisos de sistema no
+ * se renombran ni se borran (403). La lectura sigue con `permissions.read`.
+ */
 @ApiTags('Gestión de Permisos')
 @Controller('permissions')
 @UseGuards(AuthGuard, AuthorizationGuard)
 @ApiBearerAuth('JWT-auth')
 @ApiUnauthorizedResponse({ description: 'Token JWT inválido o expirado' })
-@ApiForbiddenResponse({ description: 'No tiene permisos suficientes para esta operación' })
+@ApiForbiddenResponse({
+  description: 'No tiene permisos suficientes para esta operación',
+})
 export class PermissionsController {
   constructor(private readonly permissionsService: PermissionsService) {}
 
@@ -25,11 +55,12 @@ export class PermissionsController {
     action: AuditAction.CREATE,
     entityType: 'Permission',
     description: 'Permiso creado en el sistema',
-    captureResponse: true
+    captureResponse: true,
   })
   @ApiOperation({
     summary: 'Crear nuevo permiso',
-    description: 'Crea un nuevo permiso en el sistema especificando el módulo y la acción. Requiere permiso "permissions.create".'
+    description:
+      'Crea un permiso personalizado. Solo super-admin (403 para el resto). Un nombre repetido responde 409.',
   })
   @ApiResponse({
     status: 201,
@@ -39,11 +70,14 @@ export class PermissionsController {
       properties: {
         id: { type: 'string', format: 'uuid', example: 'perm-uuid-123' },
         name: { type: 'string', example: 'users.create' },
-        description: { type: 'string', example: 'Crear usuarios en el sistema' },
+        description: {
+          type: 'string',
+          example: 'Crear usuarios en el sistema',
+        },
         module: { type: 'string', example: 'users' },
-        action: { type: 'string', example: 'create' }
-      }
-    }
+        action: { type: 'string', example: 'create' },
+      },
+    },
   })
   @ApiBadRequestResponse({
     description: 'Datos inválidos o permiso ya existe',
@@ -52,20 +86,24 @@ export class PermissionsController {
       properties: {
         message: { type: 'string', example: 'El permiso ya existe' },
         error: { type: 'string', example: 'Bad Request' },
-        statusCode: { type: 'number', example: 400 }
-      }
-    }
+        statusCode: { type: 'number', example: 400 },
+      },
+    },
   })
   @ApiBody({ type: CreatePermissionDto })
-  create(@Body() createPermissionDto: CreatePermissionDto) {
-    return this.permissionsService.create(createPermissionDto);
+  create(
+    @Body() createPermissionDto: CreatePermissionDto,
+    @CurrentTenant() tenant: TenantContext,
+  ) {
+    return this.permissionsService.create(createPermissionDto, tenant);
   }
 
   @Get()
   @RequirePermissions('permissions.read')
   @ApiOperation({
     summary: 'Obtener todos los permisos',
-    description: 'Retorna la lista completa de permisos disponibles en el sistema. Requiere permiso "permissions.read".'
+    description:
+      'Retorna la lista completa de permisos disponibles en el sistema. Requiere permiso "permissions.read".',
   })
   @ApiResponse({
     status: 200,
@@ -77,7 +115,10 @@ export class PermissionsController {
         properties: {
           id: { type: 'string', format: 'uuid' },
           name: { type: 'string', example: 'users.create' },
-          description: { type: 'string', example: 'Crear usuarios en el sistema' },
+          description: {
+            type: 'string',
+            example: 'Crear usuarios en el sistema',
+          },
           module: { type: 'string', example: 'users' },
           action: { type: 'string', example: 'create' },
           roles: {
@@ -86,13 +127,13 @@ export class PermissionsController {
               type: 'object',
               properties: {
                 id: { type: 'string', format: 'uuid' },
-                name: { type: 'string', example: 'Administrador' }
-              }
-            }
-          }
-        }
-      }
-    }
+                name: { type: 'string', example: 'Administrador' },
+              },
+            },
+          },
+        },
+      },
+    },
   })
   findAll() {
     return this.permissionsService.findAll();
@@ -102,7 +143,8 @@ export class PermissionsController {
   @RequirePermissions('permissions.read')
   @ApiOperation({
     summary: 'Obtener permisos agrupados por módulo',
-    description: 'Retorna los permisos organizados por módulos del sistema para facilitar la gestión.'
+    description:
+      'Retorna los permisos organizados por módulos del sistema para facilitar la gestión.',
   })
   @ApiResponse({
     status: 200,
@@ -117,23 +159,53 @@ export class PermissionsController {
             id: { type: 'string', format: 'uuid' },
             name: { type: 'string', example: 'users.create' },
             description: { type: 'string', example: 'Crear usuarios' },
-            action: { type: 'string', example: 'create' }
-          }
-        }
+            action: { type: 'string', example: 'create' },
+          },
+        },
       },
       example: {
         users: [
-          { id: 'perm-1', name: 'users.create', description: 'Crear usuarios', action: 'create' },
-          { id: 'perm-2', name: 'users.read', description: 'Ver usuarios', action: 'read' },
-          { id: 'perm-3', name: 'users.update', description: 'Actualizar usuarios', action: 'update' },
-          { id: 'perm-4', name: 'users.delete', description: 'Eliminar usuarios', action: 'delete' }
+          {
+            id: 'perm-1',
+            name: 'users.create',
+            description: 'Crear usuarios',
+            action: 'create',
+          },
+          {
+            id: 'perm-2',
+            name: 'users.read',
+            description: 'Ver usuarios',
+            action: 'read',
+          },
+          {
+            id: 'perm-3',
+            name: 'users.update',
+            description: 'Actualizar usuarios',
+            action: 'update',
+          },
+          {
+            id: 'perm-4',
+            name: 'users.delete',
+            description: 'Eliminar usuarios',
+            action: 'delete',
+          },
         ],
         roles: [
-          { id: 'perm-5', name: 'roles.create', description: 'Crear roles', action: 'create' },
-          { id: 'perm-6', name: 'roles.read', description: 'Ver roles', action: 'read' }
-        ]
-      }
-    }
+          {
+            id: 'perm-5',
+            name: 'roles.create',
+            description: 'Crear roles',
+            action: 'create',
+          },
+          {
+            id: 'perm-6',
+            name: 'roles.read',
+            description: 'Ver roles',
+            action: 'read',
+          },
+        ],
+      },
+    },
   })
   findByModule() {
     return this.permissionsService.findByModule();
@@ -143,13 +215,14 @@ export class PermissionsController {
   @RequirePermissions('permissions.read')
   @ApiOperation({
     summary: 'Obtener permiso por ID',
-    description: 'Retorna la información detallada de un permiso específico incluyendo los roles que lo tienen asignado.'
+    description:
+      'Retorna la información detallada de un permiso específico incluyendo los roles que lo tienen asignado.',
   })
   @ApiParam({
     name: 'id',
     type: 'string',
     description: 'ID único del permiso',
-    example: 'perm-uuid-123'
+    example: 'perm-uuid-123',
   })
   @ApiResponse({
     status: 200,
@@ -159,7 +232,10 @@ export class PermissionsController {
       properties: {
         id: { type: 'string', format: 'uuid' },
         name: { type: 'string', example: 'users.create' },
-        description: { type: 'string', example: 'Crear usuarios en el sistema' },
+        description: {
+          type: 'string',
+          example: 'Crear usuarios en el sistema',
+        },
         module: { type: 'string', example: 'users' },
         action: { type: 'string', example: 'create' },
         roles: {
@@ -169,12 +245,15 @@ export class PermissionsController {
             properties: {
               id: { type: 'string', format: 'uuid' },
               name: { type: 'string', example: 'Administrador' },
-              description: { type: 'string', example: 'Administrador del sistema' }
-            }
-          }
-        }
-      }
-    }
+              description: {
+                type: 'string',
+                example: 'Administrador del sistema',
+              },
+            },
+          },
+        },
+      },
+    },
   })
   @ApiNotFoundResponse({
     description: 'Permiso no encontrado',
@@ -183,11 +262,11 @@ export class PermissionsController {
       properties: {
         message: { type: 'string', example: 'Permiso no encontrado' },
         error: { type: 'string', example: 'Not Found' },
-        statusCode: { type: 'number', example: 404 }
-      }
-    }
+        statusCode: { type: 'number', example: 404 },
+      },
+    },
   })
-  findOne(@Param('id') id: string) {
+  findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.permissionsService.findOne(id);
   }
 
@@ -199,17 +278,18 @@ export class PermissionsController {
     entityType: 'Permission',
     description: 'Permiso actualizado',
     captureOldValue: true,
-    captureResponse: true
+    captureResponse: true,
   })
   @ApiOperation({
     summary: 'Actualizar permiso',
-    description: 'Actualiza la información de un permiso existente (nombre, descripción, módulo, acción).'
+    description:
+      'Actualiza un permiso. Solo super-admin; un permiso de sistema no se renombra (403).',
   })
   @ApiParam({
     name: 'id',
     type: 'string',
     description: 'ID único del permiso a actualizar',
-    example: 'perm-uuid-123'
+    example: 'perm-uuid-123',
   })
   @ApiResponse({
     status: 200,
@@ -219,17 +299,24 @@ export class PermissionsController {
       properties: {
         id: { type: 'string', format: 'uuid' },
         name: { type: 'string', example: 'users.create' },
-        description: { type: 'string', example: 'Crear usuarios en el sistema (actualizado)' },
+        description: {
+          type: 'string',
+          example: 'Crear usuarios en el sistema (actualizado)',
+        },
         module: { type: 'string', example: 'users' },
-        action: { type: 'string', example: 'create' }
-      }
-    }
+        action: { type: 'string', example: 'create' },
+      },
+    },
   })
   @ApiNotFoundResponse({ description: 'Permiso no encontrado' })
   @ApiBadRequestResponse({ description: 'Datos inválidos' })
   @ApiBody({ type: UpdatePermissionDto })
-  update(@Param('id') id: string, @Body() updatePermissionDto: UpdatePermissionDto) {
-    return this.permissionsService.update(id, updatePermissionDto);
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() updatePermissionDto: UpdatePermissionDto,
+    @CurrentTenant() tenant: TenantContext,
+  ) {
+    return this.permissionsService.update(id, updatePermissionDto, tenant);
   }
 
   @Delete(':id')
@@ -239,17 +326,18 @@ export class PermissionsController {
     action: AuditAction.DELETE,
     entityType: 'Permission',
     description: 'Permiso eliminado del sistema',
-    captureOldValue: true
+    captureOldValue: true,
   })
   @ApiOperation({
     summary: 'Eliminar permiso',
-    description: 'Elimina un permiso del sistema. No se puede eliminar un permiso que esté asignado a roles activos.'
+    description:
+      'Elimina un permiso personalizado (se quita de los roles que lo tengan). Solo super-admin; un permiso de sistema responde 403.',
   })
   @ApiParam({
     name: 'id',
     type: 'string',
     description: 'ID único del permiso a eliminar',
-    example: 'perm-uuid-123'
+    example: 'perm-uuid-123',
   })
   @ApiResponse({
     status: 200,
@@ -258,9 +346,9 @@ export class PermissionsController {
       type: 'object',
       properties: {
         message: { type: 'string', example: 'Permiso eliminado exitosamente' },
-        deleted: { type: 'boolean', example: true }
-      }
-    }
+        deleted: { type: 'boolean', example: true },
+      },
+    },
   })
   @ApiNotFoundResponse({ description: 'Permiso no encontrado' })
   @ApiBadRequestResponse({
@@ -268,13 +356,20 @@ export class PermissionsController {
     schema: {
       type: 'object',
       properties: {
-        message: { type: 'string', example: 'No se puede eliminar el permiso porque está asignado a roles activos' },
+        message: {
+          type: 'string',
+          example:
+            'No se puede eliminar el permiso porque está asignado a roles activos',
+        },
         error: { type: 'string', example: 'Bad Request' },
-        statusCode: { type: 'number', example: 400 }
-      }
-    }
+        statusCode: { type: 'number', example: 400 },
+      },
+    },
   })
-  remove(@Param('id') id: string) {
-    return this.permissionsService.remove(id);
+  remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentTenant() tenant: TenantContext,
+  ) {
+    return this.permissionsService.remove(id, tenant);
   }
 }

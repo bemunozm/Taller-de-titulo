@@ -14,6 +14,8 @@ import {
 } from '@tanstack/react-table'
 import { deleteRole } from '@/api/RoleAPI'
 import type { Role } from '@/types/index'
+import { canManageRole } from '@/helpers/roles'
+import { usePermissions } from '@/hooks/usePermissions'
 import { Table, TableHead, TableBody, TableRow, TableHeader, TableCell } from '@/components/ui/Table'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -38,6 +40,8 @@ const columnHelper = createColumnHelper<Role>()
 export function RoleTable({ roles }: RoleTableProps) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  // Crear, editar y borrar roles personalizados es solo del super-admin (P5 · D10).
+  const { isSuperAdmin } = usePermissions()
   const [sorting, setSorting] = useState<SortingState>([])
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
   const [globalFilter, setGlobalFilter] = useState('')
@@ -60,23 +64,14 @@ export function RoleTable({ roles }: RoleTableProps) {
     },
   })
 
-  const handleDelete = (role: Role) => {
-    setSelectedRoleForAction(role)
-    setDeleteAlertOpen(true)
-  }
-
   const confirmDelete = () => {
     if (selectedRoleForAction) {
       deleteMutation.mutate(selectedRoleForAction.id)
     }
   }
 
-  const handleEdit = (role: Role) => {
-    navigate(`/roles/edit/${role.id}`)
-  }
-
-  const columns = useMemo(
-    () => [
+  const columns = useMemo(() => {
+    const baseColumns = [
       columnHelper.accessor('name', {
         header: ({ column }) => (
           <button
@@ -93,6 +88,11 @@ export function RoleTable({ roles }: RoleTableProps) {
             <span className="font-medium text-zinc-900 dark:text-zinc-100">
               {info.getValue()}
             </span>
+            {info.row.original.isSystem ? (
+              <Badge color="zinc" title="Rol de sistema: no se edita ni se elimina">
+                Sistema
+              </Badge>
+            ) : null}
           </div>
         ),
       }),
@@ -119,30 +119,53 @@ export function RoleTable({ roles }: RoleTableProps) {
         enableSorting: false,
         enableColumnFilter: false,
       }),
+    ]
+
+    // Sin super-admin no hay acciones posibles: la columna ni aparece.
+    if (!isSuperAdmin) {
+      return baseColumns
+    }
+
+    return [
+      ...baseColumns,
       columnHelper.display({
         id: 'actions',
         header: 'Acciones',
-        cell: ({ row }) => (
-          <Dropdown>
-            <DropdownButton plain aria-label="Más opciones">
-              <EllipsisVerticalIcon className="w-5 h-5" />
-            </DropdownButton>
-            <DropdownMenu anchor="bottom end">
-              <DropdownItem onClick={() => handleEdit(row.original)}>
-                <PencilIcon className="w-4 h-4" />
-                Editar
-              </DropdownItem>
-              <DropdownItem onClick={() => handleDelete(row.original)}>
-                <TrashIcon className="w-4 h-4" />
-                Eliminar
-              </DropdownItem>
-            </DropdownMenu>
-          </Dropdown>
-        ),
+        cell: ({ row }) => {
+          const role = row.original
+          if (!canManageRole(role, isSuperAdmin)) {
+            return (
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                Rol de sistema
+              </span>
+            )
+          }
+          return (
+            <Dropdown>
+              <DropdownButton plain aria-label={`Acciones del rol ${role.name}`}>
+                <EllipsisVerticalIcon className="w-5 h-5" />
+              </DropdownButton>
+              <DropdownMenu anchor="bottom end">
+                <DropdownItem onClick={() => navigate(`/settings/roles/edit/${role.id}`)}>
+                  <PencilIcon className="w-4 h-4" />
+                  Editar
+                </DropdownItem>
+                <DropdownItem
+                  onClick={() => {
+                    setSelectedRoleForAction(role)
+                    setDeleteAlertOpen(true)
+                  }}
+                >
+                  <TrashIcon className="w-4 h-4" />
+                  Eliminar
+                </DropdownItem>
+              </DropdownMenu>
+            </Dropdown>
+          )
+        },
       }),
-    ],
-    []
-  )
+    ]
+  }, [isSuperAdmin, navigate])
 
   const table = useReactTable({
     data: roles,

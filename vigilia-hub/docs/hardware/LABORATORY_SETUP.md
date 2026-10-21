@@ -54,7 +54,7 @@ Con solo RPi + protoboard + cables, puedes avanzar **~60% del proyecto**:
 
 **Conectar:**
 ```bash
-# 1. Insertar microSD con Raspberry Pi OS
+# 1. Insertar microSD con Raspberry Pi OS 64-bit (Bookworm; 32-bit no soportado)
 # 2. Conectar cable micro-USB
 # 3. Esperar LED rojo (power) encender
 # 4. Esperar LED verde (activity) parpadear
@@ -70,10 +70,10 @@ ssh pi@raspberrypi.local
 # --- ACTUALIZAR SISTEMA ---
 sudo apt update && sudo apt upgrade -y
 
-# --- NODE.JS 18+ ---
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+# --- NODE.JS 22 LTS (requiere 64-bit: uname -m = aarch64) ---
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
-node --version  # Debe ser v18+
+node --version  # Debe ser v22.12.0 o superior
 
 # --- HERRAMIENTAS GPIO ---
 sudo apt install -y wiringpi git
@@ -109,9 +109,11 @@ nano .env
 
 **Configuración .env para laboratorio:**
 ```bash
-# Backend (puede ser localhost si corres backend local)
+# Backend (puede ser localhost si corres backend local). http:// solo se
+# acepta con NODE_ENV=development (ver abajo).
 BACKEND_URL=http://localhost:3000
-HUB_SECRET=dev_secret_123456
+# Secret del hub provisionado en tu backend local (POST /hubs, 64 caracteres)
+HUB_SECRET=<secret devuelto por POST /hubs>
 
 # Hub ID
 HUB_ID=hub-lab-001
@@ -360,7 +362,8 @@ cd ~/vigilia-hub
 
 # Editar .env para apuntar a localhost
 nano .env
-# Cambiar: BACKEND_URL=ws://localhost:3000
+# Cambiar: BACKEND_URL=http://localhost:3000 (con NODE_ENV=development;
+# el hub deriva ws:// para el WebSocket, no uses ws:// acá)
 
 # Ejecutar hub
 npm run dev
@@ -374,7 +377,7 @@ npm run dev
 
 ### Fase 1: Software Base ✅
 - [ ] Raspberry Pi OS instalado y actualizado
-- [ ] Node.js 18+ funcionando
+- [ ] Node.js 22.12+ funcionando (Raspberry Pi OS 64-bit)
 - [ ] vigilia-hub clonado
 - [ ] npm install sin errores
 - [ ] npm run build exitoso
@@ -446,7 +449,7 @@ ifconfig  # Linux/Mac
 
 # En RPi, editar .env
 nano ~/vigilia-hub/.env
-# BACKEND_URL=http://192.168.1.XXX:3000
+# BACKEND_URL=http://192.168.1.XXX:3000   (solo con NODE_ENV=development)
 ```
 
 ### 4. Documentación

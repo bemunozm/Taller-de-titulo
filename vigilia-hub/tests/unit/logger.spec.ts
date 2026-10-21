@@ -12,9 +12,11 @@ jest.mock('winston', () => {
     log: jest.fn(),
   };
 
-  return {
-    createLogger: jest.fn(() => mockLogger),
-    format: {
+  // `winston.format(fn)` es invocable (formato propio de redacción, P6.M) y
+  // además expone los formatos predefinidos.
+  const format = Object.assign(
+    jest.fn(() => jest.fn(() => ({}))),
+    {
       combine: jest.fn(() => ({})),
       timestamp: jest.fn(() => ({})),
       errors: jest.fn(() => ({})),
@@ -23,6 +25,11 @@ jest.mock('winston', () => {
       colorize: jest.fn(() => ({})),
       printf: jest.fn(() => ({})),
     },
+  );
+
+  return {
+    createLogger: jest.fn(() => mockLogger),
+    format,
     transports: {
       Console: jest.fn(),
       File: jest.fn(),
@@ -133,6 +140,33 @@ describe('Logger', () => {
       expect(mockLogger.error).toHaveBeenCalled();
       expect(mockLogger.warn).toHaveBeenCalled();
       expect(mockLogger.debug).toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * Fase 4 · P6.M: los metadatos van como objeto (antes los argumentos extra
+   * se esparcían como `{ 0: ..., 1: ... }`) y el contexto no se puede pisar.
+   */
+  describe('Metadatos', () => {
+    it('pasa los metadatos como objeto junto al servicio', () => {
+      const winston = require('winston');
+      const mockLogger = winston.createLogger();
+
+      logger.debug('Evento', { event: { type: 'x' } });
+
+      expect(mockLogger.debug).toHaveBeenCalledWith('Evento', {
+        event: { type: 'x' },
+        service: context,
+      });
+    });
+
+    it('un metadato "service" no reemplaza el contexto', () => {
+      const winston = require('winston');
+      const mockLogger = winston.createLogger();
+
+      logger.log('Mensaje', { service: 'Otro' });
+
+      expect(mockLogger.info).toHaveBeenCalledWith('Mensaje', { service: context });
     });
   });
 

@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Dialog, DialogActions, DialogBody, DialogDescription, DialogTitle } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { useNotifications } from '@/hooks/useNotifications'
 import type { AppNotification } from '@/types/index'
 import * as PendingDetectionsAPI from '@/api/PendingDetectionsAPI'
+import { isPendingAlreadyRespondedError } from '@/api/PendingDetectionsAPI'
 import { 
   TruckIcon, 
   ClockIcon, 
@@ -35,6 +37,7 @@ export function UnknownVehicleApprovalDialog() {
   const processedNotificationsRef = useRef<Set<string>>(new Set())
   
   const { notifications, markAsRead } = useNotifications()
+  const queryClient = useQueryClient()
 
   useEffect(() => {
     // No procesar si el modal ya está abierto o está procesando
@@ -53,14 +56,9 @@ export function UnknownVehicleApprovalDialog() {
         !processedNotificationsRef.current.has(n.id) // No mostrar notificaciones ya procesadas
     )
 
-    console.log('[UnknownVehicleApproval] 📬 Total notificaciones:', notifications.length)
-    console.log('[UnknownVehicleApproval] 🔍 Pendientes sin procesar:', unknownVehicleNotifications.length)
-    console.log('[UnknownVehicleApproval] 🔒 Ya procesadas:', processedNotificationsRef.current.size)
-
     // Mostrar la primera notificación pendiente que no haya sido procesada
     if (unknownVehicleNotifications.length > 0) {
       const notification = unknownVehicleNotifications[0]
-      console.log('[UnknownVehicleApproval] 🔔 Abriendo modal para notificación:', notification.id)
       
       // Marcar como procesada inmediatamente usando ref
       processedNotificationsRef.current.add(notification.id)
@@ -96,24 +94,19 @@ export function UnknownVehicleApprovalDialog() {
 
   const validateDetection = async (attemptId: string) => {
     try {
-      console.log('[UnknownVehicleApproval] 🔍 Validando estado de detección:', attemptId)
       const status = await PendingDetectionsAPI.checkPendingDetectionStatus(attemptId)
       setSessionStatus(status)
       
       if (!status.active) {
-        console.warn('[UnknownVehicleApproval] ⚠️ Detección no activa:', status.reason)
         setError(status.reason || 'La detección ya no está activa')
-      } else {
-        console.log('[UnknownVehicleApproval] ✅ Detección activa')
       }
-    } catch (err) {
-      console.error('[UnknownVehicleApproval] ❌ Error al validar detección:', err)
+    } catch {
       setError('No se pudo validar el estado de la detección')
       setSessionStatus({ active: false, reason: 'Error de conexión' })
     }
   }
 
-  const handleApprove = async () => {
+  const respond = async (decision: 'approved' | 'denied') => {
     if (!detectionData) return
 
     // Verificar que la detección esté activa
@@ -128,59 +121,38 @@ export function UnknownVehicleApprovalDialog() {
     try {
       await PendingDetectionsAPI.respondToPendingDetection(
         detectionData.attemptId,
-        'approved',
-        'Aprobado manualmente por conserje'
+        decision,
+        decision === 'approved' ? 'Aprobado manualmente por conserje' : 'Rechazado manualmente por conserje'
       )
-      console.log('[UnknownVehicleApproval] ✅ Vehículo aprobado')
       
       // Marcar la notificación como leída
       await markAsRead(detectionData.notificationId)
       
       // Cerrar y limpiar
       closeModal()
-    } catch (err: any) {
-      console.error('[UnknownVehicleApproval] ❌ Error al aprobar:', err)
-      setError(err.message || 'Error al aprobar el acceso')
+    } catch (err) {
+      const message = err instanceof Error && err.message
+        ? err.message
+        : decision === 'approved' ? 'Error al aprobar el acceso' : 'Error al rechazar el acceso'
+
+      if (isPendingAlreadyRespondedError(err)) {
+        // Ya la respondió otra sesión: la notificación ya no pide acción y
+        // los botones quedan deshabilitados con el motivo a la vista.
+        setSessionStatus({ active: false, reason: message })
+        await markAsRead(detectionData.notificationId)
+      }
+      setError(message)
     } finally {
       setIsProcessing(false)
+      // Con éxito o con 409, la lista de detecciones cambió.
+      queryClient.invalidateQueries({ queryKey: ['detections'] })
     }
   }
 
-  const handleReject = async () => {
-    if (!detectionData) return
-
-    // Verificar que la detección esté activa
-    if (!sessionStatus?.active) {
-      setError(sessionStatus?.reason || 'La detección no está activa')
-      return
-    }
-
-    setIsProcessing(true)
-    setError(null)
-
-    try {
-      await PendingDetectionsAPI.respondToPendingDetection(
-        detectionData.attemptId,
-        'denied',
-        'Rechazado manualmente por conserje'
-      )
-      console.log('[UnknownVehicleApproval] ✅ Vehículo rechazado')
-      
-      // Marcar la notificación como leída
-      await markAsRead(detectionData.notificationId)
-      
-      // Cerrar y limpiar
-      closeModal()
-    } catch (err: any) {
-      console.error('[UnknownVehicleApproval] ❌ Error al rechazar:', err)
-      setError(err.message || 'Error al rechazar el acceso')
-    } finally {
-      setIsProcessing(false)
-    }
-  }
+  const handleApprove = () => respond('approved')
+  const handleReject = () => respond('denied')
 
   const closeModal = () => {
-    console.log('[UnknownVehicleApproval] 🚪 Cerrando modal')
     setIsOpen(false)
     // Dar un pequeño delay antes de limpiar los datos para la animación
     setTimeout(() => {
@@ -193,10 +165,7 @@ export function UnknownVehicleApprovalDialog() {
 
   const handleClose = () => {
     if (!isProcessing) {
-      // Si se cierra sin procesar, mantener en la lista de procesadas para evitar spam
-      if (detectionData) {
-        console.log('[UnknownVehicleApproval] 🚫 Modal cerrado sin procesar:', detectionData.notificationId)
-      }
+      // Si se cierra sin procesar, sigue en la lista de procesadas para evitar spam
       closeModal()
     }
   }

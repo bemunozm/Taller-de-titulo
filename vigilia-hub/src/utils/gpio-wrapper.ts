@@ -13,6 +13,26 @@ export type Edge = 'none' | 'rising' | 'falling' | 'both';
 export type Value = 0 | 1;
 export type PullMode = 'up' | 'down'; // Resistores pull
 
+// `pigpio` es dependencia OPCIONAL (Fase 4 · P8.C): si no compila al instalar
+// (falta la librería C de pigpio), `npm install` sigue y el hub arrancaría con
+// el GPIO SIMULADO sin abrir el portón. En una Raspberry (`/dev/gpiomem`) eso es
+// un error de instalación, no un modo de desarrollo: se avisa en `error`, una
+// vez. (`/dev/mem` existe en cualquier Linux: no sirve para distinguirla.)
+let pigpioUnavailableReported = false;
+
+function reportPigpioUnavailable(error: unknown): void {
+  if (pigpioUnavailableReported) {
+    return;
+  }
+  pigpioUnavailableReported = true;
+  logger.error(
+    'Hay /dev/gpiomem pero pigpio no se pudo cargar o inicializar: relés y teclado ' +
+      'quedan SIMULADOS. Instala la librería pigpio, reinstala las dependencias y verifica ' +
+      'con `node -e "require(\'pigpio\')"` (INSTALLATION.md).',
+    error,
+  );
+}
+
 /**
  * Clase GPIO única que detecta plataforma y usa pigpio o simula
  */
@@ -32,10 +52,12 @@ export class Gpio {
     this.gpio = gpio;
 
     // Intentar usar hardware real
+    let isRaspberryGpio = false;
     try {
       const fs = require('fs');
-      const hasGpioDevice = fs.existsSync('/dev/gpiomem') || fs.existsSync('/dev/mem');
-      
+      isRaspberryGpio = fs.existsSync('/dev/gpiomem');
+      const hasGpioDevice = isRaspberryGpio || fs.existsSync('/dev/mem');
+
       if (hasGpioDevice) {
         const Pigpio = require('pigpio').Gpio;
         const mode = direction === 'in' ? Pigpio.INPUT : Pigpio.OUTPUT;
@@ -67,8 +89,11 @@ export class Gpio {
       } else {
         throw new Error('Dispositivo GPIO no encontrado');
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       this.isRealHardware = false;
+      if (isRaspberryGpio) {
+        reportPigpioUnavailable(error);
+      }
       logger.debug(`[MOCK] GPIO${gpio} inicializado como ${direction}`);
     }
   }

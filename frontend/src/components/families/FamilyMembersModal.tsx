@@ -5,7 +5,8 @@ import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { toast } from 'react-toastify'
 import { addMemberToFamily, removeMemberFromFamily, getAvailableUsers, getFamilyById } from '@/api/FamilyAPI'
-import type { Family, User } from '@/types/index'
+import type { EmbeddedUser, Family } from '@/types/index'
+import { MISSING_VALUE, formatUserContact, formatUserWithContact } from '@/helpers/userDisplay'
 import { UserPlusIcon, XMarkIcon } from '@heroicons/react/16/solid'
 import { Select } from '@/components/ui/Select'
 import { Field, Label } from '@/components/ui/Fieldset'
@@ -51,7 +52,7 @@ function ConfirmDeleteModal({
 export function FamilyMembersModal({ isOpen, onClose, family }: FamilyMembersModalProps) {
   const queryClient = useQueryClient()
   const [selectedUserId, setSelectedUserId] = useState<string>('')
-  const [memberToDelete, setMemberToDelete] = useState<User | null>(null)
+  const [memberToDelete, setMemberToDelete] = useState<EmbeddedUser | null>(null)
 
   // Query para obtener los datos actualizados de la familia
   const { data: currentFamily, refetch: refetchFamily } = useQuery({
@@ -108,7 +109,7 @@ export function FamilyMembersModal({ isOpen, onClose, family }: FamilyMembersMod
     })
   }
 
-  const handleRemoveMember = (member: User) => {
+  const handleRemoveMember = (member: EmbeddedUser) => {
     setMemberToDelete(member)
   }
 
@@ -153,8 +154,7 @@ export function FamilyMembersModal({ isOpen, onClose, family }: FamilyMembersMod
                   <option value="">Selecciona un usuario</option>
                   {availableUsers.map((user) => (
                     <option key={user.id} value={user.id}>
-                      {user.name} - {user.email}
-                      {user.rut && ` (${user.rut})`}
+                      {formatUserWithContact(user)}
                     </option>
                   ))}
                 </Select>
@@ -200,14 +200,14 @@ export function FamilyMembersModal({ isOpen, onClose, family }: FamilyMembersMod
                       <div className="font-medium text-zinc-900 dark:text-zinc-100">
                         {member.name}
                       </div>
+                      {/* Sin users.update el miembro llega como { id, name } (P5). */}
                       <div className="text-sm text-zinc-500 dark:text-zinc-400">
-                        {member.email}
-                        {member.rut && ` • ${member.rut}`}
+                        {formatUserContact(member) ?? MISSING_VALUE}
                       </div>
                     </div>
                     
                     <div className="flex items-center gap-2">
-                      {member.confirmed ? (
+                      {member.confirmed === undefined ? null : member.confirmed ? (
                         <Badge color="lime">Confirmado</Badge>
                       ) : (
                         <Badge color="amber">Pendiente</Badge>

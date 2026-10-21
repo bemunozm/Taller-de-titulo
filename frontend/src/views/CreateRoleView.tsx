@@ -17,7 +17,7 @@ export function CreateRoleView() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['roles'] })
       toast.success('Rol creado exitosamente')
-      navigate('/roles')
+      navigate('/settings/roles')
     },
     onError: (error: Error) => {
       toast.error(error.message || 'Error al crear el rol')
@@ -33,7 +33,7 @@ export function CreateRoleView() {
       {/* Header */}
       <header className="mb-8">
         <div className="flex items-center gap-4 mb-4">
-          <Button plain onClick={() => navigate('/roles')}>
+          <Button plain onClick={() => navigate('/settings/roles')}>
             <ArrowLeftIcon className="w-5 h-5" />
             Volver
           </Button>

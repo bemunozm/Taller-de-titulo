@@ -32,8 +32,8 @@ import { useNavigate } from 'react-router-dom'
 import { toast } from 'react-toastify'
 import { useAuth } from './hooks/useAuth'
 import { NotificationBell } from './components/NotificationBell'
-import { VisitorApprovalDialog } from './components/VisitorApprovalDialog'
-import { UnknownVehicleApprovalDialog } from './components/UnknownVehicleApprovalDialog'
+import { GlobalApprovalDialogs } from './components/GlobalApprovalDialogs'
+import { RealtimeConnection } from './components/RealtimeConnection'
 
 function UserAvatar() {
   const { data: user } = useAuth()
@@ -60,7 +60,7 @@ function LogoutItem() {
   const handle = async () => {
     try {
       await logout()
-    } catch (e) {
+    } catch {
       // ignore
     }
     toast.success('Cerraste sesión correctamente')
@@ -106,15 +106,22 @@ import SystemLogsView from "./views/SystemLogsView";
 import ProfileView from "./views/ProfileView";
 import UnitsView from "./views/UnitsView";
 import CamerasView from "./views/CamerasView";
-import PrivacyPolicyView from "./views/PrivacyPolicyView";
+import { PrivacyPolicyView } from "./views/PrivacyPolicyView";
 import ShareFeedbackView from "./views/ShareFeedbackView";
 import LandingPage from "./views/LandingPage";
+import { PRIVACY_POLICY_ROUTE } from "@/helpers/privacyPolicy";
 
 export default function Router() {
   return (
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<LandingPage />} />
+
+        {/*
+          Política de privacidad: PÚBLICA (art. 14 ter, Ley 21.719). Va fuera
+          de StackedLayout, que redirige al login sin sesión.
+        */}
+        <Route path={PRIVACY_POLICY_ROUTE} element={<PrivacyPolicyView />} />
         <Route
           element={
             <StackedLayout
@@ -170,7 +177,7 @@ export default function Router() {
                           </DropdownItem>
                         </Protected>
                         <DropdownDivider />
-                        <DropdownItem href="/privacy-policy">
+                        <DropdownItem href={PRIVACY_POLICY_ROUTE}>
                           <ShieldCheckIcon />
                           <DropdownLabel>Política de privacidad</DropdownLabel>
                         </DropdownItem>
@@ -291,47 +298,75 @@ export default function Router() {
             } 
           />
           
-          {/* Gestión de Usuarios */}
-          <Route 
-            path="/settings/users" 
+          {/* Gestión de Usuarios: el detalle de GET /users solo llega con users.update (P5.C) */}
+          <Route
+            path="/settings/users"
             element={
-              <ProtectedRoute permission="users.read">
+              <ProtectedRoute allPermissions={['users.read', 'users.update']}>
                 <UsersView />
               </ProtectedRoute>
-            } 
+            }
           />
-          {/* Redirect antigua ruta de usuarios */}
-          <Route path="/users" element={<UsersView />} />
-          
-          {/* Gestión de Roles */}
-          <Route 
-            path="/settings/roles" 
+          {/* Antigua ruta de usuarios */}
+          <Route
+            path="/users"
+            element={
+              <ProtectedRoute allPermissions={['users.read', 'users.update']}>
+                <UsersView />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Gestión de Roles: leer con roles.read; crear/editar solo el super-admin (P5 · D10) */}
+          <Route
+            path="/settings/roles"
             element={
               <ProtectedRoute permission="roles.read">
                 <RolesView />
               </ProtectedRoute>
-            } 
+            }
           />
-          <Route 
-            path="/settings/roles/create" 
+          <Route
+            path="/settings/roles/create"
             element={
-              <ProtectedRoute permission="roles.create">
+              <ProtectedRoute superAdminOnly>
                 <CreateRoleView />
               </ProtectedRoute>
-            } 
+            }
           />
-          <Route 
-            path="/settings/roles/edit/:id" 
+          <Route
+            path="/settings/roles/edit/:id"
             element={
-              <ProtectedRoute permission="roles.update">
+              <ProtectedRoute superAdminOnly>
                 <EditRoleView />
               </ProtectedRoute>
-            } 
+            }
           />
-          {/* Redirects antiguas rutas de roles */}
-          <Route path="/roles" element={<RolesView />} />
-          <Route path="/roles/create" element={<CreateRoleView />} />
-          <Route path="/roles/edit/:id" element={<EditRoleView />} />
+          {/* Antiguas rutas de roles: mismas reglas */}
+          <Route
+            path="/roles"
+            element={
+              <ProtectedRoute permission="roles.read">
+                <RolesView />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/roles/create"
+            element={
+              <ProtectedRoute superAdminOnly>
+                <CreateRoleView />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/roles/edit/:id"
+            element={
+              <ProtectedRoute superAdminOnly>
+                <EditRoleView />
+              </ProtectedRoute>
+            }
+          />
           
           {/* Gestión de Unidades */}
           <Route 
@@ -397,11 +432,11 @@ export default function Router() {
             } 
           />
           
-          {/* Logs del Sistema */}
-          <Route 
-            path="/settings/logs" 
+          {/* Logs del Sistema: de plataforma, solo el super-admin (P5) */}
+          <Route
+            path="/settings/logs"
             element={
-              <ProtectedRoute permission="logs.read">
+              <ProtectedRoute permission="logs.read" superAdminOnly>
                 <SystemLogsView />
               </ProtectedRoute>
             } 
@@ -448,16 +483,6 @@ export default function Router() {
           {/* Testing (sin protección) */}
           <Route path="/notifications-test" element={<NotificationTestView />} />
           
-          {/* Política de Privacidad - Accesible para todos */}
-          <Route 
-            path="/privacy-policy" 
-            element={
-              <ProtectedRoute>
-                <PrivacyPolicyView />
-              </ProtectedRoute>
-            } 
-          />
-          
           {/* Enviar Comentarios - Accesible para todos */}
           <Route 
             path="/share-feedback" 
@@ -500,9 +525,11 @@ export default function Router() {
         <Route path="*" element={<NotFoundView />} />
       </Routes>
 
-      {/* Componentes globales para aprobaciones */}
-      <VisitorApprovalDialog />
-      <UnknownVehicleApprovalDialog />
+      {/* Socket único de la sesión humana, ligado al login (no en el kiosko) */}
+      <RealtimeConnection />
+
+      {/* Componentes globales para aprobaciones (no en el kiosko) */}
+      <GlobalApprovalDialogs />
     </BrowserRouter>
   );
 }

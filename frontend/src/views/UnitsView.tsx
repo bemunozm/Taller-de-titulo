@@ -16,8 +16,10 @@ import { ChevronLeftIcon } from '@heroicons/react/20/solid'
 import { UnitForm } from '@/components/units/UnitForm'
 import BulkUnitsForm from '@/components/units/BulkUnitsForm'
 import { UnitTable } from '@/components/units/UnitTable'
+import { Protected } from '@/components/auth/Protected'
+import { usePermissions } from '@/hooks/usePermissions'
 import { toast } from 'react-toastify'
-import type { Unit, CreateBulkUnitsFormData } from '@/types/index'
+import type { Unit, CreateBulkUnitsPayload } from '@/types/index'
 
 export default function UnitsView() {
   const navigate = useNavigate()
@@ -32,9 +34,15 @@ export default function UnitsView() {
     queryFn: () => getUnits(false),
   })
 
+  // `GET /units/stats` exige units.view-stats: sin él (Conserje, Seguridad,
+  // Residente) no se pide, para no generar un 403.
+  const { hasPermission } = usePermissions()
+  const canViewStats = hasPermission('units.view-stats')
+
   const { data: stats } = useQuery({
     queryKey: ['unitStats'],
     queryFn: getUnitStats,
+    enabled: canViewStats,
   })
 
   const handleCreate = () => {
@@ -81,7 +89,7 @@ export default function UnitsView() {
     },
   })
 
-  const handleBulkCreate = (formData: CreateBulkUnitsFormData) => {
+  const handleBulkCreate = (formData: CreateBulkUnitsPayload) => {
     bulkCreateMutation.mutate(formData)
   }
 
@@ -115,20 +123,22 @@ export default function UnitsView() {
               </Subheading>
             </div>
           </div>
-          <div className="flex gap-2">
-            <Button color="zinc" onClick={handleOpenBulkDialog}>
-              <Squares2X2Icon className="w-5 h-5" />
-              Creación Rápida
-            </Button>
-            <Button color="indigo" onClick={handleCreate}>
-              <PlusIcon className="w-5 h-5" />
-              Nueva Unidad
-            </Button>
-          </div>
+          <Protected permission="units.create">
+            <div className="flex gap-2">
+              <Button color="zinc" onClick={handleOpenBulkDialog}>
+                <Squares2X2Icon className="w-5 h-5" />
+                Creación Rápida
+              </Button>
+              <Button color="indigo" onClick={handleCreate}>
+                <PlusIcon className="w-5 h-5" />
+                Nueva Unidad
+              </Button>
+            </div>
+          </Protected>
           </header>
 
-        {/* Stats Grid */}
-        {stats && (
+        {/* Stats Grid (solo con units.view-stats) */}
+        {canViewStats && stats && (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
             {/* Total */}
             <div className="bg-white dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700">

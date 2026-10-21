@@ -28,6 +28,7 @@ describe('ConsultarAccesosRecientesTool', () => {
       isSuperAdmin: false,
       userId: undefined,
       role: 'hub',
+      channel: 'physical-hub',
       scopes: ['digital-concierge.access'],
       requestId: 'req-1',
       ...overrides,

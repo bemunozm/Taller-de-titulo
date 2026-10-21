@@ -1,7 +1,8 @@
-import { UserIcon, PhoneIcon, TruckIcon, HomeIcon, DocumentTextIcon, CheckCircleIcon, XCircleIcon, ClockIcon } from '@heroicons/react/24/outline';
+import { UserIcon, PhoneIcon, TruckIcon, HomeIcon, DocumentTextIcon, CheckCircleIcon, XCircleIcon, ClockIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import { Subheading } from '@/components/ui/Heading';
 import { Text, Strong } from '@/components/ui/Text';
 import { Badge } from '@/components/ui/Badge';
+import type { ResidentPanelResponse } from '@/helpers/kioskResidentResponse';
 
 export interface CollectedData {
   visitorName?: string;
@@ -11,7 +12,7 @@ export interface CollectedData {
   visitReason?: string;
   destinationHouse?: string;
   residentName?: string;
-  residentResponse?: 'approved' | 'denied' | 'pending';
+  residentResponse?: ResidentPanelResponse;
 }
 
 interface CollectedDataPanelProps {
@@ -32,14 +33,26 @@ export function CollectedDataPanel({ data }: CollectedDataPanelProps) {
     );
   }
 
-  const getResponseBadge = (response?: 'approved' | 'denied' | 'pending') => {
+  const getResponseBadge = (response?: ResidentPanelResponse) => {
     if (!response) return null;
 
     const config = {
-      approved: { 
-        text: 'Aprobado', 
+      approved: {
+        text: 'Aprobado',
         color: 'lime' as const,
         icon: <CheckCircleIcon className="w-3 h-3" />
+      },
+      // Fail-closed: aprobada, pero si el acceso no se abrió no hay "pase".
+      'approved-not-opened': {
+        text: 'Aprobado · acceso no abierto',
+        color: 'amber' as const,
+        icon: <ExclamationTriangleIcon className="w-3 h-3" />
+      },
+      // Sesión cerrada o espera máxima vencida sin respuesta.
+      unanswered: {
+        text: 'Sin respuesta',
+        color: 'zinc' as const,
+        icon: <ClockIcon className="w-3 h-3" />
       },
       denied: { 
         text: 'Rechazado', 

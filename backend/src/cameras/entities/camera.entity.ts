@@ -1,6 +1,15 @@
 import { Role } from 'src/roles/entities/role.entity';
 import { Column, Entity, Index, JoinTable, ManyToMany, PrimaryGeneratedColumn } from 'typeorm';
 
+/** Vértice de una zona del Guardián, normalizado al cuadro (0 a 1). */
+export interface GuardianZonePoint {
+	x: number;
+	y: number;
+}
+
+/** Zona del Guardián: un polígono (al menos 3 vértices). */
+export type GuardianZone = GuardianZonePoint[];
+
 @Entity()
 export class Camera {
 	@PrimaryGeneratedColumn('uuid')
@@ -40,8 +49,10 @@ export class Camera {
 	@Column({ type: 'boolean', default: false })
 	enableGuardian: boolean;
 
+	// Polígonos del Guardián Visual en coordenadas normalizadas (0 a 1). Fase
+	// 4 · P9: los valida `UpdateGuardianZonesDto`; los lee el LPR.
 	@Column({ type: 'jsonb', nullable: true, default: [] })
-	guardianZones: any[];
+	guardianZones: GuardianZone[] | null;
 
 	@Column({ type: 'boolean', default: true })
 	active: boolean;

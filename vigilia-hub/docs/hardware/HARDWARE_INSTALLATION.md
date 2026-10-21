@@ -114,7 +114,8 @@ KY-037:
 **Si es primera instalación:**
 
 ```bash
-# 1. Flashear Raspberry Pi OS Lite en microSD
+# 1. Flashear Raspberry Pi OS Lite (64-bit, Bookworm) en microSD
+#    32-bit (armv7l) no está soportado: Node.js 22 no se publica para esa arquitectura
 # Usar Raspberry Pi Imager: https://www.raspberrypi.com/software/
 
 # 2. Habilitar SSH (crear archivo vacío en boot/)
@@ -140,8 +141,8 @@ ssh pi@raspberrypi.local
 # 5. Actualizar sistema
 sudo apt update && sudo apt upgrade -y
 
-# 6. Instalar Node.js 18+
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+# 6. Instalar Node.js 22 LTS (>= 22.12); antes, uname -m debe decir aarch64
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 
 # 7. Instalar dependencias GPIO
@@ -783,9 +784,11 @@ nano .env
 **Configuración mínima:**
 
 ```bash
-# Backend (ajustar a tu servidor)
+# Backend (ajustar a tu servidor). http:// solo con NODE_ENV=development;
+# en producción, https://.
 BACKEND_URL=http://TU_SERVIDOR:3000
-HUB_SECRET=tu_secret_muy_seguro_123456
+# Secret del hub (POST /hubs al provisionarlo, 64 caracteres)
+HUB_SECRET=<secret devuelto por POST /hubs>
 
 # Hub ID
 HUB_ID=hub-test-001
@@ -982,7 +985,8 @@ groups
 ### Software
 
 - [ ] Raspberry Pi OS actualizado
-- [ ] Node.js 18+ instalado
+- [ ] Raspberry Pi OS 64-bit (`uname -m` = `aarch64`)
+- [ ] Node.js 22 LTS (>= 22.12) instalado
 - [ ] vigilia-hub clonado y compilado
 - [ ] .env configurado correctamente
 - [ ] npm install sin errores

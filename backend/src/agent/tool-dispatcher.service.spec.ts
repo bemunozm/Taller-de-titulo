@@ -39,6 +39,7 @@ describe('ToolDispatcherService', () => {
     isSuperAdmin: false,
     userId: 'user-1',
     role: 'user',
+    channel: 'human',
     scopes: ['digital-concierge.access'],
     requestId: 'req-1',
   };
@@ -54,6 +55,7 @@ describe('ToolDispatcherService', () => {
       access: 'read',
       requiresApproval: false,
       requiredScopes: ['digital-concierge.access'],
+      allowedChannels: ['physical-hub', 'web-kiosk', 'human'],
       execute: jest.fn(),
       ...overrides,
     };
@@ -121,7 +123,7 @@ describe('ToolDispatcherService', () => {
       const tool = makeTool();
 
       await expect(
-        dispatcher.execute(tool, baseCtx, { casa: 123 } as unknown),
+        dispatcher.execute(tool, baseCtx, { casa: 123 }),
       ).rejects.toThrow();
 
       // eslint-disable-next-line @typescript-eslint/unbound-method -- jest.fn() mock, no `this` binding involved

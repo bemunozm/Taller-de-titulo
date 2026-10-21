@@ -25,6 +25,11 @@
 torch==2.8.0
 torchvision==0.23.0
 # YOLO (detector de patentes). 8.3.x es la línea estable madura usada hoy.
+# CONFLICTO CONOCIDO (detectado en Fase 4 · P2, sin resolver): ultralytics 8.3.0
+# declara `numpy<2.0.0`, pero abajo se fija numpy==2.4.4 → `pip install -r`
+# falla con ResolutionImpossible. Además pide `opencv-python` (no headless).
+# Resolverlo exige subir ultralytics (y con eso torch >= 2.9.1) y revalidar el
+# detector; queda como decisión pendiente, no se cambia a ciegas.
 ultralytics==8.3.0
 # OpenCV headless (sin GUI) — el requerido en edge/servidor.
 opencv-python-headless==4.11.0.86
@@ -39,7 +44,8 @@ huggingface-hub==0.35.3
 
 # --- Utilidades base ---------------------------------------------------------
 numpy==2.4.4
-Pillow==12.2.0
+# 12.3.0: corrige vulnerabilidades publicadas de 12.2.x (Fase 4 · P2).
+Pillow==12.3.0
 requests==2.33.1
 
 # --- Manager / API HTTP ------------------------------------------------------
@@ -48,7 +54,7 @@ uvicorn[standard]==0.47.0
 pydantic==2.13.4
 # CAUSA RAÍZ del arranque fallido: settings.py hace `from pydantic_settings
 # import BaseSettings`; en pydantic v2 esa clase vive en este paquete aparte.
-pydantic-settings==2.14.1
+pydantic-settings==2.14.2
 
 # --- Dev / testing (no se instala en producción) -----------------------------
 # Instalar con: pip install -r requirements.txt pytest==9.0.3

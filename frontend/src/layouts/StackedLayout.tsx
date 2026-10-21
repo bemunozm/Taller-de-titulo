@@ -7,7 +7,15 @@ import { useAuth } from '@/hooks/useAuth'
 import { NavbarItem } from '@/components/ui/Navbar'
 import { SidebarItem } from '@/components/ui/Sidebar'
 import { Outlet, useLocation } from 'react-router-dom'
-import GlobalSecurityNotifications from '@/components/GlobalSecurityNotifications'
+import { GlobalSecurityNotifications } from '@/components/GlobalSecurityNotifications'
+
+/** Props que `markActive` lee de los elementos de la navegación. */
+interface NavElementProps {
+  children?: React.ReactNode
+  to?: unknown
+  href?: unknown
+  current?: boolean
+}
 
 function OpenMenuIcon() {
   return (
@@ -53,7 +61,7 @@ export function StackedLayout({
   navbar,
   sidebar,
 }: React.PropsWithChildren<{ navbar?: React.ReactNode; sidebar?: React.ReactNode }>) {
-  let [showSidebar, setShowSidebar] = useState(false)
+  const [showSidebar, setShowSidebar] = useState(false)
   const location = useLocation()
   const navigate = useNavigate()
   const { data: user, isError, isLoading } = useAuth()
@@ -71,31 +79,30 @@ export function StackedLayout({
 
   // Recorre un árbol de React nodes y marca como `current` los NavbarItem/SidebarItem
   function markActive(node: React.ReactNode): React.ReactNode {
-    if (!React.isValidElement(node)) return node
+    if (!React.isValidElement<NavElementProps>(node)) return node
 
     // procesa children recursivamente
-    const children = (node as any).props?.children
-    const newChildren = React.Children.map(children, (child) => markActive(child))
+    const { props } = node
+    const newChildren = React.Children.map(props.children, (child) => markActive(child))
 
     // si el elemento es NavbarItem o SidebarItem, comprobar prop `to` o `href`
-    const elementType = (node.type as any)
+    const elementType: unknown = node.type
     const isNavItem = elementType === NavbarItem || elementType === SidebarItem
 
     if (isNavItem) {
-      const props: any = (node as any).props || {}
       const link = props.to ?? props.href
       if (typeof link === 'string') {
         // marcar current si coincide exactamente o si es prefijo (para secciones)
         const isCurrent = link === location.pathname || (link !== '/' && location.pathname.startsWith(link))
         if (isCurrent) {
-          return React.cloneElement(node, { ...(props as any), current: true, children: newChildren ?? props.children })
+          return React.cloneElement(node, { current: true, children: newChildren ?? props.children })
         }
       }
     }
 
     // si hubo children transformados, devolver clon con children nuevos
     if (newChildren !== undefined) {
-      return React.cloneElement(node, { ...( (node as any).props as any ), children: newChildren })
+      return React.cloneElement(node, { children: newChildren })
     }
 
     return node
