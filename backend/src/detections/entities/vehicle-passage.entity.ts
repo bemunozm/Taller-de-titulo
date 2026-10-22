@@ -27,6 +27,13 @@ import type {
  * arrastrar un intento.
  */
 @Entity({ name: 'vehicle_passages' })
+// Búsqueda de variantes de OCR (LPR_PASSAGE_FUZZY_SECONDS): pasadas recientes
+// del condominio sin enmascarar, sin importar la patente.
+@Index(
+  'IDX_vehicle_passages_org_last_seen_active',
+  ['organizationId', 'lastSeenAt'],
+  { where: '"anonymizedAt" IS NULL' },
+)
 @Index('IDX_vehicle_passages_org_plate_last_seen', [
   'organizationId',
   'plate',
