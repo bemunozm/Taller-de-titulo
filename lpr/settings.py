@@ -118,6 +118,19 @@ class Settings(BaseSettings):
     LPR_DIRECTION_WAIT_SECONDS: float = Field(4.0, ge=0, le=30)
     # Modelo COCO para seguir vehiculos (ByteTrack). Vacio = el `yolo11n.pt` de lpr/.
     LPR_VEHICLE_MODEL: str = ''
+    # Seguimiento de vehiculos (ByteTrack) y voto por vehiculo. Solo por entorno.
+    # Segundos que ByteTrack conserva un vehiculo perdido (`track_buffer` = ceil(s * sample_fps)).
+    LPR_VEHICLE_LOST_SECONDS: float = Field(3.0, gt=0, le=30)
+    # Un id nuevo que nace cerca de uno perdido hace <= estos segundos hereda su id
+    # canonico (el vehiculo es el mismo). 0 = sin reenlace.
+    LPR_VEHICLE_RELINK_SECONDS: float = Field(2.0, ge=0, le=10)
+    # Tras confirmar la patente de un vehiculo vivo con participacion ganadora < 0.8,
+    # espera hasta estos segundos por mas lecturas antes de emitir. 0 = no esperar.
+    LPR_VOTE_SETTLE_SECONDS: float = Field(1.0, ge=0, le=10)
+    # True (defecto): el texto se decide con las lecturas hasta el fin de la espera de
+    # asentamiento; las de la espera de direccion no votan (solo alimentan el aviso de
+    # 'posible lectura corregida'). False: votan todas.
+    LPR_VOTE_FREEZE_AFTER_SETTLE: bool = True
     LPR_DRY_RUN: bool = False
     LPR_DETECTOR_MODEL: str = 'morsetechlab/yolov11-license-plate-detection'
     LPR_OCR_MODEL: str = 'cct-s-v1-global-model'

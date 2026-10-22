@@ -48,7 +48,8 @@ def test_voto_pondera_por_confianza_y_exige_n_del_ganador():
     assert em.text == 'BBCD12'
     assert em.reads == 4 and em.votes == 3
     assert em.winner_share == pytest.approx(2.6 / 3.1, abs=1e-6)
-    assert em.track_meta() == {'id': em.track_id, 'reads': 4, 'votes': 3, 'winner_share': 0.839}
+    assert em.track_meta() == {'id': em.track_id, 'reads': 4, 'votes': 3, 'winner_share': 0.839,
+                               'settled': False}
 
 
 def test_lectura_invalida_mantiene_vivo_el_track_pero_no_vota():
