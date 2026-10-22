@@ -7,10 +7,11 @@ correction of the Chilean format). Everything after that (tracking + voting,
 dedupe, emission) stays in `LprWorker`; `lpr/tools/replay_eval.py` runs these
 same two functions so the regression harness cannot drift from production.
 
-With a direction line configured, `process_frame` also runs the vehicle tracker
-(ByteTrack) on the same zone crop, binds every plate read to the vehicle whose
-box contains it and hands the vehicle trajectories to the plate tracker, which
-decides the direction (see `utils/direction.py`).
+`process_frame` also runs the vehicle tracker (ByteTrack) on the same zone crop
+(whenever its model is available, with or without a direction line), binds every
+plate read to the vehicle whose box contains it (canonical ids, see
+`vehicle_tracker.py`) and hands the vehicle trajectories to the plate tracker,
+which votes per vehicle and decides the direction (see `utils/direction.py`).
 
 `iter_plate_reads` is a generator: the OCR of box N+1 only runs when the caller
 asks for it. `process_frame` consumes all the boxes of a frame (the tracker
@@ -204,29 +205,42 @@ def direction_line_of(cfg: Any) -> Optional[DirectionLine]:
 
 
 def wants_vehicle_tracking(cfg: Any) -> bool:
-    """Vehicle tracking costs a second model per frame: only when a direction
-    line is configured. The line wins over a fixed camera direction, so it runs
-    whatever `cfg.direction` is (the fixed one is only the fallback)."""
-    return direction_line_of(cfg) is not None and not getattr(cfg, 'detection_blocked', False)
+    """The vehicle tracker runs unless detection is blocked: the vote is per vehicle,
+    so it is needed with or without a direction line (the line only decides the
+    direction, and wins over a fixed camera direction). Without the model it degrades
+    (see `VehicleTracker.available`)."""
+    return not getattr(cfg, 'detection_blocked', False)
+
+
+# Tolerance of the plate-in-vehicle test: each side of a vehicle box grows by this
+# fraction of its size when no box contains the plate (tracker boxes jitter and a
+# bumper plate sits at the very edge).
+VEHICLE_BOX_TOLERANCE = 0.10
 
 
 def assign_vehicle(plate_box: Tuple[float, float, float, float],
                    vehicles: Sequence[Tuple[int, Tuple[float, float, float, float]]]) -> Optional[int]:
     """Id of the vehicle whose box contains the CENTER of the plate. With several
     candidates (overlapping cars) the one containing the most of the plate wins;
-    a tie goes to the smaller (more specific) box."""
+    a tie goes to the smaller (more specific) box. If no box contains it, the
+    search repeats with every box expanded `VEHICLE_BOX_TOLERANCE` per side."""
     cx, cy = (plate_box[0] + plate_box[2]) / 2.0, (plate_box[1] + plate_box[3]) / 2.0
     plate_area = max(1.0, (plate_box[2] - plate_box[0]) * (plate_box[3] - plate_box[1]))
-    best: Optional[Tuple[float, float, int]] = None
-    for vid, (x1, y1, x2, y2) in vehicles:
-        if not (x1 <= cx <= x2 and y1 <= cy <= y2):
-            continue
-        ix = max(0.0, min(plate_box[2], x2) - max(plate_box[0], x1))
-        iy = max(0.0, min(plate_box[3], y2) - max(plate_box[1], y1))
-        key = (-(ix * iy) / plate_area, (x2 - x1) * (y2 - y1), vid)
-        if best is None or key < best:
-            best = key
-    return best[2] if best else None
+    for tolerance in (0.0, VEHICLE_BOX_TOLERANCE):
+        best: Optional[Tuple[float, float, int]] = None
+        for vid, (x1, y1, x2, y2) in vehicles:
+            mx, my = (x2 - x1) * tolerance, (y2 - y1) * tolerance
+            x1, y1, x2, y2 = x1 - mx, y1 - my, x2 + mx, y2 + my
+            if not (x1 <= cx <= x2 and y1 <= cy <= y2):
+                continue
+            ix = max(0.0, min(plate_box[2], x2) - max(plate_box[0], x1))
+            iy = max(0.0, min(plate_box[3], y2) - max(plate_box[1], y1))
+            key = (-(ix * iy) / plate_area, (x2 - x1) * (y2 - y1), vid)
+            if best is None or key < best:
+                best = key
+        if best:
+            return best[2]
+    return None
 
 
 def make_tracker(cfg: Any, clock: Optional[Callable[[], float]] = None) -> PlateTracker:
@@ -239,6 +253,8 @@ def make_tracker(cfg: Any, clock: Optional[Callable[[], float]] = None) -> Plate
         min_winner_share=getattr(cfg, 'min_winner_share', 0.0),
         direction_wait_seconds=float(settings.LPR_DIRECTION_WAIT_SECONDS),
         direction_line=direction_line_of(cfg),
+        vote_settle_seconds=float(settings.LPR_VOTE_SETTLE_SECONDS),
+        freeze_text_after_settle=bool(settings.LPR_VOTE_FREEZE_AFTER_SETTLE),
         **kwargs,
     )
 
@@ -253,16 +269,22 @@ def process_frame(
     *,
     save_only_on_plate: bool = False,
     vehicle_tracker: Optional[Any] = None,
+    force_vehicle_tracking: bool = False,
+    vehicle_ids_out: Optional[List[Optional[int]]] = None,
 ) -> Tuple[List[PlateRead], List[PlateEmission]]:
     """Full per-frame decision path shared by the worker and the replay harness:
     detect (zone aware) -> read (shape filter, OCR, plate format) -> vehicle
     association -> tracker. Returns every read of the frame and the emissions the
     tracker triggered.
 
-    `vehicle_tracker` (optional, `VehicleTracker`) only runs when
-    `wants_vehicle_tracking(cfg)` (a direction line is configured); without it
-    (or if it failed to load) the direction falls back to the camera's fixed
-    direction / the plate width trend / unknown."""
+    `vehicle_tracker` (optional, `VehicleTracker`) runs when
+    `wants_vehicle_tracking(cfg)` (detection not blocked); without it (or if it
+    failed to load) there is no per-vehicle vote and the direction falls back to
+    the camera's fixed direction / the plate width trend / unknown.
+
+    Measurement hooks (off by default, production unchanged): `force_vehicle_tracking`
+    runs the vehicle tracker even when `wants_vehicle_tracking` says no; `vehicle_ids_out`, when
+    given, is filled with the vehicle id (or None) assigned to each read of `reads`."""
     h, w = frame.shape[:2]
     line = direction_line_of(cfg)
     tracker.set_direction_line(line)
@@ -271,9 +293,10 @@ def process_frame(
 
     vehicles: List[Tuple[int, Tuple[float, float, float, float]]] = []
     paths = None
+    raw_ids = None
     if vehicle_tracker is not None:
         vehicle_tracker.sync_line(line)
-        if wants_vehicle_tracking(cfg) and vehicle_tracker.available:
+        if (force_vehicle_tracking or wants_vehicle_tracking(cfg)) and vehicle_tracker.available:
             _polygons, rect = zone_crop(cfg, frame)
             if rect is None:
                 vehicles = vehicle_tracker.update(frame, (0, 0), now)
@@ -282,10 +305,19 @@ def process_frame(
                 vehicles = vehicle_tracker.update(np.ascontiguousarray(frame[ry1:ry2, rx1:rx2]),
                                                   (rx1, ry1), now)
             paths = vehicle_tracker.paths()
+            raw_ids = vehicle_tracker.raw_ids() if hasattr(vehicle_tracker, 'raw_ids') else None
 
+    assigned = [assign_vehicle(tuple(float(v) for v in r.box), vehicles)  # type: ignore[arg-type]
+                for r in reads]
+    if vehicle_ids_out is not None:
+        vehicle_ids_out.extend(assigned)
     observations = [
-        read_to_observation(r, assign_vehicle(tuple(float(v) for v in r.box), vehicles),  # type: ignore[arg-type]
-                            evidence=frame)
-        for r in reads if r.status != STATUS_SHAPE_REJECTED
+        read_to_observation(r, vid, evidence=frame)
+        for r, vid in zip(reads, assigned) if r.status != STATUS_SHAPE_REJECTED
     ]
-    return reads, tracker.update(observations, now, paths=paths, frame_size=(w, h))
+    emissions = tracker.update(observations, now, paths=paths, frame_size=(w, h), raw_ids=raw_ids)
+    if vehicle_tracker is not None and hasattr(vehicle_tracker, 'mark_consumed'):
+        for emission in emissions:
+            if emission.vehicle_id is not None:
+                vehicle_tracker.mark_consumed(emission.vehicle_id)  # no se hereda tras emitir
+    return reads, emissions

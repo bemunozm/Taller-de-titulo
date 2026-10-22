@@ -66,3 +66,7 @@ packages = [
   "lpr.utils",
   "lpr.processor",
 ]
+
+# Plantilla de ByteTrack (umbrales del seguimiento de vehiculos).
+[tool.setuptools.package-data]
+"lpr.processor" = ["*.yaml"]
