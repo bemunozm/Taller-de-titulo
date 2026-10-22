@@ -317,6 +317,51 @@ describe('LprSettingsDialog: validación', () => {
   })
 })
 
+describe('LprSettingsDialog: enderezar patente', () => {
+  it('el número escrito viaja como número en el payload', async () => {
+    const { user } = await renderDialog(null)
+
+    await user.type(screen.getByLabelText('Enderezar patente (°)'), '-12.5')
+    await user.click(screen.getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(cameraApi.updateCameraLprSettings).toHaveBeenCalledTimes(1))
+    expect(lastSavedPayload()).toEqual({ action: 'access', plateRotationDeg: -12.5 })
+  })
+
+  it('vacío se omite del payload', async () => {
+    const { user } = await renderDialog(null)
+
+    await user.click(screen.getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(cameraApi.updateCameraLprSettings).toHaveBeenCalledTimes(1))
+    expect(lastSavedPayload()).not.toHaveProperty('plateRotationDeg')
+  })
+
+  it('fuera de -45 a 45 bloquea el envío con un mensaje', async () => {
+    const { user } = await renderDialog(null)
+
+    await user.type(screen.getByLabelText('Enderezar patente (°)'), '46')
+    await user.click(screen.getByRole('button', { name: 'Guardar' }))
+
+    expect(await screen.findByText('Enderezar patente: debe estar entre -45 y 45')).toBeInTheDocument()
+    expect(cameraApi.updateCameraLprSettings).not.toHaveBeenCalled()
+  })
+
+  it('carga el valor guardado y los recomendados no lo tocan', async () => {
+    const { user } = await renderDialog({ action: 'access', plateRotationDeg: 20 })
+
+    const field = screen.getByLabelText('Enderezar patente (°)')
+    expect(field).toHaveValue(20)
+    await user.click(screen.getByRole('button', { name: /valores recomendados para patentes/i }))
+    expect(field).toHaveValue(20)
+  })
+
+  it('sin cameras.enable-ia el campo es de solo lectura', async () => {
+    await renderDialog({ action: 'access', plateRotationDeg: 20 }, false)
+    expect(screen.getByLabelText('Enderezar patente (°)')).toBeDisabled()
+  })
+})
+
 describe('LprSettingsDialog: zona de detección', () => {
   it('dibujar la zona la aplica al formulario y viaja con el resto al guardar', async () => {
     const { user } = await renderDialog({ action: 'register', sampleFps: 8 })

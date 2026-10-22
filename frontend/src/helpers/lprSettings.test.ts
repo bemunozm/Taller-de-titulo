@@ -100,3 +100,40 @@ describe('usesWorkerDetectionDefaults', () => {
     expect(usesWorkerDetectionDefaults({ ...recommended, ...noCropFields, unlimitedMaxWidth: true })).toBe(false)
   })
 })
+
+describe('plateRotationDeg', () => {
+  const withRotation = (value: unknown) => lprSettingsRequestSchema.safeParse({ plateRotationDeg: value }).success
+
+  it.each([15, -12.5, 0, 45, -45])('acepta %s', (value) => {
+    expect(withRotation(value)).toBe(true)
+  })
+
+  it.each([46, -46, '15', null])('rechaza %s', (value) => {
+    expect(withRotation(value)).toBe(false)
+  })
+
+  it('el formulario acepta decimales (también con coma) y los envía como número', () => {
+    const parsed = lprFormSchema.safeParse({ ...toLprFormValues(null), plateRotationDeg: '-12,5' })
+    expect(parsed.success).toBe(true)
+    if (!parsed.success) return
+    const payload = toLprSettingsPayload(parsed.data)
+    expect(payload.plateRotationDeg).toBe(-12.5)
+    expect(lprSettingsRequestSchema.safeParse(payload).success).toBe(true)
+  })
+
+  it('vacío se omite del payload (no null) y fuera de rango o texto se rechaza', () => {
+    expect(submit(null)).not.toHaveProperty('plateRotationDeg')
+    for (const bad of ['46', '-46', 'abc']) {
+      expect(lprFormSchema.safeParse({ ...toLprFormValues(null), plateRotationDeg: bad }).success).toBe(false)
+    }
+  })
+
+  it('carga el valor guardado y lo reenvía; 0 explícito se conserva', () => {
+    expect(submit({ action: 'access', plateRotationDeg: 20 }).plateRotationDeg).toBe(20)
+    expect(submit({ action: 'access', plateRotationDeg: 0 }).plateRotationDeg).toBe(0)
+  })
+
+  it('los valores recomendados no tocan la rotación', () => {
+    expect(Object.keys(recommendedPlateFormValues())).not.toContain('plateRotationDeg')
+  })
+})

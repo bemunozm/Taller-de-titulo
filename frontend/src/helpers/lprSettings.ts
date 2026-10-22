@@ -105,6 +105,7 @@ export const lprFormSchema = z
     minRatio: optionalNumber({ label: 'Relación mínima', min: 0.1, max: 20 }),
     maxRatio: optionalNumber({ label: 'Relación máxima', min: 0.1, max: 20 }),
     confirmReads: optionalNumber({ label: 'Lecturas para confirmar', min: 1, max: 10, integer: true }),
+    plateRotationDeg: optionalNumber({ label: 'Enderezar patente', min: -45, max: 45 }),
     zone: zonePolygonsSchema,
     directionLine: directionLineSchema.nullable(),
   })
@@ -189,6 +190,7 @@ export function toLprFormValues(settings: LprSettings | null): LprFormValues {
     minRatio: numberToField(crop?.minRatio),
     maxRatio: numberToField(crop?.maxRatio),
     confirmReads: numberToField(settings?.confirmReads),
+    plateRotationDeg: numberToField(settings?.plateRotationDeg),
     zone: settings?.zone ?? [],
     directionLine: settings?.directionLine ?? null,
   }
@@ -205,6 +207,7 @@ export function toLprSettingsPayload(values: LprFormOutput): LprSettings {
   if (values.detectorImgsz !== undefined) payload.detectorImgsz = values.detectorImgsz
   if (values.sampleFps !== undefined) payload.sampleFps = values.sampleFps
   if (values.confirmReads !== undefined) payload.confirmReads = values.confirmReads
+  if (values.plateRotationDeg !== undefined) payload.plateRotationDeg = values.plateRotationDeg
   if (values.zone.length > 0) payload.zone = values.zone
   if (values.directionLine) payload.directionLine = values.directionLine
 

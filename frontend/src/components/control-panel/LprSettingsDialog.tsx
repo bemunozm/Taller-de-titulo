@@ -424,6 +424,24 @@ function LprSettingsForm({ camera, initial, canEdit, onClose }: LprSettingsFormP
               />
               {errors.maxRatio && <ErrorMessage>{errors.maxRatio.message}</ErrorMessage>}
             </Field>
+
+            <Field className="md:col-span-2">
+              <Label>Enderezar patente (°)</Label>
+              <Input
+                {...register('plateRotationDeg')}
+                type="number"
+                step="1"
+                inputMode="decimal"
+                placeholder="0"
+                invalid={!!errors.plateRotationDeg}
+                className="md:max-w-xs"
+              />
+              <Description>
+                Gira la patente antes de leerla. Úsalo si en esta cámara las patentes se ven inclinadas (positivo =
+                antihorario). 0 = sin cambio.
+              </Description>
+              {errors.plateRotationDeg && <ErrorMessage>{errors.plateRotationDeg.message}</ErrorMessage>}
+            </Field>
           </div>
 
           <SectionTitle>Confirmación</SectionTitle>
