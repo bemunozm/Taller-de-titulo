@@ -24,6 +24,7 @@ from lpr.api.client import consumes_dedupe, fetch_camera_json, is_success, post_
 from lpr.processor.rules import analyze_char_confidences
 from lpr.settings import apply_camera_settings, settings
 from lpr.utils.pii import mask_plate
+from lpr.utils.sampling import FrameScheduler
 from lpr.utils.throughput import ThroughputMeter, format_report
 
 
@@ -201,7 +202,7 @@ class LprWorker:
         except (ValueError, OSError):  # fuera del hilo principal
             pass
         self.start_settings_sync()
-        last_frame_ts = 0
+        scheduler = FrameScheduler(1.0)  # el intervalo real se pasa en cada due()
         # Trackea la última lectura EXITOSA del stream (independiente del
         # throttle de poll_interval de abajo) para poder detectar un stream
         # "congelado" (ret=True nunca vuelve a fallar, pero tampoco entrega
@@ -242,6 +243,7 @@ class LprWorker:
                     sig = frame[::32, ::32].tobytes()
                 except Exception:
                     sig = None
+                prev_sig = last_frame_sig
                 if sig is None or sig != last_frame_sig:
                     last_frame_sig = sig
                     last_successful_read_ts = now
@@ -256,10 +258,14 @@ class LprWorker:
                     last_frame_sig = None
                     last_successful_read_ts = time.time()
                     continue
-                if now - last_frame_ts < self.cfg.poll_interval:
-                    time.sleep(0.005)
+                # Deadline schedule (no reloj reseteado a `now`); lee el intervalo en
+                # cada cuadro para respetar cambios de sample_fps en caliente.
+                # Sin sleep: cap.read() bloquea hasta el siguiente cuadro; solo un
+                # decoder congelado (cuadro igual, devuelve al instante) cede CPU.
+                if not scheduler.due(now, self.cfg.poll_interval):
+                    if sig is not None and sig == prev_sig:
+                        time.sleep(0.005)
                     continue
-                last_frame_ts = now
                 self.submit_frame(frame)
         finally:
             self._settings_stop.set()
