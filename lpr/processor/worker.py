@@ -33,9 +33,12 @@ _LOGGED_CONFIG_FIELDS = (
     'track_max_gap_seconds', 'min_crop_w', 'max_crop_w', 'min_crop_ratio', 'max_crop_ratio',
     'detection_blocked', 'direction_line',
 )
-# Cambios que obligan a rehacer el tracker (el resto de la config se lee por frame).
+# Cambios que obligan a rehacer el `PlateTracker` (el resto de la config se lee por frame).
 # `direction_line` NO está: el voto no depende de la línea; `process_frame` se la pasa
 # al tracker por frame y este (y el VehicleTracker) descartan solo las trayectorias.
+# `sample_fps` tampoco: no rehace el PlateTracker, solo reconfigura el `VehicleTracker`
+# (`_ensure_vehicle_tracker`: mismo modelo, `track_buffer` nuevo). Rehacer el PlateTracker
+# descarta sus pistas, también las confirmadas que esperaban dirección o asentamiento.
 _TRACKER_FIELDS = ('confirm_reads', 'direction', 'track_max_gap_seconds')
 
 
@@ -50,10 +53,10 @@ class LprWorker:
         self.fast_ocr = fast_ocr
         # seguimiento + voto por vehículo (reemplaza a `plate_sightings`)
         self.tracker = make_tracker(cfg)
-        # Seguimiento de vehículos (ByteTrack) para la dirección por línea: UNA
-        # instancia por worker (el estado `persist` vive en el modelo), creada
-        # perezosamente solo si la cámara tiene línea. Si el modelo no carga queda
-        # `available=False` y la dirección cae a los respaldos.
+        # Seguimiento de vehículos (ByteTrack) para el voto por vehículo y la dirección
+        # por línea: UNA instancia por worker (el estado `persist` vive en el modelo),
+        # creada perezosamente (con o sin línea). Si el modelo no carga queda
+        # `available=False`: sin voto por vehículo y la dirección cae a los respaldos.
         self.vehicle_tracker: Optional[VehicleTracker] = None
         # Ultimo cuadro procesado: la imagen de evidencia de una emision que se
         # libera al detener el worker (`flush_pending`).
@@ -289,7 +292,8 @@ class LprWorker:
         """Purga `emitted_cache` pasada la ventana de dedupe desde la última
         lectura (el dedupe es deslizante), cuando ya no sirve. El estado de
         confirmación vive en el `PlateTracker`, que cierra solo sus
-        seguimientos tras `track_max_gap_seconds` sin ver la patente."""
+        seguimientos: los de un vehículo cuando este deja de estar vivo en el
+        `VehicleTracker`, y los demás tras `track_max_gap_seconds` sin ver la patente."""
         dedup = float(settings.LPR_DEDUP_SECONDS)
         for plate in [p for p, ts in self.emitted_cache.items()
                       if now_ts - float(ts) > dedup]:
@@ -297,14 +301,25 @@ class LprWorker:
 
     def _ensure_vehicle_tracker(self, cfg) -> Optional[VehicleTracker]:
         """Crea el VehicleTracker la primera vez que la cámara lo necesita (carga
-        del modelo ~1 s; nunca se reintenta si falló: queda no disponible)."""
-        if self.vehicle_tracker is None and wants_vehicle_tracking(cfg):
+        del modelo ~1 s; nunca se reintenta si falló: queda no disponible). Si cambia el
+        `track_buffer` efectivo (`sample_fps`) NO se recarga el modelo: se reinicia solo el
+        tracker de ultralytics con el yaml nuevo (ver `VehicleTracker.reconfigure`)."""
+        fps = float(getattr(cfg, 'sample_fps', 0) or 0) or None
+        current = self.vehicle_tracker
+        if current is not None and current.available and fps is not None and hasattr(current, 'reconfigure'):
+            if current.reconfigure(fps):
+                logging.info('sample_fps cambió (%s): se reinicia el seguimiento de vehículos '
+                             '(mismo modelo, track_buffer nuevo)', fps)
+        if current is None and wants_vehicle_tracking(cfg):
             self.vehicle_tracker = VehicleTracker(
                 model_ref=settings.LPR_VEHICLE_MODEL or None,
                 device=getattr(cfg, 'device', None),
+                sample_fps=fps,
+                lost_seconds=float(settings.LPR_VEHICLE_LOST_SECONDS),
+                relink_seconds=float(settings.LPR_VEHICLE_RELINK_SECONDS),
             )
             logging.info('Seguimiento de vehículos %s para %s',
-                         'activo' if self.vehicle_tracker.available else 'NO disponible (direccion por ancho)',
+                         'activo' if self.vehicle_tracker.available else 'NO disponible (sin voto por vehiculo; direccion por ancho)',
                          getattr(cfg, 'camera_id', '?'))
         return self.vehicle_tracker
 

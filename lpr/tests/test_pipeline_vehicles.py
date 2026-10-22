@@ -77,15 +77,17 @@ OCR = SimpleNamespace(recognize=lambda _arr: OCRResult(PLATE, 0.99, [0.99] * len
 # --------------------------------------------------------------------------
 # Piezas
 # --------------------------------------------------------------------------
-def test_wants_vehicle_tracking_con_linea_aunque_la_direccion_sea_fija():
+def test_wants_vehicle_tracking_con_o_sin_linea_salvo_deteccion_bloqueada():
+    # Premisa anterior: solo con linea. Ahora el voto es por vehiculo: corre siempre
+    # (la linea solo decide la direccion y manda sobre la fija).
     assert wants_vehicle_tracking(cfg())
     assert wants_vehicle_tracking(cfg(direction='unknown'))
-    assert wants_vehicle_tracking(cfg(direction='exit'))      # la linea manda sobre la fija
+    assert wants_vehicle_tracking(cfg(direction='exit'))
     assert wants_vehicle_tracking(cfg(direction='entry'))
-    assert not wants_vehicle_tracking(cfg(direction_line=None))
-    assert not wants_vehicle_tracking(cfg(direction_line=None, direction='exit'))
+    assert wants_vehicle_tracking(cfg(direction_line=None))
+    assert wants_vehicle_tracking(cfg(direction_line=None, direction='exit'))
+    assert wants_vehicle_tracking(SimpleNamespace())              # config vieja sin el campo
     assert not wants_vehicle_tracking(cfg(detection_blocked=True))
-    assert not wants_vehicle_tracking(SimpleNamespace())          # config vieja sin el campo
 
 
 def test_direction_line_of_ignora_lo_invalido():
@@ -197,7 +199,9 @@ def test_con_direccion_fija_sin_cruce_emite_al_vencer_con_la_camara_como_respald
     assert (em.direction, em.direction_source) == ('exit', 'camera')
 
 
-def test_con_direccion_fija_sin_linea_no_corre_el_modelo_y_usa_la_camara():
+def test_con_direccion_fija_sin_linea_corre_el_modelo_pero_la_direccion_es_la_de_la_camara():
+    # Premisa anterior: sin linea el modelo no corria. Ahora corre (voto por vehiculo)
+    # y la direccion sigue siendo la fija de la camara.
     c = cfg(direction='exit', direction_line=None)
     vehicles = FakeVehicles([])
     tracker = make_tracker(c)
@@ -206,7 +210,7 @@ def test_con_direccion_fija_sin_linea_no_corre_el_modelo_y_usa_la_camara():
         _r, out = process_frame(FRAME, detector, OCR, c, tracker, 0.1 * i, vehicle_tracker=vehicles)
     (em,) = out
     assert (em.direction, em.direction_source) == ('exit', 'camera')
-    assert vehicles.calls == []
+    assert len(vehicles.calls) == 3
 
 
 def test_cambiar_la_linea_entre_cuadros_se_propaga_al_tracker_y_a_los_vehiculos():
@@ -224,3 +228,52 @@ def test_workerconfig_real_acepta_la_linea():
     base = WorkerConfig(camera_id='cam-1', backend_url='http://backend.test')
     c = base.model_copy(update={'direction_line': LINE_SETTINGS, 'direction': 'both'})
     assert wants_vehicle_tracking(c)
+
+
+# --------------------------------------------------------------------------
+# Ganchos de medicion (replay_eval): apagados por defecto
+# --------------------------------------------------------------------------
+def test_vehicle_ids_out_lista_el_vehiculo_de_cada_lectura():
+    veh = FakeVehicles([[(7, (400, 300, 600, 500))]])
+    ids = []
+    reads, _ = process_frame(FRAME, detector, OCR, cfg(), make_tracker(cfg()), now=0.0,
+                             vehicle_tracker=veh, vehicle_ids_out=ids)
+    assert len(reads) == 1 and ids == [7]
+
+
+def test_vehicle_ids_out_none_para_lectura_sin_vehiculo():
+    veh = FakeVehicles([[(7, (0, 0, 50, 50))]])
+    ids = []
+    process_frame(FRAME, detector, OCR, cfg(), make_tracker(cfg()), now=0.0,
+                  vehicle_tracker=veh, vehicle_ids_out=ids)
+    assert ids == [None]
+
+
+def test_force_vehicle_tracking_corre_el_tracker_aun_con_la_deteccion_bloqueada():
+    # Premisa anterior: sin linea no corria y `force` lo forzaba; ahora corre siempre
+    # salvo deteccion bloqueada y `force` (solo medicion) lo fuerza igual.
+    blocked = cfg(direction_line=None, detection_blocked=True)
+    off = FakeVehicles([[(7, (400, 300, 600, 500))]])
+    process_frame(FRAME, detector, OCR, blocked, make_tracker(blocked), now=0.0, vehicle_tracker=off)
+    assert off.calls == []
+    no_line = blocked
+    on = FakeVehicles([[(7, (400, 300, 600, 500))]])
+    ids = []
+    process_frame(FRAME, detector, OCR, no_line, make_tracker(no_line), now=0.0, vehicle_tracker=on,
+                  force_vehicle_tracking=True, vehicle_ids_out=ids)
+    assert len(on.calls) == 1 and ids == []   # bloqueada: sin lecturas que asociar
+
+
+def test_una_emision_marca_su_vehiculo_como_consumido_en_el_tracker_de_vehiculos():
+    class Spy(FakeVehicles):
+        consumed = []
+
+        def mark_consumed(self, canonical):
+            self.consumed.append(canonical)
+
+    c = cfg(direction_line=None)
+    vehicles = Spy([[(7, (400, 300, 600, 500))]] * 3)
+    tracker = make_tracker(c)
+    for i in range(3):
+        process_frame(FRAME, detector, OCR, c, tracker, 0.1 * i, vehicle_tracker=vehicles)
+    assert vehicles.consumed == [7]

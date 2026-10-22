@@ -73,6 +73,16 @@ def worker(worker_module, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, 'LPR_PLATE_REGEX', None)
     monkeypatch.setattr(settings, 'LPR_INCLUDE_SNAPSHOT', False)
     monkeypatch.setattr(settings, 'CLOUDINARY_UPLOAD', False)
+    # El seguimiento de vehiculos se crea siempre (voto por vehiculo): estos tests
+    # parten SIN modelo (degradado) para no cargar ultralytics; los que lo necesitan
+    # inyectan un doble en `worker.vehicle_tracker`.
+    from lpr.processor.vehicle_tracker import VehicleTracker
+
+    def no_weights(_ref):
+        raise OSError('sin pesos')
+
+    monkeypatch.setattr(worker_module, 'VehicleTracker',
+                        lambda **kw: VehicleTracker(model_loader=no_weights, **kw))
 
     cfg = SimpleNamespace(
         camera_id='cam-1',
@@ -134,7 +144,7 @@ def test_payload_lleva_direccion_y_track(worker, clock, backend):
     (payload,) = backend.payloads
     meta = payload['meta']
     assert meta['direction'] in ('entry', 'exit', 'unknown')
-    assert meta['track'] == {'id': 1, 'reads': 3, 'votes': 3, 'winner_share': 1.0}
+    assert meta['track'] == {'id': 1, 'reads': 3, 'votes': 3, 'winner_share': 1.0, 'settled': False}
     assert meta['bbox'] == [100, 100, 300, 160]
     assert payload['cameraId'] == 'cam-1' and payload['plate_raw'] == PLATE
 
@@ -304,9 +314,20 @@ def test_si_el_modelo_de_vehiculos_no_carga_el_worker_sigue_emitiendo(worker, wo
     assert (payload['meta']['direction'], payload['meta']['direction_source']) == ('unknown', 'none')
 
 
-def test_sin_linea_no_se_crea_el_seguimiento_de_vehiculos(worker, clock, backend):
+def test_sin_linea_tambien_se_crea_el_seguimiento_de_vehiculos(worker, clock, backend):
+    # Premisa anterior: sin linea no se creaba. Ahora el voto es por vehiculo y el
+    # seguimiento corre siempre; aqui sin pesos (fixture) queda degradado y se emite igual.
     _pass_at(worker, clock, 0)
-    assert worker.vehicle_tracker is None
+    assert worker.vehicle_tracker is not None and worker.vehicle_tracker.available is False
+    assert _plates(backend) == [PLATE]
+
+
+def test_sin_linea_el_seguimiento_alimenta_el_voto_por_vehiculo(worker, clock, backend):
+    worker.vehicle_tracker = _FakeVehicles([200])             # sin direction_line en la config
+    _pass_at(worker, clock, 0, frames=3)
+    (payload,) = backend.payloads
+    assert payload['meta']['track']['vehicle_id'] == 7
+    assert payload['meta']['track']['vehicle_uid'] == 7
 
 
 def test_flush_al_detener_emite_la_patente_confirmada_que_esperaba_direccion(worker, clock, backend):
@@ -340,3 +361,34 @@ def test_el_bucle_de_captura_libera_los_pendientes_al_terminar(worker, clock, ba
     with pytest.raises(KeyboardInterrupt):
         worker.start_capture_loop(_Cap())
     assert [p['plate'] for p in backend.payloads] == [PLATE]
+
+
+def test_cambiar_sample_fps_reconfigura_el_mismo_tracker_sin_recargar_el_modelo(worker):
+    class Byte:
+        args = SimpleNamespace(track_buffer=24)
+        max_time_lost = 24
+        frame_id = 5
+
+        def reset(self):
+            self.frame_id = 0
+
+    class FakeModel:
+        predictor = SimpleNamespace(trackers=[Byte()])
+
+        def track(self, *_a, **_k):
+            return []
+
+    from lpr.processor.vehicle_tracker import VehicleTracker
+
+    model = FakeModel()
+    tracker = VehicleTracker(model=model, sample_fps=8)
+    byte = model.predictor.trackers[0]
+    worker.vehicle_tracker = tracker
+    same = SimpleNamespace(**{**vars(worker.cfg), 'sample_fps': 8.0})
+    assert worker._ensure_vehicle_tracker(same) is tracker
+    assert byte.frame_id == 5                                      # mismo buffer: no se toca
+    other = SimpleNamespace(**{**vars(worker.cfg), 'sample_fps': 4.0})
+    assert worker._ensure_vehicle_tracker(other) is tracker        # mismo objeto y mismo modelo
+    assert tracker._model is model and model.predictor.trackers[0] is byte
+    assert (byte.args.track_buffer, byte.max_time_lost, byte.frame_id) == (12, 12, 0)
+    assert tracker.sample_fps == 4.0

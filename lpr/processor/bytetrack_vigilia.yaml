@@ -1,0 +1,11 @@
+# ByteTrack propio del LPR (ultralytics 8.x). Los umbrales se fijan aca para no
+# depender de los defaults de la version instalada. `VehicleTracker` escribe una
+# copia con `track_buffer` resuelto (segundos de perdida * sample_fps) y se la
+# pasa a `model.track(tracker=<ruta>)`; el valor de abajo es solo el de respaldo.
+tracker_type: bytetrack
+track_high_thresh: 0.5
+track_low_thresh: 0.1
+new_track_thresh: 0.6
+track_buffer: 30
+match_thresh: 0.8
+fuse_score: True

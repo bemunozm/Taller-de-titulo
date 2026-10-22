@@ -17,6 +17,10 @@ Usage (from the repo root):
     # with a detection zone (normalized x,y points; ';' between points, '|' between polygons)
     python -m lpr.tools.replay_eval ... --zone "0.36,0.33;0.90,0.33;0.90,0.98;0.36,0.98"
 
+    # tracking quality of the vehicle tracker per GT pass (fragmentation, ID switches,
+    # orphan reads, duplicate emissions); --always-track runs the tracker without a line
+    python -m lpr.tools.replay_eval ... --track-report [--always-track]
+
     # with a direction line (from;to;exitSide): the vehicle tracker (ByteTrack) runs and the
     # report splits the direction score by source (line / motion / width / none)
     python -m lpr.tools.replay_eval ... --direction-line "0.45,0.60;0.85,0.60;left"
@@ -178,6 +182,156 @@ def score(emissions: Sequence[Emission], gt: Sequence[GtRow], margin: float = 1.
 
 
 # --------------------------------------------------------------------------
+# Vehicle-tracking quality (pure)
+# --------------------------------------------------------------------------
+MATCH_MAX_EDIT = 2  # a misread within this edit distance still counts as "that car"
+
+
+@dataclass
+class ReadRecord:
+    """One valid plate read of a frame, with the vehicle the pipeline bound it to."""
+    clip: str
+    t: float
+    text: str
+    vehicle_id: Optional[int] = None
+
+
+@dataclass
+class PassTrack:
+    clip: str
+    plate: str
+    t0: float
+    t1: float
+    reads: int = 0
+    vehicle_ids: List[int] = field(default_factory=list)  # distinct ids (sorted)
+    assoc_rate: Optional[float] = None  # None when the pass has no reads
+    emissions: int = 0
+
+    @property
+    def duplicates(self) -> int:
+        return max(0, self.emissions - 1)
+
+
+@dataclass
+class TrackReport:
+    passes: List[PassTrack] = field(default_factory=list)
+    mixed_ids: List[Tuple[str, int, int]] = field(default_factory=list)  # (clip, vehicle_id, n_passes)
+    total_reads: int = 0
+    orphan_reads: int = 0           # valid reads with no vehicle, whatever they match
+    matched_reads: int = 0          # reads attributed to some real pass
+    matched_orphans: int = 0        # ... of which without vehicle
+    vehicle_ms_frame: Optional[float] = None
+
+
+def edit_distance(a: str, b: str) -> int:
+    """Levenshtein distance (plates are 6 chars: the O(nm) table is nothing)."""
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _attribute(clip: str, t: float, text: str, real: Sequence[GtRow], margin: float) -> Optional[GtRow]:
+    """GT pass a read/emission belongs to: same clip, inside the window +- margin and
+    the text within MATCH_MAX_EDIT of the true plate. On ties, closest text, then closest in time."""
+    best: Optional[Tuple[int, float, int]] = None
+    chosen: Optional[GtRow] = None
+    for i, r in enumerate(real):
+        if r.clip != clip or not (r.t0 - margin <= t <= r.t1 + margin):
+            continue
+        dist = edit_distance(text, r.plate)
+        if dist > MATCH_MAX_EDIT:
+            continue
+        key = (dist, abs((r.t0 + r.t1) / 2 - t), i)
+        if best is None or key < best:
+            best, chosen = key, r
+    return chosen
+
+
+def track_quality(reads: Sequence[ReadRecord], emissions: Sequence[Emission], gt: Sequence[GtRow],
+                  margin: float = 1.0, vehicle_ms_frame: Optional[float] = None,
+                  emission_margin: Optional[float] = None) -> TrackReport:
+    """Fragmentation / association / duplicates per GT pass plus global ID mixing.
+
+    Reads use `margin`; emissions use `emission_margin` (default: `margin`) because they
+    fire after the car left the window (direction wait, track close)."""
+    real = [r for r in gt if r.real]
+    index = {id(r): i for i, r in enumerate(real)}
+    report = TrackReport(vehicle_ms_frame=vehicle_ms_frame)
+    per_ids: Dict[int, set] = {i: set() for i in range(len(real))}
+    per_reads = [0] * len(real)
+    per_assoc = [0] * len(real)
+    per_emissions = [0] * len(real)
+    passes_of_vehicle: Dict[Tuple[str, int], set] = {}
+    for rd in reads:
+        report.total_reads += 1
+        if rd.vehicle_id is None:
+            report.orphan_reads += 1
+        row = _attribute(rd.clip, rd.t, rd.text, real, margin)
+        if row is None:
+            continue
+        i = index[id(row)]
+        report.matched_reads += 1
+        per_reads[i] += 1
+        if rd.vehicle_id is None:
+            report.matched_orphans += 1
+        else:
+            per_assoc[i] += 1
+            per_ids[i].add(rd.vehicle_id)
+            passes_of_vehicle.setdefault((rd.clip, rd.vehicle_id), set()).add(i)
+    for em in emissions:
+        row = _attribute(em.clip, em.t, em.text, real, margin if emission_margin is None else emission_margin)
+        if row is not None:
+            per_emissions[index[id(row)]] += 1
+    for i, r in enumerate(real):
+        report.passes.append(PassTrack(
+            clip=r.clip, plate=r.plate, t0=r.t0, t1=r.t1, reads=per_reads[i],
+            vehicle_ids=sorted(per_ids[i]),
+            assoc_rate=(per_assoc[i] / per_reads[i]) if per_reads[i] else None,
+            emissions=per_emissions[i]))
+    report.mixed_ids = sorted((clip, vid, len(p)) for (clip, vid), p in passes_of_vehicle.items() if len(p) >= 2)
+    return report
+
+
+def format_track_report(rep: TrackReport, show_plates: bool = False) -> str:
+    shown = (lambda p: p) if show_plates else mask_plate
+    lines = ['   -- tracking de vehiculos por pasada --',
+             '   clip    patente ventana        reads  ids  assoc  emis  dup']
+    for p in rep.passes:
+        assoc = 'n/a' if p.assoc_rate is None else f'{p.assoc_rate * 100:.0f}%'
+        ids = ','.join(str(v) for v in p.vehicle_ids) or '-'
+        lines.append(f'   {p.clip:<7} {shown(p.plate):<7} {p.t0:6.1f}-{p.t1:<6.1f} {p.reads:5d} '
+                     f'{len(p.vehicle_ids):3d}  {assoc:>5} {p.emissions:5d} {p.duplicates:4d}   ids=[{ids}]')
+    fragmented = sum(1 for p in rep.passes if len(p.vehicle_ids) > 1)
+    lines.append(f'   pasadas fragmentadas (>1 id)={fragmented}  duplicadas (>1 emision)='
+                 f'{sum(1 for p in rep.passes if p.duplicates)}  ids mezclados={len(rep.mixed_ids)}')
+    for clip, vid, n in rep.mixed_ids:
+        lines.append(f'     id mezclado: {clip} vehiculo {vid} cubre {n} pasadas')
+    lines.append(f'   lecturas validas={rep.total_reads}  huerfanas(sin vehiculo)={rep.orphan_reads}  '
+                 f'de pasadas={rep.matched_reads} (huerfanas={rep.matched_orphans})')
+    if rep.vehicle_ms_frame is not None:
+        lines.append(f'   tracker de vehiculos: {rep.vehicle_ms_frame:.1f} ms/frame')
+    return '\n'.join(lines)
+
+
+def track_report_to_dict(rep: TrackReport, show_plates: bool = False) -> Dict[str, Any]:
+    shown = (lambda p: p) if show_plates else mask_plate
+    return {
+        'passes': [{'clip': p.clip, 'plate': shown(p.plate), 't0': p.t0, 't1': p.t1, 'reads': p.reads,
+                    'vehicle_ids': p.vehicle_ids, 'n_vehicle_ids': len(p.vehicle_ids),
+                    'assoc_rate': p.assoc_rate, 'emissions': p.emissions, 'duplicates': p.duplicates}
+                   for p in rep.passes],
+        'mixed_ids': [{'clip': c, 'vehicle_id': v, 'passes': n} for c, v, n in rep.mixed_ids],
+        'total_reads': rep.total_reads, 'orphan_reads': rep.orphan_reads,
+        'matched_reads': rep.matched_reads, 'matched_orphans': rep.matched_orphans,
+        'vehicle_ms_frame': rep.vehicle_ms_frame,
+    }
+
+
+# --------------------------------------------------------------------------
 # Parsing of CLI values
 # --------------------------------------------------------------------------
 def parse_zone(text: Optional[str]) -> Optional[List[List[Dict[str, float]]]]:
@@ -275,13 +429,20 @@ def save_evidence(emission: Any, directory: Path, clip: str, t: float) -> Path:
 
 
 def replay_clip(path: Path, cfg: Any, detector: Any, ocr: Any,
-                vehicle_tracker: Any = None, evidence_dir: Optional[Path] = None
+                vehicle_tracker: Any = None, evidence_dir: Optional[Path] = None,
+                read_log: Optional[List[ReadRecord]] = None,
+                vehicle_timings: Optional[List[float]] = None,
+                force_vehicle_tracking: bool = False
                 ) -> Tuple[List[Emission], List[float]]:
     """Run one clip through `pipeline.process_frame`; returns emissions and ms per frame.
 
     `vehicle_tracker` must be FRESH per clip (ByteTrack keeps ids between calls).
     Confirmed plates still waiting for their direction when the clip ends are
-    flushed (a live track would close on its own)."""
+    flushed (a live track would close on its own).
+
+    Measurement: `read_log` collects every valid read with its vehicle id,
+    `vehicle_timings` the ms spent in the vehicle tracker per frame, and
+    `force_vehicle_tracking` runs the tracker even without a direction line."""
     from lpr.processor.pipeline import make_tracker, process_frame
 
     tracker = make_tracker(cfg)
@@ -297,11 +458,33 @@ def replay_clip(path: Path, cfg: Any, detector: Any, ocr: Any,
                                       reads=em.reads, votes=em.votes,
                                       direction_source=em.direction_source, vehicle_id=em.vehicle_id))
 
+    spent = [0.0]
+    if vehicle_tracker is not None and vehicle_timings is not None:
+        real_update = vehicle_tracker.update
+
+        def timed_update(*a: Any, **kw: Any) -> Any:
+            t0 = time.perf_counter()
+            try:
+                return real_update(*a, **kw)
+            finally:
+                spent[0] += (time.perf_counter() - t0) * 1000.0
+        vehicle_tracker.update = timed_update
+
+    clip_name = path.stem
     for t, frame in iter_sampled_frames(path, cfg.sample_fps):
         last_t = t
         started = time.perf_counter()
-        _reads, found = process_frame(frame, detector, ocr, cfg, tracker, t, vehicle_tracker=vehicle_tracker)
+        spent[0] = 0.0
+        ids: Optional[List[Optional[int]]] = [] if read_log is not None else None
+        reads, found = process_frame(frame, detector, ocr, cfg, tracker, t, vehicle_tracker=vehicle_tracker,
+                                     force_vehicle_tracking=force_vehicle_tracking, vehicle_ids_out=ids)
         timings.append((time.perf_counter() - started) * 1000.0)
+        if vehicle_timings is not None and vehicle_tracker is not None:
+            vehicle_timings.append(spent[0])
+        if read_log is not None and ids is not None:
+            for rd, vid in zip(reads, ids):
+                if rd.status == 'ok' and rd.plate:
+                    read_log.append(ReadRecord(clip=clip_name, t=t, text=rd.plate, vehicle_id=vid))
         _collect(t, found)
     _collect(last_t, tracker.flush())
     return emissions, timings
@@ -376,6 +559,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     'lpr/eval-data/replay-<label>.json, which is git-ignored')
     ap.add_argument('--save-evidence', help='folder where to save the evidence picture of every emission '
                     '(frame of the best reading + its box; contains real plates: keep it outside the repo)')
+    ap.add_argument('--track-report', action='store_true',
+                    help='measure vehicle-tracking quality per GT pass (fragmentation, association, '
+                    'duplicate emissions, ID mixing) and add it to --out-json')
+    ap.add_argument('--emission-margin', type=float, default=6.0,
+                    help='--track-report: seconds after a pass window in which an emission still belongs to it '
+                    '(emissions fire late: direction wait / track close; default 6)')
+    ap.add_argument('--always-track', action='store_true',
+                    help='run the vehicle tracker even without a direction line (replay only)')
     ap.add_argument('--show-plates', action='store_true',
                     help='print real plates in the report (default: masked)')
     args = ap.parse_args(argv)
@@ -400,33 +591,51 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     from lpr.processor.pipeline import make_tracker, process_frame, wants_vehicle_tracking
     from lpr.processor.vehicle_tracker import VehicleTracker
-    use_vehicles = wants_vehicle_tracking(cfg)
+    use_vehicles = wants_vehicle_tracking(cfg) or args.always_track
 
     def new_vehicle_tracker() -> Any:
-        return VehicleTracker(model_ref=settings.LPR_VEHICLE_MODEL or None, device=cfg.device) if use_vehicles else None
+        return VehicleTracker(
+            model_ref=settings.LPR_VEHICLE_MODEL or None, device=cfg.device, sample_fps=cfg.sample_fps,
+            lost_seconds=settings.LPR_VEHICLE_LOST_SECONDS, relink_seconds=settings.LPR_VEHICLE_RELINK_SECONDS,
+        ) if use_vehicles else None
 
     # Warm-up (CUDA context, model load) so it does not count as ms/frame.
     warm_t, warm_frame = next(iter_sampled_frames(clips[0], cfg.sample_fps))
-    process_frame(warm_frame, detector, ocr, cfg, make_tracker(cfg), warm_t, vehicle_tracker=new_vehicle_tracker())
+    process_frame(warm_frame, detector, ocr, cfg, make_tracker(cfg), warm_t, vehicle_tracker=new_vehicle_tracker(),
+                  force_vehicle_tracking=args.always_track)
 
     emissions: List[Emission] = []
     timings: List[float] = []
+    read_log: List[ReadRecord] = []
+    vehicle_timings: List[float] = []
     for clip in clips:
         found, ms = replay_clip(clip, cfg, detector, ocr, vehicle_tracker=new_vehicle_tracker(),
-                                evidence_dir=Path(args.save_evidence) if args.save_evidence else None)
+                                evidence_dir=Path(args.save_evidence) if args.save_evidence else None,
+                                read_log=read_log if args.track_report else None,
+                                vehicle_timings=vehicle_timings if args.track_report else None,
+                                force_vehicle_tracking=args.always_track)
         emissions += found
         timings += ms
     clip_gt = [r for r in gt if any(clip_matches(r.clip, c) for c in clips)]
     # Emissions carry the file stem; normalize to the GT token for matching.
-    for em in emissions:
-        stem_parts = em.clip.split('-')
-        em.clip = next((r.clip for r in clip_gt if r.clip in stem_parts), em.clip)
+    for item in (*emissions, *read_log):
+        stem_parts = item.clip.split('-')
+        item.clip = next((r.clip for r in clip_gt if r.clip in stem_parts), item.clip)
     sc = score(emissions, clip_gt, args.margin, show_plates=args.show_plates)
     print(format_report(args.label, cfg, sc, statistics.mean(timings) if timings else 0.0,
                         len(timings), len(emissions)))
+    tracking: Optional[TrackReport] = None
+    if args.track_report:
+        tracking = track_quality(read_log, emissions, clip_gt, args.margin,
+                                 statistics.mean(vehicle_timings) if vehicle_timings else None,
+                                 emission_margin=args.emission_margin)
+        print(format_track_report(tracking, args.show_plates))
     out_path = Path(args.out_json) if args.out_json else DEFAULT_DATA_DIR / f'replay-{args.label}.json'
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps([e.__dict__ for e in emissions], ensure_ascii=False, indent=2), encoding='utf-8')
+    dumped: Any = [e.__dict__ for e in emissions]
+    if tracking is not None:  # the list format stays for existing consumers unless the report is asked for
+        dumped = {'emissions': dumped, 'tracking': track_report_to_dict(tracking, args.show_plates)}
+    out_path.write_text(json.dumps(dumped, ensure_ascii=False, indent=2), encoding='utf-8')
     return 2 if sc.wrong else 0
 
 

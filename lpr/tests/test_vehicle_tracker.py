@@ -44,7 +44,9 @@ def test_usa_bytetrack_persistente_con_las_clases_de_vehiculos():
     tracker = VehicleTracker(model=model, imgsz=640, device='cuda:0')
     tracker.update('img', now=0.0)
     _image, kwargs = model.calls[0]
-    assert kwargs['persist'] is True and kwargs['tracker'] == 'bytetrack.yaml'
+    # El yaml propio (umbrales explicitos) reemplaza al 'bytetrack.yaml' de ultralytics.
+    assert kwargs['persist'] is True and kwargs['tracker'].endswith('.yaml')
+    assert 'vigilia-lpr' in kwargs['tracker']
     assert kwargs['classes'] == list(VEHICLE_CLASSES) == [2, 3, 5, 7]
     assert kwargs['imgsz'] == 640 and kwargs['device'] == 'cuda:0' and kwargs['verbose'] is False
 
@@ -60,7 +62,7 @@ def test_reproyecta_las_cajas_del_recorte_al_cuadro_completo():
     model.frames = [[(7, (10, 20, 110, 220))]]
     tracker = VehicleTracker(model=model)
     found = tracker.update('crop', offset=(360, 100), now=1.0)
-    assert found == [(7, (370.0, 120.0, 470.0, 320.0))]
+    assert found == [(1, (370.0, 120.0, 470.0, 320.0))]   # canonico = contador interno, no el id crudo (7)
 
 
 def test_la_trayectoria_sigue_el_borde_inferior_central():
@@ -78,7 +80,7 @@ def test_cajas_sin_id_se_ignoran():
     model = FakeModel()
     model.frames = [[(None, (0, 0, 10, 10)), (3, (50, 50, 90, 90))]]
     tracker = VehicleTracker(model=model)
-    assert [tid for tid, _ in tracker.update('f', now=0.0)] == [3]
+    assert [tid for tid, _ in tracker.update('f', now=0.0)] == [1]   # solo la caja con id (crudo 3)
 
 
 def test_ids_distintos_llevan_trayectorias_separadas():
