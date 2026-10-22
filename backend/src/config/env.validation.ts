@@ -187,36 +187,47 @@ export const MAX_LPR_PASSAGE_REVERSE_MIN_SECONDS = 600;
 export const DEFAULT_LPR_PASSAGE_ORPHAN_SECONDS = 30;
 export const MAX_LPR_PASSAGE_ORPHAN_SECONDS = 600;
 
+/**
+ * LPR_PASSAGE_FUZZY_SECONDS: segundos (medidos contra la última lectura de la
+ * pasada) durante los que una lectura SIN pasada exacta puede agruparse en la
+ * pasada abierta de otra patente de igual largo que difiere en un solo
+ * carácter (variante de OCR entre cámaras). `0` la desactiva. Opcional;
+ * default 30, entre 0 y 600 (en la práctica se acota por la ventana de pasada).
+ */
+export const DEFAULT_LPR_PASSAGE_FUZZY_SECONDS = 30;
+export const MAX_LPR_PASSAGE_FUZZY_SECONDS = 600;
+
 /** Unidad de una variable de duración entera (aparece en el mensaje de error). */
 type DurationUnit = 'segundos' | 'minutos' | 'horas' | 'días';
 
 /**
  * Motivo por el que `value` (ya recortado y no vacío) no es un entero de
- * `unit` entre 1 y `max`.
+ * `unit` entre `min` (1 salvo que la variable admita 0) y `max`.
  */
 function integerDurationIssue(
   value: string,
   max: number,
   unit: DurationUnit,
+  min = 1,
 ): string | null {
-  const message = `debe ser un entero de ${unit} entre 1 y ${max}`;
+  const message = `debe ser un entero de ${unit} entre ${min} y ${max}`;
   if (!/^\d+$/.test(value)) {
     return message;
   }
   const amount = Number.parseInt(value, 10);
-  if (amount < 1 || amount > max) {
+  if (amount < min || amount > max) {
     return message;
   }
   return null;
 }
 
 /** Esquema de una variable de duración entera (entre 1 y `max`). */
-function integerDuration(max: number, unit: DurationUnit) {
+function integerDuration(max: number, unit: DurationUnit, min = 1) {
   return z
     .string()
     .trim()
     .superRefine((value, ctx) => {
-      const issue = integerDurationIssue(value, max, unit);
+      const issue = integerDurationIssue(value, max, unit, min);
       if (issue) {
         ctx.addIssue({ code: 'custom', message: issue });
       }
@@ -234,12 +245,13 @@ function parseIntegerDuration(
   fallback: number,
   max: number,
   unit: DurationUnit,
+  min = 1,
 ): number {
   const value = raw?.trim() ?? '';
   if (value === '') {
     return fallback;
   }
-  const issue = integerDurationIssue(value, max, unit);
+  const issue = integerDurationIssue(value, max, unit, min);
   if (issue) {
     throw new Error(`${name}: ${issue}`);
   }
@@ -621,6 +633,12 @@ const envFieldsSchema = z.object({
     integerDuration(MAX_LPR_PASSAGE_ORPHAN_SECONDS, 'segundos'),
   ),
 
+  // Segundos en que una lectura puede agruparse con la pasada de una patente
+  // que difiere en un carácter (0 = desactivado).
+  LPR_PASSAGE_FUZZY_SECONDS: optionalNonBlank(
+    integerDuration(MAX_LPR_PASSAGE_FUZZY_SECONDS, 'segundos', 0),
+  ),
+
   // Horas de validez de la visita que crea el conserje digital.
   VISIT_CONCIERGE_VALIDITY_HOURS: optionalNonBlank(
     integerDuration(MAX_VISIT_CONCIERGE_VALIDITY_HOURS, 'horas'),
@@ -878,6 +896,18 @@ export function parseLprPassageOrphanSeconds(raw: string | undefined): number {
     DEFAULT_LPR_PASSAGE_ORPHAN_SECONDS,
     MAX_LPR_PASSAGE_ORPHAN_SECONDS,
     'segundos',
+  );
+}
+
+/** Interpreta LPR_PASSAGE_FUZZY_SECONDS (default 30; 0 = desactivado). Inválido lanza. */
+export function parseLprPassageFuzzySeconds(raw: string | undefined): number {
+  return parseIntegerDuration(
+    'LPR_PASSAGE_FUZZY_SECONDS',
+    raw,
+    DEFAULT_LPR_PASSAGE_FUZZY_SECONDS,
+    MAX_LPR_PASSAGE_FUZZY_SECONDS,
+    'segundos',
+    0,
   );
 }
 

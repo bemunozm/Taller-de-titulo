@@ -747,4 +747,280 @@ describe('VehiclePassagesService', () => {
       });
     });
   });
+
+  describe('claim: variantes de OCR (LPR_PASSAGE_FUZZY_SECONDS)', () => {
+    const VARIANT = 'ABCD1Z';
+    let sameCamera: boolean;
+    /** Lo que devuelve la relectura de la pasada elegida (null = ya no existe). */
+    let fresh: VehiclePassage | null | 'candidate';
+
+    beforeEach(() => {
+      sameCamera = false;
+      fresh = 'candidate';
+      manager.exists.mockImplementation((entity: unknown) =>
+        Promise.resolve(entity === PlateDetection ? sameCamera : true),
+      );
+    });
+
+    /** Sin pasada exacta; las candidatas difusas salen de la 2.ª consulta. */
+    function withCandidates(candidates: VehiclePassage[]): void {
+      manager.find.mockResolvedValueOnce([]).mockResolvedValueOnce(candidates);
+      manager.findOne.mockImplementation((entity: unknown) =>
+        Promise.resolve(
+          entity === VehiclePassage
+            ? fresh === 'candidate'
+              ? (candidates[0] ?? null)
+              : fresh
+            : null,
+        ),
+      );
+    }
+
+    function variantRead(
+      r: DirectionReading,
+      decidesAccess: boolean,
+    ): Promise<PassageClaim> {
+      const read = detection();
+      read.plate = VARIANT;
+      return service.claim(read, r, { decidesAccess });
+    }
+
+    const lockCall = (key: string) => [
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+      [`vigilia.lpr.passage:${ORG}`, key],
+    ];
+
+    it('toma primero el lock del condominio (difuso) y después el de la patente', async () => {
+      await claim(reading('entry', 'line'));
+
+      expect(manager.query.mock.calls.slice(0, 2)).toEqual([
+        lockCall('~fuzzy'),
+        lockCall(PLATE),
+      ]);
+    });
+
+    it('con candidata toma, en orden, condominio -> patente entrante -> patente destino', async () => {
+      withCandidates([passage({ decidesAccess: false })]);
+
+      await variantRead(reading('entry', 'line'), false);
+
+      expect(manager.query.mock.calls.slice(0, 3)).toEqual([
+        lockCall('~fuzzy'),
+        lockCall(VARIANT),
+        lockCall(PLATE),
+      ]);
+    });
+
+    it('con la función desactivada no toma el lock difuso ni consulta candidatas', async () => {
+      service = new VehiclePassagesService(
+        dataSource as unknown as DataSource,
+        {
+          get: (key: string) =>
+            key === 'LPR_PASSAGE_FUZZY_SECONDS' ? '0' : undefined,
+        } as unknown as ConfigService,
+      );
+
+      const result = await claim(reading('entry', 'line'));
+
+      expect(result.kind).toBe('leader');
+      expect(manager.query).toHaveBeenCalledTimes(1);
+      expect(manager.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('acota la búsqueda: ventana de 30 s sobre lastSeenAt, mismo condominio y pocas filas', async () => {
+      withCandidates([]);
+
+      await variantRead(reading('exit', 'line'), false);
+
+      const [, options] = manager.find.mock.calls[1] as [
+        unknown,
+        {
+          where: {
+            organizationId: string;
+            lastSeenAt: FindOperator<Date>;
+          };
+          order: object;
+          take: number;
+        },
+      ];
+      expect(options.where.organizationId).toBe(ORG);
+      expect(options.where.lastSeenAt.value).toEqual(new Date(NOW - 30_000));
+      expect(options.order).toEqual({ lastSeenAt: 'DESC' });
+      expect(options.take).toBe(20);
+    });
+
+    it('cámara de solo registro: suma la variante como evidencia, sin liderazgo ni intento', async () => {
+      withCandidates([passage({ decidesAccess: false })]);
+
+      const result = await variantRead(reading('entry', 'line'), false);
+
+      expect(result.kind).toBe('sighting');
+      expect(result.passage.id).toBe('passage-1');
+      expect(result.detection.passageId).toBe('passage-1');
+      expect(result.detection.meta).toEqual({
+        plate_variant_of_passage: 'passage-1',
+      });
+      expect(manager.create).not.toHaveBeenCalled();
+    });
+
+    it('B1: la variante solo cuenta y enlaza; no cambia dirección, fuente ni el method del intento', async () => {
+      withCandidates([
+        passage({
+          direction: 'unknown',
+          directionSource: 'none',
+          methodFollowsDirection: true,
+          decidesAccess: false,
+        }),
+      ]);
+
+      const result = await variantRead(reading('entry', 'line'), false);
+
+      expect(result.kind).toBe('sighting');
+      expect(result.passage.direction).toBe('unknown');
+      expect(result.passage.directionSource).toBe('none');
+      expect(manager.update).toHaveBeenCalledTimes(1);
+      const [target, , patch] = manager.update.mock.calls[0] as [
+        unknown,
+        unknown,
+        Record<string, unknown>,
+      ];
+      expect(target).toBe(VehiclePassage);
+      expect(Object.keys(patch).sort()).toEqual([
+        'lastSeenAt',
+        'sightingCount',
+      ]);
+    });
+
+    it('CRÍTICO: una cámara de acceso nunca se suma como variante, ni con la pasada Permitido -> pasada y decisión propias', async () => {
+      withCandidates([passage()]);
+
+      const result = await variantRead(reading('entry', 'line'), true);
+
+      expect(result).toMatchObject({ kind: 'leader', promoted: false });
+      expect(manager.create).toHaveBeenCalled();
+      // Ni siquiera busca candidatas.
+      expect(manager.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('CRÍTICO: la misma cámara que ya leyó la pasada no la agrupa (otro auto) -> pasada nueva', async () => {
+      withCandidates([passage({ decidesAccess: false })]);
+      sameCamera = true;
+
+      const result = await variantRead(reading('entry', 'line'), false);
+
+      expect(result.kind).toBe('leader');
+      expect(manager.exists).toHaveBeenCalledWith(PlateDetection, {
+        where: { passageId: 'passage-1', cameraId: 'cam-1' },
+      });
+    });
+
+    it('una cámara distinta de las que ya leyeron la pasada sí la agrupa', async () => {
+      withCandidates([passage({ decidesAccess: false })]);
+
+      const result = await variantRead(reading('entry', 'line'), false);
+
+      expect(result.kind).toBe('sighting');
+    });
+
+    it.each([
+      ['largo distinto', 'ABCD1Z9'],
+      ['dos sustituciones', 'ABCDZZ'],
+      ['una inserción', 'ABCD12X'],
+    ])('%s -> no es variante', async (_name, other) => {
+      withCandidates([passage({ decidesAccess: false })]);
+      const read = detection();
+      read.plate = other;
+
+      const result = await service.claim(read, reading('entry', 'line'), {
+        decidesAccess: false,
+      });
+
+      expect(result.kind).toBe('leader');
+    });
+
+    it('direcciones opuestas conocidas -> no es variante; unknown es compatible', async () => {
+      withCandidates([passage({ direction: 'exit', decidesAccess: false })]);
+      const opposite = await variantRead(reading('entry', 'line'), false);
+      expect(opposite.kind).toBe('leader');
+
+      withCandidates([passage({ direction: 'exit', decidesAccess: false })]);
+      const unknown = await variantRead(reading('unknown', 'none'), false);
+      expect(unknown.kind).toBe('sighting');
+    });
+
+    it('dos candidatas con patentes distintas -> ambiguo, pasada nueva (aunque difieran en recencia)', async () => {
+      withCandidates([
+        passage({
+          id: 'a',
+          plate: 'ABCD1X',
+          lastSeenAt: new Date(NOW - 1_000),
+          decidesAccess: false,
+        }),
+        passage({
+          id: 'b',
+          plate: 'ABCD1Y',
+          lastSeenAt: new Date(NOW - 9_000),
+          decidesAccess: false,
+        }),
+      ]);
+
+      const result = await variantRead(reading('entry', 'line'), false);
+
+      expect(result.kind).toBe('leader');
+    });
+
+    it('dos pasadas de la MISMA patente candidata: no es ambiguo, gana la más reciente', async () => {
+      withCandidates([
+        passage({
+          id: 'reciente',
+          plate: 'ABCD1X',
+          lastSeenAt: new Date(NOW - 1_000),
+          decidesAccess: false,
+        }),
+        passage({
+          id: 'vieja',
+          plate: 'ABCD1X',
+          lastSeenAt: new Date(NOW - 9_000),
+          decidesAccess: false,
+        }),
+      ]);
+
+      const result = await variantRead(reading('entry', 'line'), false);
+
+      expect(result.passage.id).toBe('reciente');
+    });
+
+    it.each([
+      ['la pasada ya no existe', null],
+      [
+        'la pasada se anonimizó mientras se esperaba el lock',
+        passage({ anonymizedAt: new Date(NOW), decidesAccess: false }),
+      ],
+      [
+        'la pasada venció mientras se esperaba el lock',
+        passage({ lastSeenAt: new Date(NOW - 40_000), decidesAccess: false }),
+      ],
+      [
+        'su dirección pasó a contradecir',
+        passage({ direction: 'exit', decidesAccess: false }),
+      ],
+    ])('relectura bajo el lock: %s -> camino normal', async (_name, reread) => {
+      withCandidates([passage({ decidesAccess: false })]);
+      fresh = reread;
+
+      const result = await variantRead(reading('entry', 'line'), false);
+
+      expect(result.kind).toBe('leader');
+    });
+
+    it('una pasada exacta compatible tiene prioridad: no se busca variante', async () => {
+      manager.find.mockResolvedValueOnce([passage()]);
+
+      const result = await claim(reading('entry', 'line'));
+
+      expect(result.kind).toBe('sighting');
+      expect(manager.find).toHaveBeenCalledTimes(1);
+      expect(result.detection.meta).toBeUndefined();
+    });
+  });
 });

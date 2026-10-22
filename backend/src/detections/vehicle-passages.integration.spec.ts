@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
-import { DataSource, type Repository } from 'typeorm';
+import { DataSource, IsNull, type Repository } from 'typeorm';
 import type { ConfigService } from '@nestjs/config';
 import {
   buildTypeOrmOptions,
@@ -277,7 +277,7 @@ suite('Pasadas de vehículos (Postgres real)', () => {
     });
 
     it('dos patentes distintas no se bloquean ni se mezclan', async () => {
-      const other = `U${plate.slice(1)}`;
+      const other = `U${plate.slice(1, -1)}Z`;
       await Promise.all([
         service.createDetection(read('cam-1', 'entry', 'line'), orgId),
         service.createDetection(
@@ -1111,7 +1111,8 @@ suite('Pasadas de vehículos (Postgres real)', () => {
       });
 
       it('la supresión por patente no toca la pasada de otra patente ni la de otro condominio', async () => {
-        const other = `U${plate.slice(1)}`;
+        // 2 caracteres distintos: no es una variante de OCR de `plate`.
+        const other = `U${plate.slice(1, -1)}Z`;
         await service.createDetection(
           { cameraId: 'cam-a', plate: other, meta: { direction: 'entry' } },
           orgId,
@@ -1135,6 +1136,149 @@ suite('Pasadas de vehículos (Postgres real)', () => {
           .map((p) => p.plate)
           .sort();
         expect(plates).toEqual(['******', other].sort());
+      });
+
+      it('M2a: la supresión del titular de la pasada anonimiza también las lecturas enlazadas como variante, y la pasada', async () => {
+        const variant = `${plate.slice(0, -1)}Z`;
+        await service.createDetection(
+          {
+            cameraId: 'reg-a',
+            plate,
+            meta: { direction: 'exit', direction_source: 'line' },
+          },
+          orgId,
+        );
+        await service.createDetection(
+          {
+            cameraId: 'reg-b',
+            plate: variant,
+            meta: { direction: 'exit', direction_source: 'line' },
+          },
+          orgId,
+        );
+        const tx = erasure();
+
+        const found = await tx.findDetections(request(), 'erasable', 50);
+        expect(found).toHaveLength(2);
+        await tx.anonymizeDetections(
+          found.map((d) => d.id),
+          [],
+        );
+
+        const rows = await detections.find({
+          where: { organizationId: orgId },
+        });
+        expect(rows.every((d) => d.anonymizedAt !== null)).toBe(true);
+        expect(rows.every((d) => d.plate === '******')).toBe(true);
+        expect((await onlyPassage()).plate).toBe('******');
+      });
+
+      it('N1: con la solicitud truncada por el tope, la pasada sigue en claro hasta anonimizar todas las variantes y termina enmascarada', async () => {
+        const dto = (cameraId: string, value: string) => ({
+          cameraId,
+          plate: value,
+          meta: {
+            direction: 'exit' as const,
+            direction_source: 'line' as const,
+          },
+        });
+        await service.createDetection(dto('reg-a', plate), orgId);
+        await service.createDetection(
+          dto('reg-b', `${plate.slice(0, -1)}Z`),
+          orgId,
+        );
+        await service.createDetection(
+          dto('reg-c', `${plate.slice(0, -1)}Y`),
+          orgId,
+        );
+        expect(await count('vehicle_passages')).toBe(1);
+        const unanonymized = () =>
+          detections.count({
+            where: { organizationId: orgId, anonymizedAt: IsNull() },
+          });
+
+        // Tope de 1 detección por corrida (el repo ya lo recibe por parámetro).
+        for (let run = 0; run < 3; run += 1) {
+          const tx = erasure();
+          const found = await tx.findDetections(request(), 'erasable', 1);
+          expect(found).toHaveLength(1);
+          await tx.anonymizeDetections(
+            found.map((d) => d.id),
+            [],
+          );
+          await tx.anonymizePassages(request());
+          const remaining = await unanonymized();
+          expect(remaining).toBe(2 - run);
+          const passage = await onlyPassage();
+          if (remaining > 0) {
+            // Pasada en claro: es lo que permite encontrar las variantes que faltan.
+            expect(passage.plate).toBe(plate);
+            expect(passage.anonymizedAt).toBeNull();
+          } else {
+            expect(passage.plate).toBe('******');
+            expect(passage.anonymizedAt).not.toBeNull();
+          }
+        }
+      });
+
+      it('la retención por edad no cambia: anonimizar una variante fuera de ventana enmascara la pasada', async () => {
+        await service.createDetection(read('reg-a', 'exit', 'line'), orgId);
+        await service.createDetection(
+          {
+            cameraId: 'reg-b',
+            plate: `${plate.slice(0, -1)}Z`,
+            meta: { direction: 'exit', direction_source: 'line' },
+          },
+          orgId,
+        );
+        await sql(
+          `UPDATE "vehicle_passages" SET "lastSeenAt" = now() - interval '120 seconds' WHERE "organizationId" = $1`,
+        );
+        const rows = await detections.find({
+          where: { organizationId: orgId },
+        });
+
+        await anonymize(rows.filter((d) => d.plate !== plate).map((d) => d.id));
+
+        expect((await onlyPassage()).plate).toBe('******');
+      });
+
+      it('M2b: la supresión de la patente de una lectura VARIANTE no enmascara la pasada de otra patente', async () => {
+        const variant = `${plate.slice(0, -1)}Z`;
+        await service.createDetection(
+          {
+            cameraId: 'reg-a',
+            plate,
+            meta: { direction: 'exit', direction_source: 'line' },
+          },
+          orgId,
+        );
+        await service.createDetection(
+          {
+            cameraId: 'reg-b',
+            plate: variant,
+            meta: { direction: 'exit', direction_source: 'line' },
+          },
+          orgId,
+        );
+        const holder = { ...request(), key: plateKey(variant) };
+        const tx = erasure();
+
+        const found = await tx.findDetections(holder, 'erasable', 50);
+        expect(found).toHaveLength(1);
+        await tx.anonymizeDetections(
+          found.map((d) => d.id),
+          [],
+        );
+        await expect(tx.anonymizePassages(holder)).resolves.toBe(0);
+
+        const passage = await onlyPassage();
+        expect(passage.plate).toBe(plate);
+        expect(passage.anonymizedAt).toBeNull();
+        const rows = await detections.find({
+          where: { organizationId: orgId },
+        });
+        expect(rows.filter((d) => d.anonymizedAt !== null)).toHaveLength(1);
       });
 
       it('la supresión respeta una pasada con intento Pendiente del conserje', async () => {
@@ -1218,6 +1362,379 @@ suite('Pasadas de vehículos (Postgres real)', () => {
 
       expect(rows).toHaveLength(2);
       expect(rows.every((row) => row.pending)).toBe(true);
+    });
+  });
+
+  describe('variantes de OCR entre cámaras (LPR_PASSAGE_FUZZY_SECONDS)', () => {
+    // Una sustitución en el último carácter (el hex de `plate` nunca es Z).
+    let variant: string;
+
+    beforeEach(() => {
+      variant = `${plate.slice(0, -1)}Z`;
+    });
+
+    const readPlate = (
+      cameraId: string,
+      value: string,
+      direction: 'entry' | 'exit' | 'unknown' = 'exit',
+      source: 'line' | 'none' = 'line',
+    ): CreatePlateDetectionDto => ({
+      cameraId,
+      plate: value,
+      meta: { direction, direction_source: source },
+    });
+
+    const age = (seconds: number) =>
+      sql(
+        `UPDATE "vehicle_passages" SET "lastSeenAt" = now() - interval '${seconds} seconds' WHERE "organizationId" = $1`,
+      );
+
+    const insertPassage = (
+      passagePlate: string,
+      lastSeenAt: Date,
+    ): Promise<VehiclePassage> =>
+      passagesRepo.save(
+        passagesRepo.create({
+          organizationId: orgId,
+          plate: passagePlate,
+          direction: 'exit',
+          directionSource: 'line',
+          firstSeenAt: lastSeenAt,
+          lastSeenAt,
+          leaderClaimedAt: lastSeenAt,
+          leaderToken: randomUUID(),
+          sightingCount: 1,
+          decidesAccess: false,
+          methodFollowsDirection: false,
+        }),
+      );
+
+    it('solo registro: la variante de otra cámara se suma a la misma pasada (2 lecturas, la segunda marcada)', async () => {
+      await service.createDetection(readPlate('reg-a', plate), orgId);
+      const second = await service.createDetection(
+        readPlate('reg-b', variant),
+        orgId,
+      );
+
+      expect(second).toMatchObject({ deduplicated: true });
+      expect(await count('vehicle_passages')).toBe(1);
+      expect(await count('access_attempts')).toBe(1);
+      const passage = await onlyPassage();
+      expect(passage.plate).toBe(plate);
+      expect(passage.sightingCount).toBe(2);
+      const rows = await detections.find({
+        where: { organizationId: orgId },
+        order: { createdAt: 'ASC' },
+      });
+      expect(rows.map((r) => r.passageId)).toEqual([passage.id, passage.id]);
+      expect(rows[0].meta?.plate_variant_of_passage).toBeUndefined();
+      expect(rows[1].plate).toBe(variant);
+      expect(rows[1].meta?.plate_variant_of_passage).toBe(passage.id);
+      expect(sendDoorOpen).not.toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it('CRÍTICO: variante leída por la MISMA cámara que ya leyó la pasada (otro auto) -> pasada nueva', async () => {
+      await service.createDetection(readPlate('reg-a', plate), orgId);
+      await service.createDetection(readPlate('reg-a', variant), orgId);
+
+      expect(await count('vehicle_passages')).toBe(2);
+    });
+
+    it('una cámara que ya leyó la pasada vía variante tampoco vuelve a agrupar otra variante', async () => {
+      await service.createDetection(readPlate('reg-a', plate), orgId);
+      await service.createDetection(readPlate('reg-b', variant), orgId);
+      await service.createDetection(
+        readPlate('reg-b', `${plate.slice(0, -1)}Y`),
+        orgId,
+      );
+
+      expect(await count('vehicle_passages')).toBe(2);
+    });
+
+    it('fuera de la ventana difusa (30 s) -> pasadas separadas', async () => {
+      await service.createDetection(readPlate('reg-a', plate), orgId);
+      await age(31);
+      await service.createDetection(readPlate('reg-b', variant), orgId);
+
+      expect(await count('vehicle_passages')).toBe(2);
+      expect(await count('access_attempts')).toBe(2);
+    });
+
+    it('dentro de la ventana difusa (25 s) -> misma pasada', async () => {
+      await service.createDetection(readPlate('reg-a', plate), orgId);
+      await age(25);
+      await service.createDetection(readPlate('reg-b', variant), orgId);
+
+      expect(await count('vehicle_passages')).toBe(1);
+    });
+
+    it.each([
+      ['largo distinto', (p: string) => `${p}Z`],
+      ['dos sustituciones', (p: string) => `${p.slice(0, -2)}ZZ`],
+      ['un carácter menos', (p: string) => p.slice(0, -1)],
+    ])('%s -> pasadas separadas', async (_name, mutate) => {
+      await service.createDetection(readPlate('reg-a', plate), orgId);
+      await service.createDetection(readPlate('reg-b', mutate(plate)), orgId);
+
+      expect(await count('vehicle_passages')).toBe(2);
+    });
+
+    it('direcciones opuestas conocidas -> pasadas separadas', async () => {
+      await service.createDetection(readPlate('reg-a', plate, 'exit'), orgId);
+      await service.createDetection(
+        readPlate('reg-b', variant, 'entry'),
+        orgId,
+      );
+
+      expect(await count('vehicle_passages')).toBe(2);
+    });
+
+    it('dirección desconocida de un lado es compatible', async () => {
+      await service.createDetection(readPlate('reg-a', plate, 'exit'), orgId);
+      await service.createDetection(
+        readPlate('reg-b', variant, 'unknown', 'none'),
+        orgId,
+      );
+
+      expect(await count('vehicle_passages')).toBe(1);
+    });
+
+    it('CRÍTICO: cámara de acceso tras una pasada sin Permitido (Pendiente) -> pasada propia y decisión propia', async () => {
+      findByPlate.mockResolvedValueOnce(null);
+      await service.createDetection(readPlate('cam-a', plate), orgId);
+      const [first] = await allAttempts();
+      expect(first.decision).toBe('Pendiente');
+      sendDoorOpen.mockClear();
+
+      const second = await service.createDetection(
+        readPlate('cam-b', variant),
+        orgId,
+      );
+
+      expect(second).toMatchObject({ deduplicated: false });
+      expect(await count('vehicle_passages')).toBe(2);
+      const decisions = (await allAttempts()).map((a) => a.decision).sort();
+      expect(decisions).toEqual(['Pendiente', 'Permitido']);
+      expect(sendDoorOpen).toHaveBeenCalledTimes(1);
+    });
+
+    it('CRÍTICO: cámara de acceso tras una pasada Registrado o sin intento -> pasada propia y apertura propia', async () => {
+      await service.createDetection(readPlate('reg-a', plate), orgId);
+      await service.createDetection(readPlate('cam-b', variant), orgId);
+      expect(await count('vehicle_passages')).toBe(2);
+      expect(sendDoorOpen).toHaveBeenCalledTimes(1);
+
+      await insertPassage(`${plate.slice(0, -2)}YY`, new Date());
+      sendDoorOpen.mockClear();
+      await service.createDetection(
+        readPlate('cam-c', `${plate.slice(0, -2)}YX`),
+        orgId,
+      );
+      expect(await count('vehicle_passages')).toBe(4);
+      expect(sendDoorOpen).toHaveBeenCalledTimes(1);
+    });
+
+    it('CRÍTICO: cámara de acceso con variante de una pasada Permitido -> pasada y decisión propias (nunca se suma)', async () => {
+      await service.createDetection(readPlate('cam-a', plate), orgId);
+      expect((await allAttempts())[0].decision).toBe('Permitido');
+      sendDoorOpen.mockClear();
+
+      const second = await service.createDetection(
+        readPlate('cam-b', variant),
+        orgId,
+      );
+
+      expect(second).toMatchObject({ deduplicated: false });
+      expect(await count('vehicle_passages')).toBe(2);
+      expect(await count('access_attempts')).toBe(2);
+      expect(sendDoorOpen).toHaveBeenCalledTimes(1);
+    });
+
+    it('B1: la variante solo cuenta y enlaza; no cambia la dirección de la pasada ni el method del intento', async () => {
+      await service.createDetection(
+        readPlate('reg-a', plate, 'unknown', 'none'),
+        orgId,
+      );
+      const [before] = await allAttempts();
+
+      await service.createDetection(
+        readPlate('reg-b', variant, 'entry', 'line'),
+        orgId,
+      );
+
+      const passage = await onlyPassage();
+      expect(passage.sightingCount).toBe(2);
+      expect(passage.direction).toBe('unknown');
+      expect(passage.directionSource).toBe('none');
+      const [after] = await allAttempts();
+      expect(after.method).toBe(before.method);
+    });
+    it('dos pasadas candidatas igual de recientes -> ambiguo, pasada nueva', async () => {
+      const seen = new Date(Date.now() - 5_000);
+      await insertPassage(`${plate.slice(0, -1)}Y`, seen);
+      await insertPassage(`${plate.slice(0, -1)}X`, seen);
+
+      await service.createDetection(readPlate('reg-a', plate), orgId);
+
+      expect(await count('vehicle_passages')).toBe(3);
+    });
+
+    it('dos candidatas con patentes distintas (aunque distinta recencia) -> ambiguo, pasada nueva', async () => {
+      await insertPassage(
+        `${plate.slice(0, -1)}Y`,
+        new Date(Date.now() - 20_000),
+      );
+      await insertPassage(
+        `${plate.slice(0, -1)}X`,
+        new Date(Date.now() - 5_000),
+      );
+
+      await service.createDetection(readPlate('reg-a', plate), orgId);
+
+      expect(await count('vehicle_passages')).toBe(3);
+    });
+    it('no cruza condominios', async () => {
+      const otherOrg = randomUUID();
+      const foreign = await insertPassage(variant, new Date());
+      await dataSource.query(
+        `UPDATE "vehicle_passages" SET "organizationId" = $1 WHERE "id" = $2`,
+        [otherOrg, foreign.id],
+      );
+      try {
+        await service.createDetection(readPlate('reg-a', plate), orgId);
+        expect(await count('vehicle_passages')).toBe(1);
+        expect((await onlyPassage()).plate).toBe(plate);
+      } finally {
+        await dataSource.query(
+          `DELETE FROM "vehicle_passages" WHERE "organizationId" = $1`,
+          [otherOrg],
+        );
+      }
+    });
+
+    it('concurrencia (solo registro): la patente y su variante a la vez -> una sola pasada', async () => {
+      await Promise.all([
+        service.createDetection(readPlate('reg-a', plate), orgId),
+        service.createDetection(readPlate('reg-b', variant), orgId),
+      ]);
+
+      expect(await count('vehicle_passages')).toBe(1);
+      expect(await count('access_attempts')).toBe(1);
+      expect(await count('plate_detections')).toBe(2);
+      expect((await onlyPassage()).sightingCount).toBe(2);
+    });
+
+    it('concurrencia (Permitido previo): variantes simultáneas desde cámaras de registro -> una pasada y ninguna apertura nueva', async () => {
+      await service.createDetection(readPlate('cam-a', plate), orgId);
+      sendDoorOpen.mockClear();
+
+      await Promise.all([
+        service.createDetection(readPlate('reg-b', variant), orgId),
+        service.createDetection(
+          readPlate('reg-c', `${plate.slice(0, -1)}Y`),
+          orgId,
+        ),
+        service.createDetection(readPlate('reg-d', variant), orgId),
+      ]);
+
+      expect(await count('vehicle_passages')).toBe(1);
+      expect(await count('access_attempts')).toBe(1);
+      expect(sendDoorOpen).not.toHaveBeenCalled();
+      expect((await onlyPassage()).sightingCount).toBe(4);
+    });
+
+    it('sin interbloqueo: promoción (saveAttempt) y claim de una variante entrelazados terminan los dos', async () => {
+      const unknown = { direction: 'unknown', source: 'none' } as const;
+      const newRead = (cameraId: string, value: string) =>
+        detections.create({
+          cameraId,
+          plate: value,
+          organizationId: orgId,
+        });
+      const c1 = await passages.claim(newRead('reg-1', plate), unknown, {
+        decidesAccess: false,
+      });
+      if (c1.kind !== 'leader') throw new Error('se esperaba líder');
+      const registered = await passages.saveAttempt(
+        attempts.create({
+          decision: 'Registrado',
+          reason: 'r',
+          method: 'm',
+          organizationId: orgId,
+          detection: c1.detection,
+        }),
+        c1.passage,
+        { decidesAccess: false, followsDirection: true, unknownMethod: 'm' },
+      );
+      expect(registered.written).toBe(true);
+      const c2 = await passages.claim(newRead('cam-1', plate), unknown, {
+        decidesAccess: true,
+      });
+      if (c2.kind !== 'leader') throw new Error('se esperaba promoción');
+
+      // Pausa a T1 justo después de actualizar el intento existente.
+      let pause = true;
+      let reached: () => void = () => undefined;
+      const reachedPromise = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const subscriber = {
+        listenTo: () => AccessAttempt,
+        afterUpdate: async () => {
+          if (pause) {
+            pause = false;
+            reached();
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+        },
+      };
+      dataSource.subscribers.push(subscriber as never);
+      try {
+        const t1 = passages.saveAttempt(
+          attempts.create({
+            decision: 'Permitido',
+            reason: 'visita',
+            method: 'Patente - Entrada',
+            organizationId: orgId,
+            detection: c2.detection,
+          }),
+          c2.passage,
+          { decidesAccess: true, followsDirection: false, unknownMethod: 'm' },
+        );
+        await reachedPromise;
+        const t2 = passages.claim(
+          newRead('reg-2', variant),
+          { direction: 'entry', source: 'line' },
+          { decidesAccess: false },
+        );
+
+        const [saved, variantClaim] = await Promise.all([t1, t2]);
+
+        expect(saved.written).toBe(true);
+        expect(variantClaim.kind).toBe('sighting');
+        expect(await count('vehicle_passages')).toBe(1);
+        expect((await allAttempts()).map((a) => a.decision)).toEqual([
+          'Permitido',
+        ]);
+      } finally {
+        dataSource.subscribers.splice(
+          dataSource.subscribers.indexOf(subscriber as never),
+          1,
+        );
+      }
+    });
+    it('LPR_PASSAGE_FUZZY_SECONDS=0 desactiva la agrupación por variante', async () => {
+      const disabled = new VehiclePassagesService(dataSource, {
+        get: (key: string) =>
+          key === 'LPR_PASSAGE_FUZZY_SECONDS' ? '0' : undefined,
+      } as unknown as ConfigService);
+      Object.assign(service, { passages: disabled });
+
+      await service.createDetection(readPlate('reg-a', plate), orgId);
+      await service.createDetection(readPlate('reg-b', variant), orgId);
+
+      expect(await count('vehicle_passages')).toBe(2);
     });
   });
 });

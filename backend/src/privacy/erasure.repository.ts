@@ -255,7 +255,11 @@ export function createErasureTransaction(
           `SELECT d."id", d."full_frame_path" AS "fullFramePath"
            FROM "plate_detections" d
            WHERE d."organizationId" = $1 AND d."anonymizedAt" IS NULL
-             AND (${plateKeySql('d."plate"')} = $2 OR ${plateKeySql('d."plate_raw"')} = $2)
+             AND (${plateKeySql('d."plate"')} = $2 OR ${plateKeySql('d."plate_raw"')} = $2
+               OR (d."meta" ->> 'plate_variant_of_passage') IS NOT NULL AND d."passageId" IN (
+                 SELECT p."id" FROM "vehicle_passages" p
+                 WHERE p."organizationId" = $1 AND ${plateKeySql('p."plate"')} = $2)
+             )
              AND ${scope === 'erasable' ? 'NOT ' : ''}${DETECTION_PENDING_SQL}
            ORDER BY d."createdAt" LIMIT $3`,
           [request.organizationId, request.key, limit],
@@ -288,6 +292,10 @@ export function createErasureTransaction(
            WHERE p."organizationId" = $1 AND p."anonymizedAt" IS NULL
              AND ${plateKeySql('p."plate"')} = $2
              AND NOT EXISTS (SELECT 1 FROM "access_attempts" a WHERE a."passageId" = p."id" AND a."decision" = 'Pendiente')
+             -- Mientras queden lecturas variante sin anonimizar (solicitud truncada
+             -- por el tope por categoría) la pasada sigue en claro: es lo que
+             -- permite encontrarlas en la siguiente corrida.
+             AND NOT EXISTS (SELECT 1 FROM "plate_detections" d WHERE d."passageId" = p."id" AND d."anonymizedAt" IS NULL AND (d."meta" ->> 'plate_variant_of_passage') IS NOT NULL)
            RETURNING 1
          ) SELECT count(*)::int AS "affected" FROM affected`,
         [request.organizationId, request.key, MASKED_PLATE],

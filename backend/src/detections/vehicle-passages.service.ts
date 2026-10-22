@@ -2,9 +2,17 @@ import { randomUUID } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, type EntityManager, In, MoreThanOrEqual } from 'typeorm';
+import {
+  DataSource,
+  type EntityManager,
+  In,
+  IsNull,
+  MoreThanOrEqual,
+  Raw,
+} from 'typeorm';
 import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import {
+  parseLprPassageFuzzySeconds,
   parseLprPassageOrphanSeconds,
   parseLprPassageReverseMinSeconds,
   parseLprPassageWindowSeconds,
@@ -14,6 +22,10 @@ import { maskPlate } from '../common/privacy/pii-mask';
 import { AccessAttempt } from './entities/access-attempt.entity';
 import { REGISTERED_ACCESS_DECISION } from './access-decision';
 import { PlateDetection } from './entities/plate-detection.entity';
+import {
+  differsByOneSubstitution,
+  directionsCompatibleForVariant,
+} from './plate-variant';
 import { VehiclePassage } from './entities/vehicle-passage.entity';
 import {
   methodForDirection,
@@ -138,7 +150,15 @@ export const MAX_SIGHTINGS_PER_PASSAGE = 10;
 
 /** Cuántas pasadas abiertas se consideran al buscar una compatible. */
 const OPEN_PASSAGES_CONSIDERED = 5;
+/** Cuántas pasadas recientes del condominio se traen al buscar una variante. */
+const FUZZY_CANDIDATES_CONSIDERED = 20;
 const LOCK_NAMESPACE = 'vigilia.lpr.passage:';
+/**
+ * Segunda clave del lock a nivel de condominio de la búsqueda difusa. Lleva
+ * `~`, que una patente normalizada (alfanumérica) nunca contiene: no puede
+ * coincidir con la clave de ninguna patente.
+ */
+const FUZZY_LOCK_KEY = '~fuzzy';
 
 /**
  * Pasadas de vehículos (plan dirección + pasadas multicámara, E6).
@@ -157,6 +177,20 @@ const LOCK_NAMESPACE = 'vigilia.lpr.passage:';
  * `int4` (condominio, patente) en vez de un solo `bigint`: otros condominios
  * nunca comparten clave y una colisión de hash solo serializa de más, jamás
  * deja pasar dos aperturas.
+ *
+ * Variantes de OCR (lecturas de la misma patente con UN carácter distinto
+ * entre cámaras): la búsqueda cruza patentes, así que el lock por patente no
+ * basta. ORDEN DE LOCKS (único en todo el servicio): 1) lock de condominio de
+ * la búsqueda difusa (`hashtext(condominio), hashtext('~fuzzy')`), 2) lock de
+ * la patente entrante y 3) solo si hay una variante candidata, lock de la
+ * patente DESTINO (y se relee la pasada). Solo `claim` toma el de condominio
+ * y puede tener dos de patente a la vez, y como todas las `claim` se
+ * serializan por el de condominio, entre ellas no hay ciclos. `saveAttempt`,
+ * `release` y `demote` toman un único lock de patente y nunca esperan otro
+ * advisory lock, así que una `claim` que espera la patente destino solo espera
+ * a que esas transacciones terminen. La lectura exacta y su variante se
+ * serializan: la segunda ve la pasada que la primera confirmó. Solo una cámara
+ * de solo registro puede sumarse como variante.
  */
 @Injectable()
 export class VehiclePassagesService {
@@ -164,6 +198,8 @@ export class VehiclePassagesService {
   private readonly windowMs: number;
   private readonly reverseMinMs: number;
   private readonly orphanMs: number;
+  /** 0 = búsqueda de variantes desactivada. */
+  private readonly fuzzyMs: number;
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -181,6 +217,12 @@ export class VehiclePassagesService {
       parseLprPassageOrphanSeconds(
         configService.get<string>('LPR_PASSAGE_ORPHAN_SECONDS'),
       ) * 1000;
+    this.fuzzyMs = Math.min(
+      parseLprPassageFuzzySeconds(
+        configService.get<string>('LPR_PASSAGE_FUZZY_SECONDS'),
+      ) * 1000,
+      this.windowMs,
+    );
   }
 
   /**
@@ -204,6 +246,10 @@ export class VehiclePassagesService {
       throw new Error('La detección no tiene condominio: no se puede agrupar');
     }
     return this.dataSource.transaction(async (manager) => {
+      // Orden de locks: condominio (difuso) y luego patente. Ver la doc de la clase.
+      if (this.fuzzyMs > 0) {
+        await this.lockFuzzy(manager, organizationId);
+      }
       await this.lock(manager, organizationId, detection.plate);
       const now = new Date();
       const open = await this.findCompatibleOpenPassage(
@@ -214,6 +260,32 @@ export class VehiclePassagesService {
         reading,
       );
       if (!open) {
+        const variant = await this.findVariantPassage(
+          manager,
+          organizationId,
+          detection,
+          now,
+          reading,
+          access,
+        );
+        if (variant) {
+          // Variante de OCR de una pasada abierta: evidencia pura (sin toma de
+          // liderazgo, intento, notificación ni apertura, y sin tocar la
+          // dirección de la pasada). Se guarda el id de la pasada y no su
+          // patente: no replica una patente en `meta`, que la retención no
+          // enmascara.
+          detection.meta = {
+            ...(detection.meta ?? {}),
+            plate_variant_of_passage: variant.id,
+          };
+          const touched = await this.addVariantSighting(
+            manager,
+            variant,
+            detection,
+            now,
+          );
+          return { kind: 'sighting', ...touched };
+        }
         const passage = await manager.save(
           VehiclePassage,
           manager.create(VehiclePassage, {
@@ -490,6 +562,144 @@ export class VehiclePassagesService {
       'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
       [`${LOCK_NAMESPACE}${organizationId}`, plate],
     );
+  }
+
+  private async lockFuzzy(
+    manager: EntityManager,
+    organizationId: string,
+  ): Promise<void> {
+    await manager.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+      [`${LOCK_NAMESPACE}${organizationId}`, FUZZY_LOCK_KEY],
+    );
+  }
+
+  /**
+   * Pasada abierta de OTRA patente que esta lectura puede sumar como variante
+   * de OCR (ver la doc de la clase). Corre bajo el lock del condominio y el de
+   * la patente entrante.
+   *
+   * SOLO una cámara de solo registro puede sumarse como variante: una cámara
+   * de acceso nunca (su lectura debe poder decidir por sí misma; si la
+   * primera lectura era errónea y se denegó, la correcta aún debe abrir).
+   *
+   * Candidatas: mismo condominio, última lectura dentro de
+   * `LPR_PASSAGE_FUZZY_SECONDS`, mismo largo, patente distinta y sin
+   * enmascarar; de ahí, las que difieren en un carácter y tienen dirección
+   * compatible. Si hay candidatas de patentes DISTINTAS es ambiguo y no se
+   * agrupa. Tampoco se agrupa si la cámara entrante ya tiene lecturas en esa
+   * pasada (una variante en la misma cámara es otro auto).
+   *
+   * Elegida la candidata se toma el lock de SU patente y se relee la pasada
+   * (puede haberse anonimizado, vencido o cambiado de dirección mientras se
+   * esperaba): si ya no cumple, camino normal.
+   */
+  private async findVariantPassage(
+    manager: EntityManager,
+    organizationId: string,
+    detection: PlateDetection,
+    now: Date,
+    incoming: DirectionReading,
+    access: ClaimAccess,
+  ): Promise<VehiclePassage | null> {
+    if (this.fuzzyMs <= 0 || access.decidesAccess) {
+      return null;
+    }
+    const since = new Date(now.getTime() - this.fuzzyMs);
+    const candidates = await manager.find(VehiclePassage, {
+      where: {
+        organizationId,
+        lastSeenAt: MoreThanOrEqual(since),
+        anonymizedAt: IsNull(),
+        // Misma longitud y patente distinta, filtrado en SQL; la distancia de
+        // Hamming se resuelve en TypeScript sobre un puñado de filas.
+        plate: Raw(
+          (column) => `${column} <> :plate AND length(${column}) = :length`,
+          {
+            plate: detection.plate,
+            length: detection.plate.length,
+          },
+        ),
+      },
+      order: { lastSeenAt: 'DESC' },
+      take: FUZZY_CANDIDATES_CONSIDERED,
+    });
+    const matches = candidates.filter((passage) =>
+      this.isVariantOf(passage, detection.plate, incoming, since),
+    );
+    const [best] = matches;
+    if (!best || matches.some((match) => match.plate !== best.plate)) {
+      return null;
+    }
+    // Lock de la patente destino (orden: condominio -> entrante -> destino) y
+    // relectura: lo decidido arriba pudo cambiar mientras se esperaba.
+    await this.lock(manager, organizationId, best.plate);
+    const fresh = await manager.findOne(VehiclePassage, {
+      where: { id: best.id, organizationId },
+    });
+    if (!fresh || !this.isVariantOf(fresh, detection.plate, incoming, since)) {
+      return null;
+    }
+    // Misma cámara que ya leyó la pasada: las variantes de un mismo auto en una
+    // cámara las resuelve el voto por vehículo del worker; aquí sería otro auto.
+    const sameCamera = await manager.exists(PlateDetection, {
+      where: { passageId: fresh.id, cameraId: detection.cameraId },
+    });
+    return sameCamera ? null : fresh;
+  }
+
+  /** ¿`passage` sigue abierta, sin enmascarar y es variante compatible de `plate`? */
+  private isVariantOf(
+    passage: VehiclePassage,
+    plate: string,
+    incoming: DirectionReading,
+    since: Date,
+  ): boolean {
+    return (
+      !passage.anonymizedAt &&
+      passage.lastSeenAt.getTime() >= since.getTime() &&
+      differsByOneSubstitution(passage.plate, plate) &&
+      directionsCompatibleForVariant(
+        readDirection(passage.direction, passage.directionSource).direction,
+        incoming.direction,
+      )
+    );
+  }
+
+  /**
+   * Suma una variante de OCR a la pasada: solo cuenta y enlaza (`sightingCount`,
+   * `lastSeenAt`, `passageId`). NO cambia la dirección de la pasada ni el
+   * `method` del intento: una variante no es la fuente autorizada de nada.
+   */
+  private async addVariantSighting(
+    manager: EntityManager,
+    open: VehiclePassage,
+    detection: PlateDetection,
+    now: Date,
+  ): Promise<{
+    detection: PlateDetection;
+    passage: VehiclePassage;
+    attempt: AccessAttempt | null;
+  }> {
+    await manager.update(
+      VehiclePassage,
+      { id: open.id },
+      { lastSeenAt: now, sightingCount: () => '"sightingCount" + 1' },
+    );
+    detection.passageId = open.id;
+    const saved = await manager.save(PlateDetection, detection);
+    const attempt = await manager.findOne(AccessAttempt, {
+      where: { passageId: open.id },
+    });
+    return {
+      detection: saved,
+      passage: {
+        ...open,
+        lastSeenAt: now,
+        sightingCount: open.sightingCount + 1,
+      },
+      attempt,
+    };
   }
 
   /**
