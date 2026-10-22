@@ -299,12 +299,26 @@ export async function anonymizeDetectionsWith(
             "full_frame_path" = CASE WHEN d."id" = ANY($2::uuid[]) THEN NULL ELSE d."full_frame_path" END,
             "anonymizedAt" = now()
         WHERE d."id" = ANY($1::uuid[]) AND d."anonymizedAt" IS NULL AND NOT ${DETECTION_HAS_PENDING_ATTEMPT_SQL}
-        RETURNING d."id", d."passageId"
+        RETURNING d."id", d."passageId", ((d."meta" ->> 'plate_variant_of_passage') IS NOT NULL) AS "isVariant"
       ), passages AS (
         UPDATE "vehicle_passages" p SET "plate" = $3, "anonymizedAt" = now()
         WHERE p."anonymizedAt" IS NULL
           AND ($4::int = 0 OR p."lastSeenAt" < now() - make_interval(secs => $4::int))
-          AND p."id" IN (SELECT u."passageId" FROM updated u WHERE u."passageId" IS NOT NULL)
+          AND p."id" IN (
+            SELECT u."passageId" FROM updated u
+            -- Supresión ($4 = 0): anonimizar una lectura VARIANTE no enmascara la
+            -- pasada, cuya patente puede ser de otra persona. La pasada del
+            -- titular se enmascara por sus propias lecturas y por anonymizePassages.
+            WHERE u."passageId" IS NOT NULL AND ($4::int > 0 OR NOT u."isVariant")
+          )
+          -- Supresión: tampoco si quedan lecturas variante por anonimizar (las
+          -- de esta misma sentencia no cuentan: ya vienen en updated).
+          AND ($4::int > 0 OR NOT EXISTS (
+            SELECT 1 FROM "plate_detections" v
+            WHERE v."passageId" = p."id" AND v."anonymizedAt" IS NULL
+              AND (v."meta" ->> 'plate_variant_of_passage') IS NOT NULL
+              AND v."id" NOT IN (SELECT u2."id" FROM updated u2)
+          ))
         RETURNING 1
       ), attempts AS (
         UPDATE "access_attempts" a SET "reason" = NULL, "residente_id" = NULL
