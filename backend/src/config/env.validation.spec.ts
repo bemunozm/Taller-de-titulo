@@ -10,6 +10,7 @@ import {
   LOG_LEVEL_VALUES,
   normalizeIp,
   parseBooleanFlag,
+  parseLprPassageFuzzySeconds,
   parseLprPassageOrphanSeconds,
   parseLprPassageReverseMinSeconds,
   parseLprPassageWindowSeconds,
@@ -641,6 +642,38 @@ describe.each([
     expect(parse('  ')).toBe(fallback);
     expect(parse(' 45 ')).toBe(45);
     expect(() => parse('601')).toThrow(new RegExp(name));
+  });
+});
+
+describe('LPR_PASSAGE_FUZZY_SECONDS', () => {
+  it.each(['0', '1', '30', ' 45 ', '600', '', '   '])(
+    'acepta LPR_PASSAGE_FUZZY_SECONDS=%p (0 la desactiva)',
+    (value) => {
+      expect(() =>
+        validateEnv(validEnv({ LPR_PASSAGE_FUZZY_SECONDS: value })),
+      ).not.toThrow();
+    },
+  );
+
+  it.each(['601', '-5', '1.5', 'treinta', '30s'])(
+    'rechaza LPR_PASSAGE_FUZZY_SECONDS=%p y nombra la variable',
+    (value) => {
+      expect(() =>
+        validateEnv(validEnv({ LPR_PASSAGE_FUZZY_SECONDS: value })),
+      ).toThrow(
+        /LPR_PASSAGE_FUZZY_SECONDS: debe ser un entero de segundos entre 0 y 600/,
+      );
+    },
+  );
+
+  it('parseLprPassageFuzzySeconds: default 30, 0 válido y fail-closed', () => {
+    expect(parseLprPassageFuzzySeconds(undefined)).toBe(30);
+    expect(parseLprPassageFuzzySeconds('  ')).toBe(30);
+    expect(parseLprPassageFuzzySeconds('0')).toBe(0);
+    expect(parseLprPassageFuzzySeconds(' 45 ')).toBe(45);
+    expect(() => parseLprPassageFuzzySeconds('601')).toThrow(
+      /LPR_PASSAGE_FUZZY_SECONDS/,
+    );
   });
 });
 

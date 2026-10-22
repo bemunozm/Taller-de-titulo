@@ -67,6 +67,13 @@ export class PlateDetection {
      * el backend.
      */
     direction_source_declared?: PassageDirectionSource;
+    /**
+     * Id de la pasada a la que se sumó esta lectura por ser una variante de OCR
+     * (patente de igual largo con un carácter distinto). Solo lo escribe el
+     * backend. Es un id y no la patente: así la retención/supresión no dejan una
+     * patente en claro en `meta`.
+     */
+    plate_variant_of_passage?: string;
     track?: {
       id: number;
       /** Id del track del VEHÍCULO (ByteTrack) en el worker; opcional. */
