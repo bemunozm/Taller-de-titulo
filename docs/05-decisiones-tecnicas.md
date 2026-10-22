@@ -340,3 +340,15 @@ La latencia máxima sube ~1 s por la espera de asentamiento; los ms por cuadro v
 - **TTL de 10 s.** Una pista con vehículo puede seguir abierta hasta 10 s después de la última lectura; no hay riesgo de re-emisión (el vehículo está consumido), pero sí de acumular lecturas de otro auto si se reutilizara el id (ByteTrack no lo hace).
 - **Costo de GPU/CPU** del seguimiento siempre activo (ver arriba).
 - **Plan de validación.** Repetir el replay con los clips nocturnos y los de Estacionamiento 03 que se están grabando, y ajustar `LOST_SECONDS`/`RELINK_SECONDS` si aparece fragmentación (una misma pasada, por ejemplo `XX**NN`, con dos ids).
+
+## D10 — Giro del recorte de la patente (`plateRotationDeg`) 🟢 *implementado (2026-10-22)*
+
+**Contexto.** En la cámara del portón (`porton-hd`) las patentes aparecen inclinadas ~15–30° y el OCR (`cct-s-v1-global`) espera patentes horizontales. El análisis de la mañana del 2026-10-22 mostró confusiones sistemáticas W→H, T→L, Z→2 y B→8.
+
+| # | Decisión | Elegido |
+|---|---|---|
+| 1 | Dónde se corrige | **Por cámara**, en `lprSettings.plateRotationDeg` (número, -45 a 45, decimales permitidos; ausente o 0 = sin giro; `null` se rechaza). Es la escena de cada cámara: Estacionamiento 03 no lo necesita y se queda en 0. Contrato en las cuatro capas (`contracts/lpr-settings.cases.json`, DTO del backend, zod del frontend, `apply_camera_settings` del worker). Un valor fuera de rango o no numérico no se aplica |
+| 2 | Qué se gira | Solo el **recorte que va al OCR** (`lpr/utils/images.py::rotated_plate_crop`): se rota una región alrededor de la caja (lado = su dimensión mayor, para no cortar esquinas) con `getRotationMatrix2D` y se recorta de vuelta a la extensión propia de la placa (se resuelve `W`, `H` de `bw = W·cos t + H·sin t`, `bh = W·sin t + H·cos t`). Positivo = antihorario (convención OpenCV). El **filtro de forma** y la **caja de evidencia** siguen usando la caja original del detector; `deg = 0` devuelve exactamente el recorte de siempre |
+| 3 | Valor para el portón | **15°**. Replay de las 24 pasadas de la mañana del portón (config del portón, GPU): 0° = 20 correctas / 0 incorrectas; 10° = 21 / 1; **15° = 22 / 0**; 20° = 23 / 1 (un sesgo H→R consistente, 12 de 14 votos). Se prefiere 0 incorrectas a una correcta más. Regresión: los 8 pasos diurnos siguen 8/8 con 0 incorrectas y dirección 8/8; Estacionamiento 03 con 0° no cambia (21/1/3 con el recorte vigente, 23/1/1 con `60,250,0.8,6`) |
+
+⚠️ **Riesgos.** Con una camioneta con logo en la caja el giro hizo legibles textos del logo como "patentes" (empate de votos que impidió la emisión en una pasada a 15°). El ángulo se calibró con 24 pasadas de una sola mañana; conviene revisarlo si cambia el montaje de la cámara. La herramienta de replay lo prueba con `--plate-rotation DEG`.

@@ -277,6 +277,7 @@ El worker recoge los cambios por pull, **sin reiniciar**, en ≤ `LPR_ZONES_REFE
 }
 ```
 
+- `plateRotationDeg` (opcional, -45 a 45, ausente o 0 = sin giro) gira el recorte de la patente antes del OCR, en grados antihorarios, para enderezar placas inclinadas (D10). En `porton-hd` se recomienda `15`; en Estacionamiento 03 se deja sin definir. Se prueba con `python -m lpr.tools.replay_eval --plate-rotation DEG`. El worker lo muestra en el resumen de configuración (`plate_rotation_deg`) cuando cambia.
 - `zone` es un ejemplo: la zona real se **dibuja en el lienzo** y debe cubrir el portón y la entrada, no la calle.
 - `directionLine` es la línea de la evaluación de D8 (salida = cruce hacia arriba en la imagen). También se dibuja en el lienzo, atravesando el carril que cubre la zona.
 - **Host del worker:** `LPR_DEVICE=cuda:0`, porque 1920 a 8 fps necesita GPU. `LPR_OCR_DEVICE` queda en `cpu`.

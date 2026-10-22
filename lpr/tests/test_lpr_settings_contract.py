@@ -37,6 +37,8 @@ def _expected_fields(settings):
             expected['detector_imgsz'] = value
         elif key == 'sampleFps':
             expected['sample_fps'] = float(value)
+        elif key == 'plateRotationDeg':
+            expected['plate_rotation_deg'] = float(value)
         elif key == 'confirmReads':
             expected['confirm_reads'] = value
         elif key == 'crop':
@@ -51,7 +53,8 @@ def _fields_of(key):
     if key == 'crop' or key.startswith('crop.'):
         return ['min_crop_w', 'max_crop_w', 'min_crop_ratio', 'max_crop_ratio']
     return {'detectorImgsz': ['detector_imgsz'], 'sampleFps': ['sample_fps', 'poll_interval'],
-            'confirmReads': ['confirm_reads'], 'directionLine': ['direction_line']}.get(key, [key])
+            'confirmReads': ['confirm_reads'], 'directionLine': ['direction_line'],
+            'plateRotationDeg': ['plate_rotation_deg']}.get(key, [key])
 
 
 def test_el_contrato_existe_y_tiene_casos():
@@ -149,3 +152,15 @@ def test_linea_ausente_o_nula_quita_la_linea(base):
     assert current.direction_line == good
     assert apply_camera_settings(base, {}, previous=current).direction_line is None
     assert apply_camera_settings(base, {'directionLine': None}, previous=current).direction_line is None
+
+
+def test_limites_del_giro_de_placa_del_contrato(base):
+    rule = CASES['rules']['plateRotationDeg']
+    assert base.plate_rotation_deg == 0.0
+    for deg in (rule['min'], rule['max'], 0, 12.5):
+        assert apply_camera_settings(base, {'plateRotationDeg': deg}).plate_rotation_deg == float(deg)
+    for bad in (rule['max'] + 0.1, rule['min'] - 0.1, '15', True, float('nan'), float('inf')):
+        assert apply_camera_settings(base, {'plateRotationDeg': bad}).plate_rotation_deg == 0.0
+    # un valor roto no pisa el resto de la config
+    cfg = apply_camera_settings(base, {'plateRotationDeg': 99, 'sampleFps': 4})
+    assert cfg.plate_rotation_deg == 0.0 and cfg.sample_fps == 4.0

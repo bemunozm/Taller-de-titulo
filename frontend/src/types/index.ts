@@ -302,6 +302,8 @@ const lprSettingsShape = {
     sampleFps: z.number().min(1).max(15).optional(),
     crop: lprCropSettingsSchema.optional(),
     confirmReads: z.number().int().min(1).max(10).optional(),
+    // Grados antihorarios para enderezar la patente antes del OCR (ausente = 0)
+    plateRotationDeg: z.number().min(-45).max(45).optional(),
 }
 
 /** Lectura (respuestas del backend): tolerante con claves extra. */

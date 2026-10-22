@@ -217,3 +217,87 @@ def test_deteccion_bloqueada_no_detecta_nada():
 def test_make_tracker_usa_la_participacion_minima_de_la_config():
     cfg = _cfg(confirm_reads=3, track_max_gap_seconds=1.5, direction='unknown', min_winner_share=0.6)
     assert pipeline.make_tracker(cfg).min_winner_share == 0.6
+
+
+# --- plate rotation (lprSettings.plateRotationDeg) -------------------------------------------
+
+import cv2  # noqa: E402
+
+from lpr.utils.images import rotated_plate_crop  # noqa: E402
+
+
+def _tilted_plate_frame(angle_deg, size=(400, 600)):
+    """Synthetic frame: a white 'plate' with two dark horizontal text bars, tilted
+    `angle_deg` counter-clockwise around (300, 200). Returns (frame, axis-aligned box)."""
+    plate = np.full((60, 180, 3), 255, dtype=np.uint8)
+    plate[12:22, 10:170] = 0
+    plate[38:48, 10:170] = 0
+    canvas = np.full((size[0], size[1], 3), 90, dtype=np.uint8)
+    canvas[200 - 30:200 + 30, 300 - 90:300 + 90] = plate
+    m = cv2.getRotationMatrix2D((300, 200), -angle_deg, 1.0)
+    tilted = cv2.warpAffine(canvas, m, (size[1], size[0]), flags=cv2.INTER_CUBIC, borderValue=(90, 90, 90))
+    mask = cv2.warpAffine(np.pad(np.ones((60, 180), np.uint8) * 255, ((170, 170), (210, 210))),
+                          m, (size[1], size[0]))
+    ys, xs = np.nonzero(mask > 127)
+    return tilted, (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+
+
+def _bar_tilt_deg(img):
+    """Tilt of the dark bars: angle of the principal axis of the dark pixels."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    ys, xs = np.nonzero(gray < 45)
+    pts = np.stack([xs, ys], axis=1).astype(np.float64)
+    pts -= pts.mean(axis=0)
+    evals, evecs = np.linalg.eigh(np.cov(pts.T))
+    vx, vy = evecs[:, 1]
+    ang = float(np.degrees(np.arctan2(-vy, vx)))    # image y points down
+    return ang - 180.0 if ang > 90 else ang + 180.0 if ang < -90 else ang   # axis, not direction
+
+
+def test_rotated_crop_with_zero_degrees_is_the_plain_crop():
+    frame, box = _tilted_plate_frame(20)
+    x1, y1, x2, y2 = box
+    assert np.array_equal(rotated_plate_crop(frame, box, 0), frame[y1:y2, x1:x2])
+    assert np.array_equal(rotated_plate_crop(frame, box, 0.0), frame[y1:y2, x1:x2])
+
+
+@pytest.mark.parametrize('angle', [15, 25, -20])
+def test_rotated_crop_levels_a_tilted_plate(angle):
+    frame, box = _tilted_plate_frame(angle)
+    x1, y1, x2, y2 = box
+    # sanity: the plain crop is visibly tilted, the rotated one is level
+    assert abs(_bar_tilt_deg(frame[y1:y2, x1:x2])) > 8
+    leveled = rotated_plate_crop(frame, box, angle)
+    assert abs(_bar_tilt_deg(leveled)) < 3
+    # the crop is back to roughly the plate's own extent (180x60) plus margins, not the AABB
+    h, w = leveled.shape[:2]
+    assert 160 <= w <= 215 and 50 <= h <= 78
+    assert w * h < (x2 - x1) * (y2 - y1)
+
+
+def test_rotated_crop_clamps_at_frame_borders():
+    frame, _ = _tilted_plate_frame(20)
+    for box in [(0, 0, 60, 30), (560, 370, 600, 400), (0, 360, 70, 400), (590, 0, 600, 10)]:
+        out = rotated_plate_crop(frame, box, 20)
+        assert out.ndim == 3 and out.size > 0
+    # degenerate (empty) box does not raise
+    assert rotated_plate_crop(frame, (50, 50, 50, 50), 20).size == 0
+
+
+def test_iter_plate_reads_rotates_the_ocr_crop_but_keeps_the_original_box():
+    frame, box = _tilted_plate_frame(20)
+    x1, y1, x2, y2 = box
+    seen = []
+
+    class _Spy(_Ocr):
+        def recognize(self, arr):
+            seen.append(arr.shape)
+            return super().recognize(arr)
+
+    cfg = _cfg(min_crop_ratio=0.5, plate_rotation_deg=20)
+    (rot,) = iter_plate_reads(frame, [_det(*box)], _Spy(), cfg)
+    (plain,) = iter_plate_reads(frame, [_det(*box)], _Spy(), _cfg(min_crop_ratio=0.5))
+    assert rot.box == plain.box == (x1, y1, x2, y2)       # evidence box unchanged
+    assert (rot.crop_w, rot.crop_h) == (plain.crop_w, plain.crop_h)   # shape filter on the original box
+    assert seen[0] != seen[1]                              # but the OCR got another crop
+    assert seen[1] == (y2 - y1, x2 - x1, 3)

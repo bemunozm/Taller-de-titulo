@@ -337,3 +337,29 @@ describe('UpdateLprSettingsDto.directionLine', () => {
     );
   });
 });
+
+describe('UpdateLprSettingsDto.plateRotationDeg', () => {
+  it.each([15, -12.5, 0, 45, -45])('acepta %p y lo persiste', async (deg) => {
+    const dto = await validate({ plateRotationDeg: deg });
+
+    expect(toStoredLprSettings(dto)).toEqual({ plateRotationDeg: deg });
+  });
+
+  it('un giro 0 explícito se conserva (no equivale a ausente)', async () => {
+    const dto = await validate({ action: 'register', plateRotationDeg: 0 });
+
+    expect(toStoredLprSettings(dto)).toEqual({
+      action: 'register',
+      plateRotationDeg: 0,
+    });
+  });
+
+  it.each([46, -46, 45.01, '15', null, Number.NaN, true])(
+    'rechaza %p',
+    async (deg) => {
+      await expect(validate({ plateRotationDeg: deg })).rejects.toThrow(
+        BadRequestException,
+      );
+    },
+  );
+});

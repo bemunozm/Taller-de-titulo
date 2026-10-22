@@ -501,6 +501,7 @@ def build_cfg(args: argparse.Namespace) -> Any:
         'direction': args.direction, 'zone': parse_zone(args.zone),
         'direction_line': parse_direction_line(args.direction_line),
         'min_det_conf': args.det_conf,
+        'plate_rotation_deg': args.plate_rotation,
     }
     if args.zone_file:
         overrides['zone'] = json.loads(Path(args.zone_file).read_text(encoding='utf-8'))
@@ -518,7 +519,8 @@ def format_report(label: str, cfg: Any, sc: Score, ms_frame: float, n_frames: in
         f'== {label}: imgsz={cfg.detector_imgsz} fps={cfg.sample_fps:g} N={cfg.confirm_reads} '
         f'crop=[{cfg.min_crop_w},{cfg.max_crop_w},{cfg.min_crop_ratio:g},{cfg.max_crop_ratio:g}] '
         f'zona={"si" if cfg.zone else "no"} direccion={cfg.direction} '
-        f'linea={"si" if getattr(cfg, "direction_line", None) else "no"}',
+        f'linea={"si" if getattr(cfg, "direction_line", None) else "no"} '
+        f'giro_placa={getattr(cfg, "plate_rotation_deg", 0.0):g}',
         f'   reales={sc.n_real}  correctas={sc.correct}  INCORRECTAS={sc.wrong}  sin_lectura={sc.missed}  '
         f'emisiones_extra={sc.extra}  (emisiones totales={n_emissions})',
         f'   latencia (s desde inicio de la pasada): '
@@ -552,6 +554,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--device', help='detector device (cuda:0, cpu); default: ultralytics auto')
     ap.add_argument('--ocr-device', default=None, help='OCR device (default: LPR_OCR_DEVICE)')
     ap.add_argument('--det-conf', type=float, default=0.3, help='min detector confidence (default 0.3)')
+    ap.add_argument('--plate-rotation', type=float, default=0.0, metavar='DEG',
+                    help='degrees (-45..45, counter-clockwise) to rotate the plate crop before the OCR (default 0)')
     ap.add_argument('--margin', type=float, default=1.0, help='seconds of tolerance around each GT window')
     ap.add_argument('--only', help='only clips whose name contains this text')
     ap.add_argument('--label', default='config')

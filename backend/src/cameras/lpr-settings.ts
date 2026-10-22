@@ -18,6 +18,9 @@ export type LprExitSide = 'left' | 'right';
 export const LPR_EXIT_SIDES: readonly LprExitSide[] = ['left', 'right'];
 /** Longitud mínima (normalizada) de la línea de dirección. */
 export const MIN_DIRECTION_LINE_LENGTH = 0.05;
+/** Rango del giro del recorte de placa (grados). */
+export const MIN_PLATE_ROTATION_DEG = -45;
+export const MAX_PLATE_ROTATION_DEG = 45;
 export const LPR_DETECTOR_IMGSZ_VALUES = [640, 960, 1280, 1920] as const;
 
 export interface LprCropSettings {
@@ -56,6 +59,12 @@ export interface LprSettings {
   confirmReads?: number;
   /** Línea de cruce para medir la dirección (entrada/salida). */
   directionLine?: LprDirectionLine;
+  /**
+   * Grados (-45..45) que se gira el recorte de la placa en sentido
+   * antihorario antes del OCR, para enderezar placas inclinadas. Ausente o 0 =
+   * sin giro.
+   */
+  plateRotationDeg?: number;
 }
 
 /** Respuesta de `GET /workers/cameras/:id/lpr-settings` (contrato con el worker). */
