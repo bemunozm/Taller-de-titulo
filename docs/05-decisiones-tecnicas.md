@@ -274,3 +274,61 @@ Ninguna cámara mira hacia afuera del portón (D6), así que `porton-hd` solo pu
 - **Re-registro con `CAMERAS_STRICT_REGISTRATION=true`.** La rama estricta del `update` (transacción con MediaMTX) no notifica al manager, así que E10 solo cubre la rama por defecto.
 - **Patente mal leída en una cámara.** Crea una pasada aparte con la patente equivocada. No abre dos veces la misma patente, pero el voto N=3 de D7 sigue siendo la defensa contra lecturas erróneas.
 - **Supresión inmediata con la pasada abierta.** Si se suprime una patente mientras su pasada sigue dentro de la ventana, se anonimizan las detecciones pero no `vehicle_passages.plate`, y como la detección ya quedó anonimizada, ninguna corrida posterior vuelve a esa pasada. Es un caso borde (ventana de 60 s), pendiente de cerrar con un barrido propio de pasadas.
+
+---
+
+## D9 — Voto de patente por vehículo y seguimiento robusto 🟢 *implementado (2026-10-21)*
+**Contexto.** En vivo, un mismo vehículo (un solo id de ByteTrack) produjo **dos emisiones con 9 s de diferencia**, con textos que diferían en el último carácter (una lectura errónea y luego la correcta), cada una con `reads=3 votes=3 share=1.0`. La causa: la unidad de voto de [D7](#d7--lpr-robusto-por-cámara--implementado-2026-10-20-falta-gate-completo-y-pr)/[D8](#d8--dirección-por-trayectoria-del-vehículo-y-pasadas-multicámara--implementado-2026-10-21-falta-gate-completo-y-pr) era la pista de la **patente**, que se cerraba tras `LPR_TRACK_MAX_GAP_SECONDS` (1,5 s) sin verla. La siguiente lectura del mismo auto abría una pista nueva que votaba sola y emitía otra vez, y el dedupe del worker (`emitted_cache`) compara solo por texto exacto, así que no lo cubría.
+
+**Decisión** (plan aprobado, V2–V10):
+
+| # | Tema | Cómo quedó |
+|---|---|---|
+| V2 | Seguimiento siempre activo | El `VehicleTracker` corre mientras el modelo esté disponible, con o sin línea de dirección (solo se apaga si la detección está bloqueada). La línea sigue sirviendo solo para la dirección. Sin modelo se degrada como antes (un log) y no hay voto por vehículo |
+| V3 | Configuración propia de ByteTrack | `lpr/processor/bytetrack_vigilia.yaml` con los umbrales explícitos (los defaults de ultralytics). `track_buffer = ceil(LPR_VEHICLE_LOST_SECONDS × sample_fps)` (mínimo 1): se resuelve al iniciar y se escribe a un yaml temporal (nombre por contenido, escritura atómica) que se pasa en `tracker=`. Si cambia el `track_buffer` efectivo (`sample_fps`), el worker **no recarga el modelo**: reconfigura **en sitio** el tracker de ultralytics (`track_buffer`, `max_time_lost` y `reset()`, sin tocar los callbacks: borrar `predictor.trackers` registraría otro par y ByteTrack avanzaría 2 cuadros por llamada). Los ids canónicos salen de un contador interno monotónico (nunca repite, ni tras un reinicio); las pistas confirmadas pendientes se emiten y el resto se cierra. El yaml vive en `<tmp>/vigilia-lpr/` (0700), escrito con `mkstemp` (0600) y `os.replace` atómico |
+| V4 | Reenganche de ids | ByteTrack puede abrir un id nuevo para el mismo auto (oclusión, baja confianza). Si nace un id crudo y otro se perdió hace ≤ `LPR_VEHICLE_RELINK_SECONDS` (2 s), el nuevo **hereda el id canónico** si su centro cae a ≤ 1 diagonal de la última caja del perdido, el área está entre 0,5× y 2× y la clase coincide. Además el borde inferior de la caja nueva debe caer a ≤ 1 diagonal de la posición **predicha** del perdido (última posición + velocidad media × tiempo perdido); solo cuenta la predicha, a propósito: un auto que frena justo antes de perderse puede no reengancharse y dar una segunda emisión (si el texto coincide la filtra el dedupe por texto), y se prefiere eso a mezclar los votos de dos autos (igual con el cambio de id de un vehículo ya consumido). Guardas: nunca se hereda un id que sigue vivo en el mismo cuadro ni uno cuyo vehículo ya **emitió** (consumido: el auto que aparece donde se fue otro no es el mismo), gana el candidato más cercano y un id perdido se hereda **una sola vez**. Dos ids crudos vivos en un cuadro nunca comparten canónico: si el viejo reaparece, lo conserva el heredero y el viejo recibe un canónico nuevo del contador Trayectorias, asociación y voto usan ids canónicos; se guardan los ids crudos por canónico como telemetría |
+| V5 | Tolerancia de asociación | Si el centro de la patente no cae en ninguna caja de vehículo, se reintenta con las cajas ampliadas 10 % por lado. Las reglas de desempate no cambian |
+| V6 | Una pista por vehículo | Una lectura con vehículo se acumula en **la** pista de ese vehículo, que no se cierra por el hueco de la patente mientras el vehículo esté vivo (siga en `paths`, es decir, sin expirar por el TTL de 10 s). Una pista que nació sin vehículo y luego recibe uno lo adopta o, si ya existe la del vehículo, se fusiona en ella. Las lecturas sin vehículo conservan la asociación por distancia y el cierre por hueco |
+| V7 | Vehículo consumido | Tras emitir, el vehículo queda **consumido**: sus lecturas posteriores (también pasado el hueco) nunca emiten otra vez. Siguen votando solo para avisar: si cambia el ganador con ≥ N votos y participación ≥ 0,6 se registra un WARNING *posible lectura corregida* (patentes enmascaradas) y no se reenvía nada |
+| V8 | Texto decidido al emitir | N lecturas siguen siendo la puerta para confirmar que hay patente. Si al confirmar la participación del ganador es < 0,8 y el vehículo sigue vivo, se espera hasta `LPR_VOTE_SETTLE_SECONDS` (1 s) por más lecturas (se emite antes si la participación llega a 0,8). Convive con la espera de dirección de D8: se emite cuando ambas se cumplen o vencen sus plazos. La evidencia (cuadro y caja) es la de la mejor lectura del texto **final** |
+| V9 | Sin dedupe por texto parecido | El `emitted_cache` por texto no cambia. Un dedupe difuso (distancia de edición) fusionaría patentes distintas de autos distintos que difieren en un carácter, justo lo que la regla de 120 s por texto exacto evita; el caso real se corrige en el origen, con una sola emisión por vehículo |
+| V10 | Telemetría | `meta.track` suma `vehicle_uid` (canónico), `vehicle_ids` (crudos), `reads` (total del vehículo) y `settled` (si usó la espera). Las claves previas no cambian |
+
+**Congelar el texto tras el asentamiento** (`LPR_VOTE_FREEZE_AFTER_SETTLE`, por defecto `true`). El diseño inicial dejaba votar también las lecturas de la espera de dirección. En el replay con la zona del portón esa variante dio **1 patente incorrecta**: el OCR leía bien (W) en las primeras lecturas y se sesgaba (H) en las tardías, con el auto más cerca; ganó el texto equivocado con 10 de 16 votos. Antes, el candidato quedaba fijo al confirmar. Con el freeze, el texto se decide con las lecturas hasta la confirmación más la ventana de asentamiento, y las de la espera de dirección solo alimentan el WARNING de corrección. Con `false` votan todas.
+
+**Evidencia** (replay de las 8 pasadas del portón, 1920 / 8 fps / N=3, misma línea y zona de [D8](#d8--dirección-por-trayectoria-del-vehículo-y-pasadas-multicámara--implementado-2026-10-21-falta-gate-completo-y-pr)):
+
+| | T1 base (sin zona) | D9 con zona, votan todas las lecturas | **D9 con zona + freeze (defecto)** |
+|---|---|---|---|
+| Patentes correctas / incorrectas | 8/8 / 0 | 7/8 / **1** | **8/8 / 0** |
+| Dirección correcta | 8/8 | 7/7 | **8/8** |
+| Emisiones duplicadas | 0 | 0 | **0** |
+| Pasadas con un solo id | 8/8 | 8/8 | **8/8** |
+| Lecturas asociadas a un vehículo | 97,8 % | 100 % | **100 %** |
+| Latencia mediana / máx. | 8,2 / 9,5 s | 7,9 / 9,2 s | **8,2 / 10,5 s** |
+| ms por cuadro (de ellos, tracker) | 28,6 (12,5) | 35,0 (13,4) | **42,4 (16,4)** |
+
+La latencia máxima sube ~1 s por la espera de asentamiento; los ms por cuadro varían con la carga de la GPU y no son del todo comparables entre corridas. Sin zona, D9 también da 8/8.
+
+**Barrido de umbrales de ByteTrack** (con zona y freeze, 3 configuraciones): los defaults (`track_high_thresh` 0,5 / `new_track_thresh` 0,6) dan 8/8 sin fragmentación; `0,4 / 0,5` da lo mismo pero crea muchos más ids fantasma (ids hasta 33 frente a 18), sin beneficio; `0,3 / 0,4` **regresa**: una pasada se fragmenta en 2 ids y emite un duplicado. Se dejan los defaults.
+
+**Variables de entorno nuevas** (solo `lpr/settings.py`, no por cámara; documentadas en `lpr/.env.example`):
+
+| Variable | Defecto | Efecto |
+|---|---|---|
+| `LPR_VEHICLE_LOST_SECONDS` | 3,0 | Segundos que ByteTrack conserva un vehículo perdido (`track_buffer = ceil(s × sample_fps)`) |
+| `LPR_VEHICLE_RELINK_SECONDS` | 2,0 (0 = apagado) | Ventana para que un id nuevo cercano herede el canónico de uno perdido |
+| `LPR_VOTE_SETTLE_SECONDS` | 1,0 (0 = apagado) | Espera máxima por más lecturas si la participación al confirmar es < 0,8 |
+| `LPR_VOTE_FREEZE_AFTER_SETTLE` | `true` | El texto se decide sin las lecturas de la espera de dirección |
+
+**Consecuencias:**
+- ✅ Una emisión por vehículo aunque la patente desaparezca más de 1,5 s; ya no depende de que el dedupe por texto coincida.
+- ✅ Sin regresión de patentes ni de dirección sobre las 8 pasadas, con 100 % de lecturas asociadas.
+- ⚠️ **Costo.** El modelo de vehículos corre ahora en todas las cámaras, no solo en las que tienen línea: ~13–18 ms por cuadro extra en la GPU. En CPU o RPi hay que medirlo en el benchmark de la Fase 5 (D5).
+- ⚠️ **Un error de lectura temprano ya no se corrige.** Si las N primeras lecturas concuerdan mal (participación 1,0) se emite ese texto; solo queda el WARNING. El asentamiento ayuda únicamente cuando la participación inicial es < 0,8.
+
+**Riesgos y deuda:**
+- **Noche y segunda cámara sin validar.** Todo el replay es de día y de un ángulo. Los valores de reenganche (2 s, 1 diagonal) y `LOST_SECONDS` son los de partida, no calibrados con tráfico denso ni con baja visibilidad.
+- **TTL de 10 s.** Una pista con vehículo puede seguir abierta hasta 10 s después de la última lectura; no hay riesgo de re-emisión (el vehículo está consumido), pero sí de acumular lecturas de otro auto si se reutilizara el id (ByteTrack no lo hace).
+- **Costo de GPU/CPU** del seguimiento siempre activo (ver arriba).
+- **Plan de validación.** Repetir el replay con los clips nocturnos y los de Estacionamiento 03 que se están grabando, y ajustar `LOST_SECONDS`/`RELINK_SECONDS` si aparece fragmentación (una misma pasada, por ejemplo `XX**NN`, con dos ids).

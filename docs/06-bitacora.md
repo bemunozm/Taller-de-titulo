@@ -4,6 +4,25 @@ Registro cronológico de conversaciones, decisiones y avances. Lo más reciente 
 
 ---
 
+## 2026-10-21 (tarde) — Voto de patente por vehículo y hallazgo nocturno
+
+**Problema en vivo**
+- Un mismo vehículo (un solo id de ByteTrack) generó **dos emisiones con 9 s de diferencia**, con textos que diferían en el último carácter. La pista de la patente se cerraba tras 1,5 s sin verla y la lectura siguiente abría otra que emitía sola; el dedupe por texto no lo cubría.
+
+**Hecho** (decisión [D9](05-decisiones-tecnicas.md#d9--voto-de-patente-por-vehículo-y-seguimiento-robusto--implementado-2026-10-21))
+- **Worker:** voto por vehículo (una pista por id canónico; vehículo consumido tras emitir, con WARNING si cambia el ganador), seguimiento de vehículos siempre activo, yaml propio de ByteTrack con `track_buffer` en segundos × fps, reenganche de ids con guardas, tolerancia del 10 % en la asociación patente → vehículo, espera de asentamiento de 1 s y `meta.track` con `vehicle_uid`, `vehicle_ids` y `settled`. Variables nuevas: `LPR_VEHICLE_LOST_SECONDS`, `LPR_VEHICLE_RELINK_SECONDS`, `LPR_VOTE_SETTLE_SECONDS` y `LPR_VOTE_FREEZE_AFTER_SETTLE`.
+- **Replay (8 pasadas del portón):** dejar votar todas las lecturas daba 1 patente incorrecta (el OCR se sesga cuando el auto está más cerca); congelar el texto tras el asentamiento, ahora el defecto, deja 8/8, 0 incorrectas, 0 duplicados y un solo id por pasada. El barrido de umbrales de ByteTrack no mejoró nada y una configuración regresó: se quedan los defaults.
+- **Tests:** 521 en `lpr/tests`, con mutaciones sobre las reglas nuevas.
+
+**Hallazgo nocturno (23:15)**
+- **Dos autos no se leyeron.** En el **Portón**, los focos tapan la patente de frente. En **Estacionamiento 03**, la patente trasera sale barrida o lavada por la exposición nocturna.
+- **Palanca:** obturación máxima corta y **HLC** (compensación de luces altas) en la cámara. El NVR expone HLC y WDR, pero no el obturador.
+- **Pendiente:** visto bueno de la administración para tocar la configuración de las cámaras.
+
+**Próximo paso:** validar D9 con los clips nocturnos y de Estacionamiento 03 que se están grabando.
+
+---
+
 ## 2026-10-21 — Dirección por trayectoria del vehículo y pasadas multicámara
 
 **Stack local con cámaras reales**
