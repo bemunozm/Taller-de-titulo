@@ -58,6 +58,16 @@ CORRECTION_MIN_SHARE = 0.6
 # (the DIRECTION_* constants live in `utils/direction.py` and are re-exported here).
 
 
+def _vote_priority(obs: "TrackObservation") -> Tuple[int, float, float]:
+    """Sort key (ascending = first to act) of the boxes of one frame: a valid text beats
+    no text, then the higher OCR confidence, then the higher detection confidence.
+    A box without a valid text never displaces one with it; among those the detector
+    confidence alone decides (their OCR confidence is noise)."""
+    if obs.text:
+        return (0, -float(obs.ocr_conf), -float(obs.det_conf))
+    return (1, 0.0, -float(obs.det_conf))
+
+
 @dataclass
 class TrackObservation:
     """One plate box seen in a frame.
@@ -264,12 +274,14 @@ class PlateTracker:
         self._tracks = open_tracks
 
         claimed: set = set()  # a track takes at most one box per frame
-        # Strongest detections first so a weak box cannot steal a track.
-        for obs in sorted(observations, key=lambda o: -o.det_conf):
+        # Best reading first so a weak box cannot steal a track, and so the one that
+        # votes for a vehicle (only one read per frame and vehicle) is the best READ,
+        # not the most confident DETECTION: a LED box or a logo can out-detect the plate.
+        for obs in sorted(observations, key=_vote_priority):
             if obs.vehicle_id is not None:
                 owner = self._vehicle_track(obs.vehicle_id)
                 if owner is not None and owner.id in claimed:
-                    continue  # one read per frame and vehicle: the strongest box already voted
+                    continue  # one read per frame and vehicle: the best read already voted
             track = self._associate(obs, t, claimed)
             if track is None:
                 track = _Track(id=self._next_id, box=obs.box, last_seen=t)

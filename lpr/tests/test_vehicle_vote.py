@@ -105,6 +105,57 @@ def test_un_segundo_cuadro_del_mismo_vehiculo_no_vota_dos_veces():
     assert em.reads == 3
 
 
+def test_caja_led_sin_texto_con_det_alta_no_le_gana_a_la_patente_real():
+    tr = tracker()
+    out = []
+    for i in range(3):
+        led = obs(7, None, cx=560, det=0.80, ocr=0.0)
+        plate = obs(7, A, cx=500, det=0.40, ocr=0.7)
+        out += tr.update([led, plate], now=0.1 * i, paths=alive(7))
+    (em,) = out
+    assert em.text == A and em.reads == 3
+
+
+def test_caja_led_con_texto_de_ocr_bajo_y_det_alta_no_le_gana_a_la_patente_real():
+    tr = tracker()
+    out = []
+    for i in range(3):
+        led = obs(7, 'CS5333', cx=560, det=0.80, ocr=0.35)
+        plate = obs(7, A, cx=500, det=0.40, ocr=0.8)
+        out += tr.update([led, plate], now=0.1 * i, paths=alive(7))
+    (em,) = out
+    assert em.text == A and em.reads == 3
+
+
+def test_dos_textos_validos_en_un_cuadro_vota_el_de_mayor_ocr_conf():
+    tr = tracker()
+    out = []
+    for i in range(3):
+        out += tr.update([obs(7, 'ZZ1234', cx=560, det=0.9, ocr=0.5), obs(7, A, cx=500, det=0.4, ocr=0.9)],
+                         now=0.1 * i, paths=alive(7))
+    (em,) = out
+    assert em.text == A and em.reads == 3
+
+
+def test_a_igual_ocr_conf_desempata_la_confianza_de_deteccion():
+    tr = tracker()
+    out = []
+    for i in range(3):
+        out += tr.update([obs(7, 'ZZ1234', cx=560, det=0.4, ocr=0.8), obs(7, A, cx=500, det=0.9, ocr=0.8)],
+                         now=0.1 * i, paths=alive(7))
+    (em,) = out
+    assert em.text == A
+
+
+def test_sin_texto_valido_en_el_cuadro_manda_la_deteccion_y_no_vota():
+    tr = tracker()
+    for i in range(5):
+        out = tr.update([obs(7, None, det=0.9, ocr=0.0), obs(7, None, cx=520, det=0.4, ocr=0.99)],
+                        now=0.1 * i, paths=alive(7))
+        assert out == []
+    assert tr.active_tracks == 1
+
+
 def test_pista_sin_vehiculo_que_luego_recibe_uno_lo_adopta_y_no_duplica():
     tr = tracker()
     tr.update([TrackObservation(box=box(500, 400), text=A, ocr_conf=0.9, det_conf=0.8)], now=0.0, paths=alive(7))
