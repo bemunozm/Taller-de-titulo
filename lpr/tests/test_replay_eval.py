@@ -117,3 +117,73 @@ def test_direccion_se_desglosa_por_fuente_y_distingue_equivocada_de_unknown():
     assert sc.direction_by_source == {
         'line': {'ok': 1, 'wrong': 0, 'unknown': 0}, 'width': {'ok': 0, 'wrong': 1, 'unknown': 0},
         'none': {'ok': 0, 'wrong': 0, 'unknown': 1}, 'motion': {'ok': 1, 'wrong': 0, 'unknown': 0}}
+
+
+# --- calidad del seguimiento de vehiculos --------------------------------
+def _rd(clip, t, text, vid):
+    return ev.ReadRecord(clip=clip, t=t, text=text, vehicle_id=vid)
+
+
+def test_edit_distance():
+    assert ev.edit_distance('BBCD12', 'BBCD12') == 0
+    assert ev.edit_distance('BBCD12', 'BBCD1Z') == 1
+    assert ev.edit_distance('BBCD12', 'BBCD') == 2
+    assert ev.edit_distance('', 'ABC') == 3
+
+
+def test_pasada_con_un_vehiculo_y_una_emision_es_ideal():
+    reads = [_rd('c1', 11, 'BBCD12', 3), _rd('c1', 12, 'BBCD12', 3), _rd('c1', 13, 'BBCD1Z', 3)]
+    rep = ev.track_quality(reads, [_em('c1', 13, 'BBCD12')], GT)
+    p = rep.passes[0]
+    assert (p.reads, p.vehicle_ids, p.assoc_rate, p.emissions, p.duplicates) == (3, [3], 1.0, 1, 0)
+    assert rep.mixed_ids == [] and rep.orphan_reads == 0
+
+
+def test_fragmentacion_y_duplicado_en_la_misma_pasada():
+    # el mismo auto cambia de id y emite dos textos a un caracter de distancia
+    reads = [_rd('c1', 11, 'BBCD12', 3), _rd('c1', 14, 'BBCD1Z', 9)]
+    rep = ev.track_quality(reads, [_em('c1', 12, 'BBCD12'), _em('c1', 15, 'BBCD1Z')], GT)
+    p = rep.passes[0]
+    assert p.vehicle_ids == [3, 9] and p.emissions == 2 and p.duplicates == 1
+
+
+def test_lectura_sin_vehiculo_baja_la_asociacion_y_cuenta_como_huerfana():
+    reads = [_rd('c1', 11, 'BBCD12', 3), _rd('c1', 12, 'BBCD12', None), _rd('c1', 300, 'ZZZZ99', None)]
+    rep = ev.track_quality(reads, [], GT)
+    assert rep.passes[0].assoc_rate == 0.5
+    assert (rep.total_reads, rep.orphan_reads, rep.matched_reads, rep.matched_orphans) == (3, 2, 2, 1)
+
+
+def test_id_mezclado_cuando_un_vehiculo_cubre_dos_pasadas():
+    reads = [_rd('c1', 12, 'BBCD12', 5), _rd('c1', 22, 'BKZT21', 5), _rd('c2', 12, 'PGHZ30', 5)]
+    rep = ev.track_quality(reads, [], GT)
+    assert rep.mixed_ids == [('c1', 5, 2)]  # el id 5 de c2 es de otro clip: no se mezcla
+
+
+def test_pasada_sin_lecturas_tiene_assoc_none_y_texto_lejano_no_cuenta():
+    rep = ev.track_quality([_rd('c1', 21, 'XXXXXX', 1)], [_em('c1', 21, 'XXXXXX')], GT)
+    assert all(p.reads == 0 and p.assoc_rate is None and p.emissions == 0 for p in rep.passes)
+    assert rep.passes[1].vehicle_ids == []
+
+
+def test_atribucion_prefiere_el_texto_mas_cercano_si_las_ventanas_se_solapan():
+    gt = [ev.GtRow('c', 10, 20, 'AAAA11', 'alta'), ev.GtRow('c', 15, 25, 'AAAA12', 'alta')]
+    rep = ev.track_quality([_rd('c', 17, 'AAAA12', 1)], [], gt)
+    assert [p.reads for p in rep.passes] == [0, 1]
+
+
+def test_reporte_de_tracking_enmascara_patentes_y_serializa():
+    rep = ev.track_quality([_rd('c1', 11, 'BBCD12', 3)], [_em('c1', 12, 'BBCD12')], GT, vehicle_ms_frame=4.2)
+    text = ev.format_track_report(rep)
+    assert 'BB**12' in text and 'BBCD12' not in text and '4.2 ms/frame' in text
+    assert 'BBCD12' in ev.format_track_report(rep, show_plates=True)
+    data = ev.track_report_to_dict(rep)
+    assert data['passes'][0]['plate'] == 'BB**12' and data['passes'][0]['n_vehicle_ids'] == 1
+    assert data['vehicle_ms_frame'] == 4.2
+
+
+def test_emision_tardia_se_atribuye_con_emission_margin():
+    reads = [_rd('c1', 15, 'BBCD12', 3)]
+    late = [_em('c1', 20.0, 'BBCD12')]  # ventana 10-16 + margen 1 = 17: fuera
+    assert ev.track_quality(reads, late, GT).passes[0].emissions == 0
+    assert ev.track_quality(reads, late, GT, emission_margin=6.0).passes[0].emissions == 1
