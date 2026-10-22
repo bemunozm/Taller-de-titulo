@@ -338,6 +338,9 @@ class WorkerConfig(BaseModel):
     # Polígonos normalizados 0-1 (misma forma que las zonas del Guardián).
     zone: Optional[List[List[Dict[str, float]]]] = None
     confirm_reads: int = Field(3, ge=1, le=10)
+    # Grados (antihorario, convencion OpenCV) que se gira el recorte de la placa antes
+    # del OCR para enderezar placas inclinadas (contrato `lprSettings.plateRotationDeg`).
+    plate_rotation_deg: float = Field(0.0, ge=-45.0, le=45.0, allow_inf_nan=False)
     track_max_gap_seconds: float = Field(1.5, gt=0)
     # Participación mínima (ponderada por confianza OCR) del texto ganador para
     # emitir: un track con lecturas muy divididas no se emite aunque llegue a N.
@@ -596,6 +599,14 @@ def camera_settings_updates(settings_dict: Optional[Mapping[str, Any]]) -> Dict[
                             value_i, MIN_CONFIRM_READS_ACCESS)
         else:
             updates['confirm_reads'] = value_i
+
+    rotation = settings_dict.get('plateRotationDeg')
+    if rotation is not None:
+        value_r = _as_number(rotation)
+        if value_r is not None and -45.0 <= value_r <= 45.0:
+            updates['plate_rotation_deg'] = value_r
+        else:
+            warn('plateRotationDeg', rotation)
 
     crop = settings_dict.get('crop')
     if isinstance(crop, Mapping):

@@ -27,7 +27,7 @@ from lpr.processor.plate_tracker import PlateEmission, PlateTracker, TrackObserv
 from lpr.processor.rules import normalize_plate, resolve_plate
 from lpr.settings import settings
 from lpr.utils.direction import DirectionLine
-from lpr.utils.images import frame_to_pil
+from lpr.utils.images import frame_to_pil, rotated_plate_crop
 from lpr.utils.zones import bounding_rect, point_in_any, polygons_to_pixels
 
 STATUS_SHAPE_REJECTED = 'shape-rejected'
@@ -167,7 +167,10 @@ def iter_plate_reads(
             yield read
             continue
 
-        read.pil_crop = frame_to_pil(frame[y1c:y2c, x1c:x2c])
+        # Optional per-camera leveling of tilted plates (the shape filter and the saved
+        # evidence box above keep using the original detector box).
+        rotation = float(getattr(cfg, 'plate_rotation_deg', 0.0) or 0.0)
+        read.pil_crop = frame_to_pil(rotated_plate_crop(frame, (x1c, y1c, x2c, y2c), rotation))
         ocr_res = fast_ocr.recognize(np.array(read.pil_crop)) if fast_ocr else None
         read.raw_text = ocr_res.text if ocr_res else ''
         read.ocr_conf = ocr_res.confidence if ocr_res else 0.0

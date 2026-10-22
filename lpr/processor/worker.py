@@ -32,7 +32,7 @@ from lpr.utils.throughput import ThroughputMeter, format_report
 _LOGGED_CONFIG_FIELDS = (
     'action', 'direction', 'detector_imgsz', 'sample_fps', 'confirm_reads',
     'track_max_gap_seconds', 'min_crop_w', 'max_crop_w', 'min_crop_ratio', 'max_crop_ratio',
-    'detection_blocked', 'direction_line',
+    'detection_blocked', 'direction_line', 'plate_rotation_deg',
 )
 # Cambios que obligan a rehacer el `PlateTracker` (el resto de la config se lee por frame).
 # `direction_line` NO está: el voto no depende de la línea; `process_frame` se la pasa
