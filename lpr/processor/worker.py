@@ -24,6 +24,7 @@ from lpr.api.client import consumes_dedupe, fetch_camera_json, is_success, post_
 from lpr.processor.rules import analyze_char_confidences
 from lpr.settings import apply_camera_settings, settings
 from lpr.utils.pii import mask_plate
+from lpr.utils.throughput import ThroughputMeter, format_report
 
 
 # Campos de la config por cámara que se resumen en el log cuando cambian
@@ -76,6 +77,8 @@ class LprWorker:
             # fallback a un executor simple si ocurre algo
             self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.processing_future = None
+        # Telemetría de fps efectivos (contadores baratos; un log cada 60 s).
+        self._throughput = ThroughputMeter()
         # directorio donde se guardan las detecciones completas (frames anotados)
         # usar la ruta ya normalizada por cfg (config.py se encarga de resolver relativas)
         self.detections_dir = getattr(self.cfg, 'detections_dir', 'detecciones')
@@ -229,6 +232,7 @@ class LprWorker:
                     time.sleep(1)
                     continue
                 consecutive_failures = 0
+                self._report_throughput()
                 # Stream CONGELADO: un decoder caído puede seguir devolviendo
                 # ret=True con el MISMO frame en buffer. Comparamos una firma
                 # barata (muestra dispersa del frame): el ruido del sensor la
@@ -275,14 +279,29 @@ class LprWorker:
         silencio: es el bug estructural que ocultó los fallos del worker
         durante meses (el manejador anterior era código muerto).
         """
+        self._throughput.processed()
         try:
             fut.result()
         except Exception:
             logging.exception('Error procesando frame en el worker LPR')
 
+    def _report_throughput(self) -> None:
+        """Una línea cada 60 s: cuadros ofrecidos / procesados / descartados por
+        ocupado y fps efectivo vs `sample_fps` (WARNING bajo el 80 %)."""
+        report = self._throughput.poll(getattr(self.cfg, 'sample_fps', 0.0))
+        if report is None:
+            return
+        if report.low:
+            logging.warning('%s - BAJO el 80%% de lo configurado: el voto pierde lecturas '
+                            '(contención de GPU/CPU)', format_report(report))
+        else:
+            logging.info('%s', format_report(report))
+
     def submit_frame(self, frame: np.ndarray):
+        self._throughput.offered()
         # descartar el frame si el executor sigue ocupado con el anterior
         if self.processing_future is not None and not self.processing_future.done():
+            self._throughput.dropped()
             return
         fut = self.executor.submit(self._process_frame, frame)
         fut.add_done_callback(self._on_frame_done)
