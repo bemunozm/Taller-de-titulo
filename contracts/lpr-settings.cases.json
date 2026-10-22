@@ -21,6 +21,7 @@
       "exitSide": ["left", "right"],
       "note": "exitSide = lado hacia el que se mueve el vehículo al SALIR, mirando de from a to. Sin propiedades extra."
     },
+    "plateRotationDeg": { "min": -45, "max": 45, "decimals": true, "note": "grados antihorarios (convencion OpenCV) que se gira el recorte de la placa antes del OCR; ausente/0 = sin giro" },
     "unknownProperties": "rechazadas",
     "explicitNull": "rechazado salvo crop.maxWidth"
   },
@@ -31,6 +32,10 @@
     { "name": "registrar permite N=1", "settings": { "action": "register", "confirmReads": 1 } },
     { "name": "fps decimal", "settings": { "sampleFps": 2.5 } },
     { "name": "ancho sin tope", "settings": { "crop": { "minWidth": 60, "maxWidth": null } } },
+    { "name": "giro de placa 15", "settings": { "plateRotationDeg": 15 } },
+    { "name": "giro de placa decimal negativo", "settings": { "plateRotationDeg": -12.5 } },
+    { "name": "giro de placa 0", "settings": { "plateRotationDeg": 0 } },
+    { "name": "giro de placa en los bordes", "settings": { "plateRotationDeg": 45 } },
     { "name": "linea de direccion", "settings": { "directionLine": { "from": { "x": 0.2, "y": 0.7 }, "to": { "x": 0.85, "y": 0.75 }, "exitSide": "left" } } },
     { "name": "linea de direccion en los bordes", "settings": { "directionLine": { "from": { "x": 0, "y": 0 }, "to": { "x": 1, "y": 1 }, "exitSide": "right" } } },
     {
@@ -62,6 +67,10 @@
     { "name": "zona con 2 puntos", "settings": { "zone": [[{ "x": 0.1, "y": 0.1 }, { "x": 0.5, "y": 0.5 }]] }, "offending": "zone" },
     { "name": "propiedad desconocida", "settings": { "foo": 1 }, "offending": "foo" },
     { "name": "null explicito", "settings": { "sampleFps": null }, "offending": "sampleFps" },
+    { "name": "giro de placa sobre maximo", "settings": { "plateRotationDeg": 46 }, "offending": "plateRotationDeg" },
+    { "name": "giro de placa bajo minimo", "settings": { "plateRotationDeg": -46 }, "offending": "plateRotationDeg" },
+    { "name": "giro de placa como texto", "settings": { "plateRotationDeg": "15" }, "offending": "plateRotationDeg" },
+    { "name": "giro de placa null", "settings": { "plateRotationDeg": null }, "offending": "plateRotationDeg" },
     { "name": "linea con lado desconocido", "settings": { "directionLine": { "from": { "x": 0.2, "y": 0.7 }, "to": { "x": 0.8, "y": 0.7 }, "exitSide": "up" } }, "offending": "directionLine" },
     { "name": "linea demasiado corta", "settings": { "directionLine": { "from": { "x": 0.5, "y": 0.5 }, "to": { "x": 0.52, "y": 0.51 }, "exitSide": "left" } }, "offending": "directionLine" },
     { "name": "linea fuera de rango", "settings": { "directionLine": { "from": { "x": -0.1, "y": 0.5 }, "to": { "x": 0.8, "y": 0.5 }, "exitSide": "left" } }, "offending": "directionLine" },

@@ -27,7 +27,9 @@ import {
   LPR_DETECTOR_IMGSZ_VALUES,
   LPR_DIRECTIONS,
   LPR_EXIT_SIDES,
+  MAX_PLATE_ROTATION_DEG,
   MIN_DIRECTION_LINE_LENGTH,
+  MIN_PLATE_ROTATION_DEG,
 } from '../lpr-settings';
 import type {
   LprAction,
@@ -399,6 +401,18 @@ export class LprSettingsDto {
   @ValidateNested()
   @Type(() => LprDirectionLineDto)
   directionLine?: LprDirectionLineDto;
+
+  @ApiPropertyOptional({
+    minimum: MIN_PLATE_ROTATION_DEG,
+    maximum: MAX_PLATE_ROTATION_DEG,
+    description:
+      'Grados que se gira el recorte de la placa en sentido antihorario antes del OCR (enderezar placas inclinadas). Ausente o 0 = sin giro',
+  })
+  @IfDefined()
+  @IsNumber(FINITE)
+  @Min(MIN_PLATE_ROTATION_DEG)
+  @Max(MAX_PLATE_ROTATION_DEG)
+  plateRotationDeg?: number;
 }
 
 /** Body de `PATCH /cameras/:id/lpr-settings`. */
@@ -434,6 +448,9 @@ export function toStoredLprSettings(dto: LprSettingsDto): LprSettings | null {
       to: { x: to.x, y: to.y },
       exitSide,
     };
+  }
+  if (dto.plateRotationDeg !== undefined) {
+    out.plateRotationDeg = dto.plateRotationDeg;
   }
   return Object.keys(out).length > 0 ? out : null;
 }
