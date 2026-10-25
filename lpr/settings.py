@@ -196,6 +196,18 @@ class Settings(BaseSettings):
     LPR_STREAM_RECONNECT_MAX_ATTEMPTS: int = Field(5, ge=1)
     LPR_STREAM_RECONNECT_BACKOFF_SECONDS: float = Field(2.0, gt=0)
 
+    # Modo reposo (solo LPR). Con True el worker demuxa el HD sin decodificar y
+    # decodifica el sub-stream (ruta sin `-hd`) a ~2 fps; el HD solo se decodifica
+    # y analiza mientras hay un vehiculo en movimiento dentro de la zona. Requiere
+    # PyAV y una URL HD terminada en `-hd`; si falta algo, el bucle de siempre.
+    LPR_REST_MODE: bool = False
+    # Segundos sin vehiculo en movimiento en la zona para volver a reposo.
+    LPR_REST_IDLE_SECONDS: float = Field(4.0, gt=0, le=120)
+    # Cobertura minima (s) del anillo de paquetes HD (>= 2 GOPs con GOP de 2 s).
+    LPR_REST_RING_SECONDS: float = Field(5.0, ge=3, le=30)
+    # Cuadros por segundo del chequeo de presencia sobre el sub-stream.
+    LPR_REST_SUB_FPS: float = Field(2.0, gt=0, le=10)
+
     # Guardián — refetch periódico de zonas/config (Fase 3.C). Antes
     # `_fetch_zones()` solo corría en `__init__`: editar zonas o el toggle
     # `enableGuardian` en la UI no tenía efecto hasta reiniciar el proceso.

@@ -24,6 +24,7 @@ from lpr.api.client import consumes_dedupe, fetch_camera_json, is_success, post_
 from lpr.processor.rules import analyze_char_confidences
 from lpr.settings import apply_camera_settings, settings
 from lpr.utils.pii import mask_plate
+from lpr.utils.rest_mode import ChangeDetector, MotionGate, RestController, derive_substream_url, format_rest_report
 from lpr.utils.sampling import FrameScheduler
 from lpr.utils.throughput import ThroughputMeter, format_report
 
@@ -42,6 +43,25 @@ _LOGGED_CONFIG_FIELDS = (
 # (`_ensure_vehicle_tracker`: mismo modelo, `track_buffer` nuevo). Rehacer el PlateTracker
 # descarta sus pistas, también las confirmadas que esperaban dirección o asentamiento.
 _TRACKER_FIELDS = ('confirm_reads', 'direction', 'track_max_gap_seconds')
+# Modo reposo: un hueco de reposo mayor se comprime a esto en el reloj del pipeline
+# (los vehiculos estacionados en la zona conservan su id y no se vuelven a emitir).
+REST_CLOCK_BRIDGE_SECONDS = 1.0
+# Espera maxima por el cuadro en curso al volcar cuadros del anillo (catch-up).
+REST_CATCHUP_WAIT_SECONDS = 10.0
+
+
+class _RestRuntime:
+    """Estado del bucle de reposo (lectores, compuertas de movimiento, controlador)."""
+
+    def __init__(self, hd, sub, presence, controller, sub_gate, hd_gate, change):
+        self.hd = hd
+        self.sub = sub
+        self.presence = presence
+        self.controller = controller
+        self.sub_gate = sub_gate
+        self.hd_gate = hd_gate
+        self.change = change
+        self.stop = threading.Event()
 
 
 class LprWorker:
@@ -78,6 +98,9 @@ class LprWorker:
             # fallback a un executor simple si ocurre algo
             self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.processing_future = None
+        # Modo reposo (None = bucle de captura normal).
+        self._rest: Optional[_RestRuntime] = None
+        self._rest_lock = threading.RLock()
         # Telemetría de fps efectivos (contadores baratos; un log cada 60 s).
         self._throughput = ThroughputMeter()
         # directorio donde se guardan las detecciones completas (frames anotados)
@@ -202,6 +225,11 @@ class LprWorker:
         except (ValueError, OSError):  # fuera del hilo principal
             pass
         self.start_settings_sync()
+        sub_url = self._rest_substream_url()
+        if sub_url is not None:
+            started, cap = self._start_rest_loop(cap, sub_url)
+            if started:
+                return
         scheduler = FrameScheduler(1.0)  # el intervalo real se pasa en cada due()
         # Trackea la última lectura EXITOSA del stream (independiente del
         # throttle de poll_interval de abajo) para poder detectar un stream
@@ -278,6 +306,235 @@ class LprWorker:
             except Exception:
                 pass
 
+    # ------------------------------------------------------------------
+    # Modo reposo (LPR_REST_MODE): HD solo mientras pasa un vehiculo
+    # ------------------------------------------------------------------
+    def _rest_substream_url(self) -> Optional[str]:
+        """URL del sub-stream si el modo reposo esta pedido Y es posible; si no,
+        None (y se corre el bucle de siempre, sin cambios)."""
+        if not bool(getattr(settings, 'LPR_REST_MODE', False)):
+            return None
+        url = derive_substream_url(getattr(self.cfg, 'rtsp_url', None))
+        if url is None:
+            logging.warning('LPR_REST_MODE activo pero la URL no termina en "-hd": no hay sub-stream '
+                            'derivable, se usa el bucle de captura normal')
+            return None
+        from lpr.utils.stream_reader import av_available
+        if not av_available():
+            logging.warning('LPR_REST_MODE activo pero PyAV no esta instalado: se usa el bucle de captura normal')
+            return None
+        return url
+
+    def _start_rest_loop(self, cap, sub_url: str):
+        """Bucle de reposo. Devuelve `(True, cap)` cuando termina; `(False, cap)` si no
+        pudo arrancar, con una captura cv2 lista para el bucle normal (la original si
+        no se llego a soltar, o una reabierta). H3: si la PRIMERA apertura del sub-stream
+        o del HD falla (p. ej. 400 por maxReaders) se vuelve al bucle normal; una caida
+        posterior sigue con reconexion/backoff y exit(1)."""
+        from lpr.processor.vehicle_presence import VehicleBoxDetector
+        from lpr.utils.stream_reader import StreamReader
+
+        cfg = self.cfg
+        presence = VehicleBoxDetector(model_ref=settings.LPR_VEHICLE_MODEL or None,
+                                      device=getattr(cfg, 'device', None))
+        if not presence.available:
+            logging.error('Modo reposo sin modelo de vehiculos: se usa el bucle de captura normal')
+            return False, cap
+        open_s = float(settings.LPR_STREAM_OPEN_TIMEOUT_MS) / 1000.0
+        attempts = int(settings.LPR_STREAM_RECONNECT_MAX_ATTEMPTS)
+        backoff = float(settings.LPR_STREAM_RECONNECT_BACKOFF_SECONDS)
+        common = dict(open_timeout_s=open_s,
+                      read_timeout_s=float(settings.LPR_STREAM_READ_TIMEOUT_MS) / 1000.0,
+                      max_attempts=attempts, backoff_seconds=backoff)
+        first_open_wait = attempts * (open_s + backoff * 2) + 5.0
+        sub = StreamReader('sub', sub_url, ring_seconds=3.0, ring_bytes=16 * 1024 * 1024, decode_threads=1,
+                           **common)
+        sub.start()
+        if not sub.wait_first_packet(first_open_wait):
+            sub.stop()
+            logging.warning('Modo reposo: no se pudo abrir el sub-stream de %s; se usa el bucle de captura '
+                            'normal (la captura HD original sigue abierta)', cfg.camera_id)
+            return False, cap
+        try:
+            cap.release()  # el relay limita lectores por ruta: se libera el cv2 antes de abrir PyAV
+        except Exception:
+            pass
+        hd = StreamReader('hd', cfg.rtsp_url, ring_seconds=float(settings.LPR_REST_RING_SECONDS), **common)
+        hd.start()
+        if not hd.wait_first_packet(first_open_wait):
+            hd.stop()
+            sub.stop()
+            logging.warning('Modo reposo: no se pudo abrir el stream HD de %s (maxReaders u otro error); se '
+                            'vuelve al bucle de captura normal reabriendo cv2', cfg.camera_id)
+            from lpr.utils.capture import reconnect_capture as _reopen
+            new_cap = _reopen(cfg.rtsp_url, None)
+            if new_cap is None:
+                logging.error('No se pudo reabrir la captura HD tras el fallo del modo reposo; terminando '
+                              'proceso para que el supervisor lo reinicie limpio')
+                sys.exit(1)
+            return False, new_cap
+        controller = RestController(float(settings.LPR_REST_IDLE_SECONDS), self._rest_activate,
+                                    self._rest_deactivate)
+        rt = _RestRuntime(hd, sub, presence, controller, MotionGate(getattr(cfg, 'zone', None)),
+                          MotionGate(getattr(cfg, 'zone', None)), ChangeDetector(getattr(cfg, 'zone', None)))
+        self._rest = rt
+        logging.info('Modo reposo activo para %s (sub-stream derivado, idle=%.1fs, anillo=%.1fs)',
+                     cfg.camera_id, settings.LPR_REST_IDLE_SECONDS, settings.LPR_REST_RING_SECONDS)
+        sub.activate()
+        hd_thread = threading.Thread(target=self._rest_hd_loop, args=(rt,), name='lpr-rest-hd', daemon=True)
+        hd_thread.start()
+        try:
+            self._rest_sub_loop(rt)
+        finally:
+            rt.stop.set()
+            self._settings_stop.set()
+            # H1: el hilo HD deja de decodificar ANTES de cerrar los lectores
+            hd_thread.join(timeout=REST_CATCHUP_WAIT_SECONDS + 2.0)
+            hd.stop()
+            sub.stop()
+            try:
+                self.flush_pending()
+            except Exception:
+                logging.exception('Error liberando las patentes pendientes')
+            try:
+                self.executor.shutdown(wait=False)
+            except Exception:
+                pass
+        return True, cap
+
+    def _rest_activate(self) -> None:
+        with self._rest_lock:
+            self._rest.hd.activate()
+        logging.info('Reposo -> ACTIVO (%s): vehiculo en movimiento en la zona', self.cfg.camera_id)
+
+    def _rest_deactivate(self) -> None:
+        with self._rest_lock:
+            self._rest.hd.deactivate()
+            try:
+                emitted = self.flush_pending()
+            except Exception:
+                logging.exception('Error liberando las patentes pendientes al volver a reposo')
+                emitted = 0
+        logging.info('ACTIVO -> reposo (%s): %d patentes pendientes liberadas', self.cfg.camera_id, emitted)
+
+    def _report_rest(self, rt: _RestRuntime) -> None:
+        report = self._throughput.poll(0.0)
+        if report is not None:
+            logging.info('%s', format_report(report))
+        window = rt.controller.poll_window()
+        if window is not None:
+            logging.info('%s', format_rest_report(window))
+
+    def _rest_sub_loop(self, rt: _RestRuntime) -> None:
+        """Hilo principal: decodifica el sub-stream, chequea presencia y maneja el estado."""
+        sched = FrameScheduler(1.0)
+        interval = 1.0 / float(settings.LPR_REST_SUB_FPS)
+        stale_seconds = float(settings.LPR_STREAM_STALE_SECONDS)
+        last_sig = None
+        last_change = time.time()
+        errors = 0
+        last_error_log = 0.0
+        while True:
+            if rt.hd.failed or rt.sub.failed:
+                logging.error('No se pudo reconectar el stream RTSP (%s) tras varios intentos; terminando '
+                              'proceso para que el supervisor lo reinicie limpio',
+                              'HD' if rt.hd.failed else 'sub-stream')
+                sys.exit(1)
+            frames = rt.sub.next_frames(0.5)
+            rt.controller.tick()
+            self._report_rest(rt)
+            for fr in frames:
+                rt.controller.sub_decoded += 1
+                try:
+                    if not sched.due(fr.ts, interval):
+                        continue
+                    image = fr.bgr()
+                    now = time.time()
+                    try:
+                        sig = image[::16, ::16].tobytes()
+                    except Exception:
+                        sig = None
+                    if sig is None or sig != last_sig:
+                        last_sig, last_change = sig, now
+                    elif now - last_change > stale_seconds:
+                        logging.warning('Sub-stream congelado (%.0fs sin cuadros nuevos) - reconectando...',
+                                        now - last_change)
+                        rt.sub.request_reconnect()
+                        last_change = now
+                        continue
+                    cfg = self.cfg
+                    if getattr(cfg, 'detection_blocked', False):
+                        moving = False  # fail-closed igual que la deteccion de patentes
+                    else:
+                        h, w = image.shape[:2]
+                        rt.sub_gate.set_zone(getattr(cfg, 'zone', None))
+                        rt.change.set_zone(getattr(cfg, 'zone', None))
+                        # Escena quieta: sin YOLO (se refresca cada `refresh_seconds`).
+                        moving = (rt.sub_gate.update(rt.presence.detect(image), w, h, fr.ts)
+                                  if rt.change.should_detect(image, fr.ts) else False)
+                        # Red de seguridad: cambio grande y sostenido aunque YOLO no vea cajas.
+                        moving = moving or rt.change.sustained_change
+                    rt.controller.observe(moving)
+                except Exception:
+                    errors += 1
+                    if time.time() - last_error_log > 30.0:
+                        last_error_log = time.time()
+                        logging.exception('Error en el chequeo de presencia del sub-stream (%d errores)', errors)
+
+    def _rest_hd_loop(self, rt: _RestRuntime) -> None:
+        """Hilo del HD: mientras esta activo decodifica (desde el ultimo keyframe) y
+        muestrea POR TIMESTAMP con el `FrameScheduler` de siempre."""
+        sched = FrameScheduler(1.0)
+        activation = 0
+        last_ts: Optional[float] = None
+        skipped = 0.0
+        while not rt.stop.is_set():
+            try:
+                frames = rt.hd.next_frames(0.5)
+                for fr in frames:
+                    if rt.stop.is_set():
+                        break
+                    rt.controller.hd_decoded += 1
+                    # H6: el lock solo cubre chequeo/estado; el submit (que puede
+                    # esperar hasta 10 s en el catch-up) va FUERA para no frenar a
+                    # `_rest_deactivate` ni a la activacion.
+                    with self._rest_lock:
+                        if not rt.hd.active:
+                            break
+                        if fr.activation != activation:
+                            activation = fr.activation
+                            sched = FrameScheduler(1.0)
+                        if last_ts is not None and fr.ts <= last_ts:
+                            continue  # ya analizado en la activacion anterior
+                        poll = float(self.cfg.poll_interval)
+                        if not sched.due(fr.ts, poll):
+                            continue
+                        bridge = max(REST_CLOCK_BRIDGE_SECONDS, 2.0 * poll)   # H8
+                        if last_ts is not None and fr.ts - last_ts > bridge:
+                            skipped += fr.ts - last_ts - bridge
+                        last_ts = fr.ts
+                        track_now = fr.ts - skipped
+                    image = fr.bgr()
+                    if not rt.hd.active:
+                        continue  # se desactivo mientras se convertia: no procesar tras `flush_pending`
+                    self.submit_frame(image, now_ts=fr.ts, track_now=track_now, block=fr.catchup)
+            except Exception:
+                logging.exception('Error en el hilo HD del modo reposo')
+                time.sleep(0.5)
+
+    def _rest_hd_motion(self, vehicle_tracker, frame: np.ndarray, track_now: float) -> None:
+        """Evidencia de movimiento del HD: prolonga el periodo activo mientras el
+        seguimiento de vehiculos vea uno moviendose dentro de la zona."""
+        rt = getattr(self, '_rest', None)
+        if rt is None or vehicle_tracker is None or not getattr(vehicle_tracker, 'available', False):
+            return
+        cfg = self.cfg
+        h, w = frame.shape[:2]
+        rt.hd_gate.set_zone(getattr(cfg, 'zone', None))
+        boxes = [box for _tid, box in vehicle_tracker.current(track_now)]
+        if rt.hd_gate.update(boxes, w, h, track_now):
+            rt.controller.touch()
+
     def _on_frame_done(self, fut):
         """Hace visible cualquier excepción del pipeline.
 
@@ -303,13 +560,28 @@ class LprWorker:
         else:
             logging.info('%s', format_report(report))
 
-    def submit_frame(self, frame: np.ndarray):
+    def submit_frame(self, frame: np.ndarray, now_ts: Optional[float] = None,
+                     track_now: Optional[float] = None, block: bool = False):
+        """`now_ts`/`track_now` (modo reposo): hora del cuadro y hora del reloj del
+        pipeline. `block`: cuadros del anillo (catch-up) esperan al anterior en vez
+        de descartarse, para no perder el inicio del paso."""
         self._throughput.offered()
         # descartar el frame si el executor sigue ocupado con el anterior
         if self.processing_future is not None and not self.processing_future.done():
-            self._throughput.dropped()
-            return
-        fut = self.executor.submit(self._process_frame, frame)
+            if not block:
+                self._throughput.dropped()
+                return
+            try:
+                self.processing_future.result(timeout=REST_CATCHUP_WAIT_SECONDS)
+            except concurrent.futures.TimeoutError:
+                self._throughput.dropped()
+                return
+            except Exception:
+                pass  # el callback `_on_frame_done` ya lo registra
+        if now_ts is None and track_now is None:
+            fut = self.executor.submit(self._process_frame, frame)
+        else:
+            fut = self.executor.submit(self._process_frame, frame, now_ts, track_now)
         fut.add_done_callback(self._on_frame_done)
         self.processing_future = fut
 
@@ -348,25 +620,32 @@ class LprWorker:
                          getattr(cfg, 'camera_id', '?'))
         return self.vehicle_tracker
 
-    def _process_frame(self, frame: np.ndarray):
+    def _process_frame(self, frame: np.ndarray, now_ts: Optional[float] = None,
+                       track_now: Optional[float] = None):
         """Detecta (con zona) -> lee -> formato -> seguimiento + voto -> emite.
 
         La parte pura (hasta el tracker) es `pipeline.process_frame`, la misma
         que corre `tools/replay_eval.py`; acá solo queda lo que tiene efectos:
         dedupe, guardado de la imagen y el POST al backend.
         """
-        now_ts = time.time()
+        if now_ts is None:
+            now_ts = time.time()
+        # Reloj del pipeline: igual a `now_ts`, salvo en reposo (huecos comprimidos).
+        clock_now = now_ts if track_now is None else track_now
         self._last_frame = frame
         self._prune_state(now_ts)
         # Foto consistente de (cfg, tracker): un refetch a mitad de frame no
         # mezcla la config nueva con el tracker viejo.
         with self._runtime_lock:
             cfg, tracker = self.cfg, self.tracker
+        vehicle_tracker = self._ensure_vehicle_tracker(cfg)
         reads, emissions = process_frame(
-            frame, self.detector, self.fast_ocr, cfg, tracker, now_ts,
+            frame, self.detector, self.fast_ocr, cfg, tracker, clock_now,
             save_only_on_plate=bool(settings.LPR_SAVE_ONLY_ON_PLATE),
-            vehicle_tracker=self._ensure_vehicle_tracker(cfg),
+            vehicle_tracker=vehicle_tracker,
         )
+        if getattr(self, '_rest', None) is not None:
+            self._rest_hd_motion(vehicle_tracker, frame, clock_now)
         for read in reads:
             if read.status == STATUS_SHAPE_REJECTED:
                 logging.debug('Crop descartado por tamaño/forma (w=%d h=%d ratio=%.2f)',

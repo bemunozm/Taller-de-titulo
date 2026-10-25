@@ -357,6 +357,10 @@ class VehicleTracker:
             out.append((canonical, raw_id, box, cls_id))
         return out
 
+    def current(self, now: float) -> List[Tuple[int, Box]]:
+        """Vehiculos vistos en el cuadro `now` (el ultimo `update`): `[(id canonico, caja)]`."""
+        return [(tid, tr.box) for tid, tr in self._tracks.items() if tr.last_seen == now]
+
     def path(self, track_id: int) -> Sequence[PathPoint]:
         track = self._tracks.get(track_id)
         return track.points if track else ()
