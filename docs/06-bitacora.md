@@ -4,6 +4,21 @@ Registro cronológico de conversaciones, decisiones y avances. Lo más reciente 
 
 ---
 
+## 2026-10-25 — Modo reposo del LPR para CPU compartida
+
+**Problema.** El worker LPR decodifica todo el HD (HEVC 1080p) y analiza 8 fps las 24 h aunque pasen autos pocos % del tiempo; en el CAX31 compartido eso es CPU que no sobra.
+
+**Hecho** (decisión [D12](05-decisiones-tecnicas.md#d12--modo-reposo-del-lpr-cpu-compartida--implementado-2026-10-25-flag-apagado-por-defecto))
+- Lector PyAV propio del LPR (`lpr/utils/stream_reader.py`): el HD se demuxa a un anillo de paquetes alineado a keyframe y solo se decodifica, desde el último keyframe, mientras hay un vehículo en movimiento en la zona; el sub-stream 640×360 a 2 fps decide (pre-filtro de cambio + `yolo11n` + `MotionGate`, con red de seguridad por cambio sostenido). Al volver a reposo se liberan las patentes pendientes.
+- `LPR_REST_MODE` (apagado por defecto) más 3 variables; cualquier condición faltante cae al bucle de siempre.
+- Replays con GPU: las 49 pasadas de la mañana dan las mismas emisiones que el modo normal (83 clips), los 9 diurnos 8 de 8 en ambos modos, y la cobertura nocturna fue 17 de 20 movimientos con la primera caja de patente cubierta en 10 de 11. Tiempo activo 27–36 % sobre clips que ya son eventos.
+- CPU en reposo medida en vivo (sub-stream del portón): demux ~0,004 cores, decode ~0,02, total ~0,15 con YOLO en CPU (Windows, antes de la retención y la ráfaga del pre-filtro).
+- Revisión de QA: se corrigieron carreras entre cierre y decode del lector, un tope duro del anillo con un GOP largo, el fallback de primera apertura, la supresión de un auto que sigue a otro, el lock durante el catch-up y varios detalles menores.
+
+**Pendiente.** Prueba controlada en vivo en una sola cámara con el flag encendido (vigilar la línea `Reposo:` del log), validar de noche con IR y en el VPS ARM, y confirmar la rueda de PyAV en ARM64. Limitaciones y riesgos abiertos en D12.
+
+---
+
 ## 2026-10-21 (tarde) — Voto de patente por vehículo y hallazgo nocturno
 
 **Problema en vivo**

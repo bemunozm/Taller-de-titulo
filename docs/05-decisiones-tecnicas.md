@@ -352,3 +352,46 @@ La latencia máxima sube ~1 s por la espera de asentamiento; los ms por cuadro v
 | 3 | Valor para el portón | **15°**. Replay de las 24 pasadas de la mañana del portón (config del portón, GPU): 0° = 20 correctas / 0 incorrectas; 10° = 21 / 1; **15° = 22 / 0**; 20° = 23 / 1 (un sesgo H→R consistente, 12 de 14 votos). Se prefiere 0 incorrectas a una correcta más. Regresión: los 8 pasos diurnos siguen 8/8 con 0 incorrectas y dirección 8/8; Estacionamiento 03 con 0° no cambia (21/1/3 con el recorte vigente, 23/1/1 con `60,250,0.8,6`) |
 
 ⚠️ **Riesgos.** Con una camioneta con logo en la caja el giro hizo legibles textos del logo como "patentes" (empate de votos que impidió la emisión en una pasada a 15°). El ángulo se calibró con 24 pasadas de una sola mañana; conviene revisarlo si cambia el montaje de la cámara. La herramienta de replay lo prueba con `--plate-rotation DEG`.
+
+
+## D12 — Modo reposo del LPR (CPU compartida) 🟢 *implementado (2026-10-25); flag apagado por defecto*
+
+**Contexto.** El worker LPR decodificaba el 100 % del stream HD (HEVC 1080p, 25 fps, keyframe cada 2 s) con `cv2.VideoCapture` y analizaba 8 fps todo el día, aunque un auto pasa solo unos pocos % del tiempo. En un VPS compartido (CAX31, 8 vCPU ARM) eso consume CPU que necesitan el backend, el agente y los demás workers. Objetivo: que el LPR cueste casi nada mientras no pasa nadie, sin perder el inicio de ningún paso.
+
+| # | Decisión | Elegido |
+|---|---|---|
+| 1 | Cómo se mira la escena en reposo | **Sub-stream 640×360** (la misma ruta sin `-hd`, derivada de la URL HD) decodificado y muestreado a **2 fps** (`LPR_REST_SUB_FPS`). Sin sufijo `-hd` o sin PyAV, el modo no arranca |
+| 2 | Qué se hace con el HD en reposo | Se **demuxa sin decodificar** (PyAV) a un **anillo de paquetes** (`PacketRing`) alineado a keyframe, que cubre ≥ 5 s (≥ 2 GOPs; `LPR_REST_RING_SECONDS`) y está acotado por bytes. Un GOP gigante vacía el anillo y se espera el próximo keyframe |
+| 3 | Pre-filtro | `ChangeDetector`: diferencia de cuadros (160×90, gris) dentro del rectángulo de la zona. Solo corre YOLO si hay cambio (≥ 1,5 % de píxeles), hasta 2 s después del último cambio, o en una ráfaga de 2 cuadros cada 5 s |
+| 4 | Qué cuenta como disparo | `MotionGate` sobre las cajas de un `yolo11n` propio (`VehicleBoxDetector`): borde inferior central dentro de la zona, alto ≥ 12 % del cuadro y desplazamiento > 3 % del ancho. El movimiento se mide contra cajas **estáticas de verdad** (vistas quietas dos veces en ≤ 1,5 s), no contra la estela de otros autos; no usa tracker porque a 2 fps ByteTrack pierde el id |
+| 5 | Activación | Se decodifica el HD **desde el último keyframe del anillo** (no se pierde el inicio del paso) y se sigue en vivo. Los cuadros del anillo se muestrean **por timestamp** con el `FrameScheduler` de siempre y esperan al cuadro anterior en vez de descartarse |
+| 6 | Vuelta a reposo | Tras `LPR_REST_IDLE_SECONDS` (4) sin vehículo en movimiento en la zona (sub-stream **o** seguimiento HD), se llama a `flush_pending()` y se deja de decodificar el HD. El reloj del pipeline comprime los huecos de reposo (puente ≥ 1 s), así un auto estacionado en la zona no se re-emite en cada activación |
+| 7 | Red de seguridad | Un cambio grande (≥ 3 %) y **sostenido** (2 chequeos seguidos) activa aunque YOLO no devuelva cajas. Cuesta alguna activación de más |
+| 8 | Fallbacks | Con `LPR_REST_MODE` apagado, sin `-hd`, sin PyAV, sin modelo de vehículos, o si la **primera** apertura del sub-stream o del HD falla (p. ej. 400 por `maxReaders`): bucle de captura normal, reabriendo cv2 si hizo falta, con un WARNING. Una caída posterior sigue con reconexión con backoff y `exit(1)` para el supervisor, como hoy |
+
+**Evidencia (replays con GPU, normal vs reposo; datos reales solo en el scratchpad).**
+
+| Conjunto | Normal | Reposo | Tiempo activo |
+|---|---|---|---|
+| Mañana, Portón (24 pasadas) | 22 correctas / 0 incorrectas / 2 perdidas | idéntico | 27 % |
+| Mañana, Estacionamiento 03 (25 pasadas) | 23 / 1 / 1 | idéntico | 33 % |
+| 9 clips diurnos | 8 de 8, dirección 8 de 8 | 8 de 8, dirección 8 de 8, latencia mediana 8,3 s contra 8,2 s | 36 % (2523 de 6960 cuadros) |
+| Nocturno (20 episodios de movimiento real, 16 clips) | — | activó con 17; la primera caja de patente sobre un vehículo en movimiento quedó cubierta en 10 de 11 | 25 % |
+
+Las emisiones (texto y dirección) coinciden en los 83 clips de la mañana. Los clips ya son eventos con 30 s de margen, así que en producción el % activo será bastante menor. De noche las lecturas son ~0 en ambos modos: lo medido es la cobertura del disparo.
+
+**CPU en reposo (smoke en vivo, sub-stream del portón, 50 s).** Demux ~0,004 cores; decodificar el sub-stream ~0,02 cores; con YOLO en CPU de esta máquina (Windows, no ARM) y el pre-filtro: **0,15 cores** (sin pre-filtro, 1,3–1,45). Se midió antes de agregar la retención de 2 s y la ráfaga de refresco, por lo que el valor actual puede ser algo mayor.
+
+**Limitaciones (aceptadas).**
+- No hay detección de HD congelado (imagen repetida): solo los timeouts de lectura del demux. El sub-stream sí la tiene.
+- Calentamiento: un auto detenido en la zona al arrancar el worker (o al cambiar la zona) se aprende como estático durante ~1 s y no dispara; uno que ya se movía puede tardar ~1 s.
+- Un auto que se arrastra a menos de ~3 % del ancho cada 0,4 s no dispara.
+- La red de seguridad puede activar de más (viento, personas).
+
+**Riesgos abiertos.**
+- Vehículos lejanos y pequeños (≈ 56×38 px en el sub-stream) no los ve YOLO ni el cambio de píxeles: 2 episodios nocturnos sin activación; en modo normal tampoco produjeron caja de patente.
+- Un caso nocturno con una caja de patente ~2 s antes de la activación (se perdería esa caja, no la pasada).
+- Umbrales del pre-filtro calibrados con una escena del portón; falta validar de noche con IR y en el VPS ARM, y medir el CPU en reposo allí.
+- La rueda `av==19.0.2` debe confirmarse en ARM64. `cli.py` abre primero un `cv2.VideoCapture` HD que el worker suelta antes de abrir PyAV; hay una conexión extra transitoria contra el límite de lectores del relay.
+
+**Cómo activarlo y qué vigilar.** `LPR_REST_MODE=true` en el env del worker (por defecto `false`), con la URL HD terminada en `-hd` y PyAV instalado. Probar primero en una sola cámara. En el log, cada 60 s aparece una línea `Reposo: estado=… activo=…% de 60s hd_decodificados=… sub_decodificados=… activaciones=…`; revisar que el % activo sea bajo y que no haya activaciones sin vehículo en bucle, y los avisos `Reposo -> ACTIVO` / `ACTIVO -> reposo`. Un WARNING al arrancar indica que cayó al bucle normal (sin sub-stream, sin PyAV, sin modelo o apertura fallida). Variables en [`docs/modulos/vision.md`](modulos/vision.md).

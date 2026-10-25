@@ -51,6 +51,8 @@ ultralytics==8.3.0
 lapx==0.10.0
 # OpenCV headless (sin GUI) — el requerido en edge/servidor.
 opencv-python-headless==4.11.0.86
+# PyAV: lector RTSP del modo reposo (LPR_REST_MODE; demux sin decodificar + sub-stream).
+av==19.0.2
 # OCR de patentes sobre onnxruntime (modelo cct-s-v1 → requiere fast-plate-ocr >= 1.0).
 fast-plate-ocr[onnx]==1.1.0
 # Runtime ONNX (lo arrastra fast-plate-ocr[onnx]; se fija explícito por reproducibilidad).

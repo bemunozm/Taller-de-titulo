@@ -432,7 +432,8 @@ def replay_clip(path: Path, cfg: Any, detector: Any, ocr: Any,
                 vehicle_tracker: Any = None, evidence_dir: Optional[Path] = None,
                 read_log: Optional[List[ReadRecord]] = None,
                 vehicle_timings: Optional[List[float]] = None,
-                force_vehicle_tracking: bool = False
+                force_vehicle_tracking: bool = False,
+                rest: Any = None
                 ) -> Tuple[List[Emission], List[float]]:
     """Run one clip through `pipeline.process_frame`; returns emissions and ms per frame.
 
@@ -442,7 +443,11 @@ def replay_clip(path: Path, cfg: Any, detector: Any, ocr: Any,
 
     Measurement: `read_log` collects every valid read with its vehicle id,
     `vehicle_timings` the ms spent in the vehicle tracker per frame, and
-    `force_vehicle_tracking` runs the tracker even without a direction line."""
+    `force_vehicle_tracking` runs the tracker even without a direction line.
+
+    `rest` (a `tools.rest_replay.RestReplay`) emulates the rest mode: frames are
+    only processed while active (plus the buffered pre-trigger frames) and the
+    pending emissions are flushed whenever it goes back to rest."""
     from lpr.processor.pipeline import make_tracker, process_frame
 
     tracker = make_tracker(cfg)
@@ -471,13 +476,34 @@ def replay_clip(path: Path, cfg: Any, detector: Any, ocr: Any,
         vehicle_tracker.update = timed_update
 
     clip_name = path.stem
-    for t, frame in iter_sampled_frames(path, cfg.sample_fps):
+    if rest is not None:
+        frame_source: Iterator[Tuple[float, np.ndarray]] = iter(())
+        steps = rest.steps(path)
+    else:
+        frame_source = iter_sampled_frames(path, cfg.sample_fps)
+        steps = None
+
+    def _rest_frames() -> Iterator[Tuple[float, float, Optional[np.ndarray]]]:
+        for step in steps:  # type: ignore[union-attr]
+            if step.kind == 'flush':
+                _collect(step.t, tracker.flush())
+                yield step.t, step.track_t, None
+            else:
+                yield step.t, step.track_t, step.frame
+
+    sequence: Iterator[Tuple[float, float, Optional[np.ndarray]]] = (
+        _rest_frames() if steps is not None else ((t, t, f) for t, f in frame_source))
+    for t, track_t, frame in sequence:
+        if frame is None:
+            continue
         last_t = t
         started = time.perf_counter()
         spent[0] = 0.0
         ids: Optional[List[Optional[int]]] = [] if read_log is not None else None
-        reads, found = process_frame(frame, detector, ocr, cfg, tracker, t, vehicle_tracker=vehicle_tracker,
+        reads, found = process_frame(frame, detector, ocr, cfg, tracker, track_t, vehicle_tracker=vehicle_tracker,
                                      force_vehicle_tracking=force_vehicle_tracking, vehicle_ids_out=ids)
+        if rest is not None and vehicle_tracker is not None and getattr(vehicle_tracker, 'available', False):
+            rest.hd_motion([box for _tid, box in vehicle_tracker.current(track_t)], frame, track_t)
         timings.append((time.perf_counter() - started) * 1000.0)
         if vehicle_timings is not None and vehicle_tracker is not None:
             vehicle_timings.append(spent[0])
@@ -571,6 +597,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     '(emissions fire late: direction wait / track close; default 6)')
     ap.add_argument('--always-track', action='store_true',
                     help='run the vehicle tracker even without a direction line (replay only)')
+    ap.add_argument('--rest-mode', action='store_true',
+                    help='emulate the LPR rest mode: the trigger runs on the frames downscaled to 640x360 at 2 fps and '
+                    'the HD frames are only processed while active (buffered frames back to the previous keyframe '
+                    'of an emulated 2 s GOP included); prints the % of active time')
+    ap.add_argument('--rest-idle-seconds', type=float, default=4.0,
+                    help='--rest-mode: seconds without a moving vehicle in the zone to go back to rest (default 4)')
     ap.add_argument('--show-plates', action='store_true',
                     help='print real plates in the report (default: masked)')
     args = ap.parse_args(argv)
@@ -612,20 +644,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     timings: List[float] = []
     read_log: List[ReadRecord] = []
     vehicle_timings: List[float] = []
+    rest_stats = None
+    box_detector = None
+    if args.rest_mode:
+        from lpr.processor.vehicle_presence import VehicleBoxDetector
+        from lpr.tools.rest_replay import RestStats
+        box_detector = VehicleBoxDetector(model_ref=settings.LPR_VEHICLE_MODEL or None, device=cfg.device)
+        if not box_detector.available:
+            print('rest mode needs the vehicle model (yolo11n.pt)', file=sys.stderr)
+            return 1
+        rest_stats = RestStats()
     for clip in clips:
-        found, ms = replay_clip(clip, cfg, detector, ocr, vehicle_tracker=new_vehicle_tracker(),
+        rest = None
+        if args.rest_mode:
+            from lpr.tools.rest_replay import RestReplay
+            rest = RestReplay(cfg, box_detector.detect, idle_seconds=args.rest_idle_seconds)  # type: ignore[union-attr]
+        found, ms = replay_clip(clip, cfg, detector, ocr, vehicle_tracker=new_vehicle_tracker(), rest=rest,
                                 evidence_dir=Path(args.save_evidence) if args.save_evidence else None,
                                 read_log=read_log if args.track_report else None,
                                 vehicle_timings=vehicle_timings if args.track_report else None,
                                 force_vehicle_tracking=args.always_track)
         emissions += found
         timings += ms
+        if rest is not None and rest_stats is not None:
+            rest_stats.add(rest.stats)
     clip_gt = [r for r in gt if any(clip_matches(r.clip, c) for c in clips)]
     # Emissions carry the file stem; normalize to the GT token for matching.
     for item in (*emissions, *read_log):
         stem_parts = item.clip.split('-')
         item.clip = next((r.clip for r in clip_gt if r.clip in stem_parts), item.clip)
     sc = score(emissions, clip_gt, args.margin, show_plates=args.show_plates)
+    if rest_stats is not None:
+        print('REST MODE: active %.1f%% of the time (%.0fs of %.0fs), %d activations, %d HD frames decoded' % (
+            rest_stats.active_pct, rest_stats.active_seconds, rest_stats.total_seconds,
+            rest_stats.activations, rest_stats.hd_frames_decoded))
     print(format_report(args.label, cfg, sc, statistics.mean(timings) if timings else 0.0,
                         len(timings), len(emissions)))
     tracking: Optional[TrackReport] = None
