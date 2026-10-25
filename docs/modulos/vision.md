@@ -252,6 +252,10 @@ Una **pasada** (`vehicle_passages`, D8) agrupa todas las lecturas de **una paten
 | `LPR_VEHICLE_RELINK_SECONDS` | worker | 2 (0–10) | Un id nuevo cercano a uno perdido hace ≤ s hereda su id canónico; 0 = sin reenganche |
 | `LPR_VOTE_SETTLE_SECONDS` | worker | 1 (0–10) | Espera máxima por más lecturas si la participación del ganador al confirmar es < 0,8; 0 = no esperar |
 | `LPR_VOTE_FREEZE_AFTER_SETTLE` | worker | `true` | El texto se decide sin las lecturas de la espera de dirección |
+| `LPR_REST_MODE` | worker | `false` | Modo reposo (D12): el HD se demuxa sin decodificar y solo se decodifica/analiza mientras pasa un vehículo en movimiento por la zona. Requiere PyAV y una URL terminada en `-hd`; si falta algo, bucle normal |
+| `LPR_REST_IDLE_SECONDS` | worker | 4 (>0–120) | Segundos sin vehículo en movimiento en la zona para volver a reposo (se liberan las patentes pendientes) |
+| `LPR_REST_RING_SECONDS` | worker | 5 (3–30) | Cobertura mínima del anillo de paquetes HD (≥ 2 GOPs con GOP de 2 s) |
+| `LPR_REST_SUB_FPS` | worker | 2 (>0–10) | Chequeos de presencia por segundo sobre el sub-stream 640×360 |
 
 ## Configuración LPR por cámara (`lprSettings`)
 
