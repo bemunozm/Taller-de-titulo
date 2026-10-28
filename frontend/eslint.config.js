@@ -46,6 +46,10 @@ export default defineConfig([
       'src/hooks/useKioskCredential.ts',
       'src/hooks/useResidentResponseWatcher.ts',
       'src/hooks/useLongPress.ts',
+      // Modo QR del kiosko: el contenido del QR es una credencial de acceso.
+      'src/hooks/kiosk/**/*.{ts,tsx}',
+      'src/helpers/kioskQr.ts',
+      'src/helpers/kioskTimings.ts',
       // Recibe el payload de VISITOR_ARRIVAL (sessionId, visitId, datos del visitante).
       'src/hooks/useNotifications.ts',
       'src/helpers/kiosk.ts',

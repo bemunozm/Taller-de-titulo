@@ -23,8 +23,10 @@ export function AudioVisualizer({ isActive, state = 'idle' }: AudioVisualizerPro
     const bars = 60; // Más barras para una visualización más suave
     const barWidth = width / bars;
 
-    // Detectar si estamos en dark mode
-    const isDarkMode = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    // Detectar si estamos en dark mode (el kiosko lo fuerza con `kiosk-dark`, sin importar el sistema)
+    const isDarkMode =
+      document.documentElement.classList.contains('kiosk-dark') ||
+      window.matchMedia('(prefers-color-scheme: dark)').matches;
 
     // Colores según el estado
     const colors = {

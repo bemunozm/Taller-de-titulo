@@ -1,6 +1,20 @@
 @import "tailwindcss";
 @import url("https://fonts.googleapis.com/css2?family=Outfit:wght@100..900&family=Geist+Mono:wght@100..900&display=swap");
 
+/*
+ * `dark:` sigue al tema del sistema, salvo en el kiosko: `useKioskDocumentMode`
+ * le pone `kiosk-dark` al <html> (también cubre los diálogos, que se montan
+ * fuera del árbol de la vista) y ahí el tema oscuro queda forzado.
+ */
+@custom-variant dark {
+  @media (prefers-color-scheme: dark) {
+    @slot;
+  }
+  &:where(.kiosk-dark, .kiosk-dark *) {
+    @slot;
+  }
+}
+
 @theme {
   --font-sans: 'Inter', sans-serif;
   --font-mono: 'Geist Mono', monospace;
@@ -11,5 +25,30 @@
     background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
     opacity: 0.05;
     pointer-events: none;
+  }
+}
+
+@layer base {
+  /*
+   * Kiosko (`useKioskDocumentMode`): un dispositivo público, no una página web.
+   * Sin selección de texto, sin rebote de scroll, sin menú al mantener presionado
+   * y sin zoom (pellizco ni doble toque: `pan-x pan-y` los descarta).
+   */
+  html.kiosk-mode,
+  html.kiosk-mode body {
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: pan-x pan-y;
+    background-color: #000;
+  }
+
+  /* El panel del operador pide un secreto: ahí sí se puede escribir y pegar. */
+  html.kiosk-mode input,
+  html.kiosk-mode textarea {
+    -webkit-user-select: text;
+    user-select: text;
   }
 }

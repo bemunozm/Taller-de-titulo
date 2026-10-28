@@ -51,14 +51,14 @@ export function KioskPairingScreen() {
   }
 
   return (
-    <main className="relative min-h-screen overflow-hidden bg-zinc-100 text-zinc-950 dark:bg-zinc-950 dark:text-white">
+    <main className="relative min-h-dvh overflow-hidden bg-zinc-100 text-zinc-950 dark:bg-zinc-950 dark:text-white">
       <div
         aria-hidden="true"
         className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle,rgb(24_24_27/0.09)_1px,transparent_1px)] [background-size:22px_22px] dark:bg-[radial-gradient(circle,rgb(255_255_255/0.06)_1px,transparent_1px)]"
       />
       <div aria-hidden="true" className="noise-bg absolute inset-0" />
 
-      <div className="relative mx-auto flex min-h-screen max-w-5xl items-center px-4 py-10 sm:px-8">
+      <div className="relative mx-auto flex min-h-dvh max-w-5xl items-center px-4 py-10 pt-[max(2.5rem,env(safe-area-inset-top))] pb-[max(2.5rem,env(safe-area-inset-bottom))] sm:px-8">
         <div className="grid w-full overflow-hidden rounded-3xl bg-white shadow-2xl ring-1 ring-zinc-950/10 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] dark:bg-zinc-900 dark:ring-white/10">
           {/* Placa del dispositivo */}
           <aside className="relative flex flex-col justify-between gap-12 overflow-hidden bg-zinc-950 p-8 text-zinc-100 sm:p-10">
