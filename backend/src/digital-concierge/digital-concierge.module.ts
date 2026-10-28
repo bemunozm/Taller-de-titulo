@@ -3,8 +3,10 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { DigitalConciergeController } from './digital-concierge.controller';
 import { ConciergeResponseController } from './concierge-response.controller';
 import { ConciergeDeviceController } from './concierge-device.controller';
+import { KioskQrController } from './kiosk-qr.controller';
 import { DigitalConciergeService } from './services/digital-concierge.service';
 import { RealtimeVoiceTokenService } from './services/realtime-voice-token.service';
+import { KioskQrService } from './services/kiosk-qr.service';
 import { ConciergeSession } from './entities/concierge-session.entity';
 import { UsersModule } from '../users/users.module';
 import { FamiliesModule } from '../families/families.module';
@@ -16,6 +18,7 @@ import { MailerModule } from '@nestjs-modules/mailer';
 import { HubModule } from '../hub/hub.module';
 import { AuthModule } from '../auth/auth.module';
 import { AgentModule } from '../agent/agent.module';
+import { AuditModule } from '../audit/audit.module';
 import { ConciergeAuthGuard } from './guards/concierge-auth.guard';
 
 /**
@@ -38,8 +41,9 @@ import { ConciergeAuthGuard } from './guards/concierge-auth.guard';
     VisitsModule,
     NotificationsModule,
     MailerModule, // Necesario para SmsService
-    HubModule,    // Añadido HubModule — también provee HubAuthGuard
-    AuthModule,   // Fase 1, Bloque A1 — provee AuthGuard para ConciergeAuthGuard
+    HubModule, // Añadido HubModule — también provee HubAuthGuard
+    AuditModule, // Canje de QR del kiosko: auditoría con actor de máquina
+    AuthModule, // Fase 1, Bloque A1 — provee AuthGuard para ConciergeAuthGuard
     forwardRef(() => AgentModule),
   ],
   // Fase 4 · P4: `/respond` (solo humano, AuthGuard) y `/device` (solo
@@ -48,10 +52,12 @@ import { ConciergeAuthGuard } from './guards/concierge-auth.guard';
     DigitalConciergeController,
     ConciergeResponseController,
     ConciergeDeviceController,
+    KioskQrController, // canje de QR del kiosko (solo HubAuthGuard)
   ],
   providers: [
     DigitalConciergeService,
     RealtimeVoiceTokenService,
+    KioskQrService,
     SmsService,
     QRCodeService,
     ConciergeAuthGuard,

@@ -18,6 +18,8 @@ export interface RateLimitPolicy {
  *  - `concierge-status`: polling del kiosko mientras espera al residente.
  *  - `concierge-respond`: respuesta del residente o conserje (abre el portón).
  *  - `concierge-device`: identidad del dispositivo (emparejamiento del kiosko).
+ *  - `concierge-qr-redeem`: el kiosko canjea el QR de una visita (puede abrir
+ *    el portón); por hub, acotado contra la fuerza bruta de códigos.
  *  - `concierge-session`: `/end`, `agent-config`, `context/:houseNumber`.
  *  - `agent-chat`: canal de texto del agente (costo por token).
  *  - `pending-action-resolve`: aprobar o rechazar una acción escalada del
@@ -44,6 +46,7 @@ export const RATE_LIMIT_POLICIES = {
   'concierge-status': { limit: 40, ttl: MINUTE_MS },
   'concierge-respond': { limit: 10, ttl: MINUTE_MS },
   'concierge-device': { limit: 10, ttl: MINUTE_MS },
+  'concierge-qr-redeem': { limit: 10, ttl: MINUTE_MS },
   'concierge-session': { limit: 30, ttl: MINUTE_MS },
   'agent-chat': { limit: 20, ttl: MINUTE_MS },
   'pending-action-resolve': { limit: 20, ttl: MINUTE_MS },
