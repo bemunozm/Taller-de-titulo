@@ -907,6 +907,44 @@ describe('VisitsService — máquina de estados (Fase 4 · P3)', () => {
     );
   });
 
+  describe('checkIn: opciones de canal (kiosco)', () => {
+    it('onlyFromStatus: desde otro estado -> 409 sin escribir ni notificar', async () => {
+      seed(makeVisit({ status: VisitStatus.READY_FOR_REENTRY, usedCount: 1 }));
+
+      await expect(
+        service.checkIn('visit-1', undefined, {
+          onlyFromStatus: VisitStatus.PENDING,
+        }),
+      ).rejects.toThrow(ConflictException);
+      expect(visitRepository.update).not.toHaveBeenCalled();
+      expect(notificationsService.create).not.toHaveBeenCalled();
+    });
+
+    it('channel kiosk: el aviso al anfitrión indica el canal', async () => {
+      seed(makeVisit({ status: VisitStatus.PENDING, maxUses: 3 }));
+
+      await service.checkIn('visit-1', undefined, {
+        channel: 'kiosk',
+        onlyFromStatus: VisitStatus.PENDING,
+      });
+
+      expect(notificationsService.create).toHaveBeenCalledTimes(1);
+      const payload = JSON.stringify(notificationsService.create.mock.calls[0]);
+      expect(payload).toContain('kiosco');
+      expect(payload).toContain('"channel":"kiosk"');
+    });
+
+    it('sin opciones el aviso no menciona el kiosco (comportamiento actual)', async () => {
+      seed(makeVisit({ status: VisitStatus.PENDING }));
+
+      await service.checkIn('visit-1');
+
+      const payload = JSON.stringify(notificationsService.create.mock.calls[0]);
+      expect(payload).not.toContain('kiosco');
+      expect(payload).not.toContain('channel');
+    });
+  });
+
   describe('validateAccess (QR, lista blanca)', () => {
     it('una visita AWAITING_APPROVAL es inválida: "Visita pendiente de aprobación del residente"', async () => {
       seed(makeVisit({ status: VisitStatus.AWAITING_APPROVAL }));

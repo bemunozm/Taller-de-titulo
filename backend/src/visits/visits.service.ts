@@ -160,6 +160,16 @@ interface VisitorVehicleData {
   color?: string | null;
 }
 
+/**
+ * Opciones del canal de `checkIn`. Sin ellas el comportamiento es el de las
+ * rutas humanas y el LPR. `channel: 'kiosk'` lo anota en el aviso al
+ * anfitrión; `onlyFromStatus` restringe la entrada a un estado de origen.
+ */
+export interface CheckInEntryOptions {
+  channel?: 'kiosk';
+  onlyFromStatus?: VisitStatus;
+}
+
 /** Resultado de `validateAccess` (QR o patente). */
 export interface VisitAccessValidation {
   valid: boolean;
@@ -1479,12 +1489,25 @@ export class VisitsService {
    * tratan como idempotente (seguridad B4). La notificación al anfitrión es
    * best-effort.
    */
-  async checkIn(id: string, options?: TenantScopeOptions): Promise<Visit> {
+  async checkIn(
+    id: string,
+    options?: TenantScopeOptions,
+    entry?: CheckInEntryOptions,
+  ): Promise<Visit> {
     const visit = await this.loadVisitEntity(id, options);
     const now = new Date();
 
     if (visit.status === VisitStatus.ACTIVE) {
       throw new VisitEntryAlreadyRegisteredException();
+    }
+
+    // Canal restringido (kiosko): solo desde el estado esperado. El `UPDATE`
+    // de abajo ya se condiciona a este mismo estado, así que la guarda y el
+    // claim deciden sobre el mismo valor (sin ventana de carrera).
+    if (entry?.onlyFromStatus && visit.status !== entry.onlyFromStatus) {
+      throw new ConflictException(
+        `No se puede registrar la entrada por este canal: la visita está ${describeVisitStatus(visit.status)}`,
+      );
     }
 
     if (!CHECKIN_FROM.includes(visit.status)) {
@@ -1544,7 +1567,7 @@ export class VisitsService {
     await this.notifyHostBestEffort(savedVisit, 'la entrada', {
       type: NotificationType.VISIT_CHECK_IN,
       title: 'Visita Arribó',
-      message: `${savedVisit.visitorName} ha llegado${usageInfo}. ${savedVisit.type === VisitType.VEHICULAR ? `Patente: ${savedVisit.vehicle?.plate || 'N/A'}` : 'Visita peatonal'}.`,
+      message: `${savedVisit.visitorName} ha llegado${usageInfo}. ${savedVisit.type === VisitType.VEHICULAR ? `Patente: ${savedVisit.vehicle?.plate || 'N/A'}` : 'Visita peatonal'}.${entry?.channel === 'kiosk' ? ' Ingresó con su código QR en el kiosco de la entrada.' : ''}`,
       data: {
         visitId: savedVisit.id,
         visitorName: savedVisit.visitorName,
@@ -1553,6 +1576,7 @@ export class VisitsService {
         usedCount: savedVisit.usedCount,
         maxUses: savedVisit.maxUses,
         plate: savedVisit.vehicle?.plate,
+        ...(entry?.channel ? { channel: entry.channel } : {}),
       },
     });
 
