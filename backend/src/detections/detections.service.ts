@@ -9,6 +9,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { hasActiveVisitHost } from '../visits/visit-host';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, type SelectQueryBuilder } from 'typeorm';
 import { PlateDetection } from './entities/plate-detection.entity';
@@ -646,14 +647,7 @@ export class DetectionsService {
     visit: Visit,
     organizationId: string,
   ): Promise<boolean> {
-    const hostId = visit.host?.id ?? null;
-    if (!hostId) {
-      return false;
-    }
-    return this.usersService.isActiveMemberOfOrganization(
-      hostId,
-      organizationId,
-    );
+    return hasActiveVisitHost(visit, organizationId, this.usersService);
   }
 
   /**
