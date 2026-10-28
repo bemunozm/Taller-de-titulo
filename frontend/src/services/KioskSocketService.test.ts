@@ -276,3 +276,116 @@ describe('KioskSocketService', () => {
     expect(factory).not.toHaveBeenCalled()
   })
 })
+
+describe('KioskSocketService: reconexión inmediata al volver la red o la pantalla', () => {
+  function setVisibility(state: 'visible' | 'hidden'): void {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: state })
+    document.dispatchEvent(new Event('visibilitychange'))
+  }
+
+  afterEach(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+  })
+
+  it('en "online" reintenta ya, sin esperar el backoff', () => {
+    vi.useFakeTimers()
+    const { service, sockets } = setup()
+    service.connect(CREDENTIAL)
+    const socket = sockets[0]
+    socket.active = false
+    socket.fire('connect_error', new Error('red caída'))
+    // Backoff armado (~2 s): todavía no reintentó.
+    vi.advanceTimersByTime(500)
+    expect(socket.connect).not.toHaveBeenCalled()
+
+    window.dispatchEvent(new Event('online'))
+
+    expect(socket.connect).toHaveBeenCalledTimes(1)
+    // Y el timer de backoff pendiente se canceló: no hay un segundo reintento.
+    vi.advanceTimersByTime(60_000)
+    expect(socket.connect).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancela el backoff interno de socket.io antes de reconectar (disconnect + connect)', () => {
+    const { service, sockets } = setup()
+    service.connect(CREDENTIAL)
+    const socket = sockets[0]
+    const order: string[] = []
+    socket.disconnect.mockImplementation(() => order.push('disconnect'))
+    socket.connect.mockImplementation(() => order.push('connect'))
+
+    window.dispatchEvent(new Event('online'))
+
+    expect(order).toEqual(['disconnect', 'connect'])
+  })
+
+  it('en "pageshow" (volver de la caché de páginas) reintenta ya', () => {
+    const { service, sockets } = setup()
+    service.connect(CREDENTIAL)
+
+    window.dispatchEvent(new Event('pageshow'))
+
+    expect(sockets[0].connect).toHaveBeenCalledTimes(1)
+  })
+
+  it('al volver a visible reintenta ya; al ocultarse no hace nada', () => {
+    const { service, sockets } = setup()
+    service.connect(CREDENTIAL)
+
+    setVisibility('hidden')
+    expect(sockets[0].connect).not.toHaveBeenCalled()
+
+    setVisibility('visible')
+    expect(sockets[0].connect).toHaveBeenCalledTimes(1)
+  })
+
+  it('con el socket conectado no toca nada (socket.io detecta solo los cortes)', () => {
+    const { service, sockets } = setup()
+    service.connect(CREDENTIAL)
+    sockets[0].connected = true
+
+    window.dispatchEvent(new Event('online'))
+    window.dispatchEvent(new Event('pageshow'))
+    setVisibility('visible')
+
+    expect(sockets[0].connect).not.toHaveBeenCalled()
+    expect(sockets[0].disconnect).not.toHaveBeenCalled()
+  })
+
+  it('sin socket (nunca conectó, o ya se desconectó) no hace nada', () => {
+    const { service, sockets } = setup()
+    service.connect(CREDENTIAL)
+    const socket = sockets[0]
+    service.disconnect()
+    socket.connect.mockClear()
+
+    window.dispatchEvent(new Event('online'))
+    service.reconnectNow()
+
+    expect(socket.connect).not.toHaveBeenCalled()
+  })
+
+  it('disconnect() quita las escuchas de la ventana: no quedan colgadas tras desmontar', () => {
+    const { service, sockets } = setup()
+    const removeSpy = vi.spyOn(window, 'removeEventListener')
+    service.connect(CREDENTIAL)
+
+    service.disconnect()
+
+    expect(removeSpy).toHaveBeenCalledWith('online', expect.any(Function))
+    expect(removeSpy).toHaveBeenCalledWith('pageshow', expect.any(Function))
+    window.dispatchEvent(new Event('online'))
+    expect(sockets[0].connect).not.toHaveBeenCalled()
+  })
+
+  it('reconectar con otra credencial no duplica las escuchas', () => {
+    const { service, sockets } = setup()
+    service.connect(CREDENTIAL)
+    service.connect({ hubId: 'hub-2', hubSecret: 'otro-secret' })
+
+    window.dispatchEvent(new Event('online'))
+
+    expect(sockets[0].connect).not.toHaveBeenCalled()
+    expect(sockets[1].connect).toHaveBeenCalledTimes(1)
+  })
+})

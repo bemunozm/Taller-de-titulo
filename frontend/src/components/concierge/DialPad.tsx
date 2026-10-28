@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { BackspaceIcon, HashtagIcon, PhoneIcon } from '@heroicons/react/24/outline';
+import { BackspaceIcon, PhoneIcon } from '@heroicons/react/24/outline';
 import { Heading } from '@/components/ui/Heading';
 import { Text } from '@/components/ui/Text';
 
@@ -10,7 +10,9 @@ interface DialPadProps {
 
 /**
  * Componente de teclado numérico tipo citófono
- * Permite ingresar el número de casa antes de iniciar la llamada
+ * Permite ingresar el número de casa antes de iniciar la llamada.
+ * Pensado para un kiosko vertical: teclas altas y anchas (se aprietan con el
+ * pulgar de pie) y todo el teclado a la vista sin desplazarse.
  */
 export function DialPad({ onCall, disabled = false }: DialPadProps) {
   const [input, setInput] = useState('');
@@ -41,19 +43,14 @@ export function DialPad({ onCall, disabled = false }: DialPadProps) {
     { value: '9', display: '9', type: 'number' as const },
     { value: 'clear', display: 'C', type: 'action' as const },
     { value: '0', display: '0', type: 'number' as const },
-    { value: 'call', display: <PhoneIcon className="w-6 h-6" />, type: 'action' as const },
+    { value: 'call', display: <PhoneIcon className="w-8 h-8" />, type: 'action' as const },
   ];
 
   return (
     <div className="w-full max-w-sm mx-auto">
       {/* Header */}
-      <div className="text-center mb-8">
-        <div className="flex justify-center mb-4">
-          <div className="p-4 bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl shadow-lg">
-            <HashtagIcon className="w-10 h-10 text-white" />
-          </div>
-        </div>
-        <Heading level={2} className="mb-2">
+      <div className="text-center mb-4">
+        <Heading level={2} className="mb-1">
           Marcar Casa/Departamento
         </Heading>
         <Text>
@@ -62,36 +59,29 @@ export function DialPad({ onCall, disabled = false }: DialPadProps) {
       </div>
 
       {/* Display */}
-      <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-xl p-6 mb-6 border border-zinc-200 dark:border-zinc-800">
+      <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-xl p-4 mb-4 border border-zinc-200 dark:border-zinc-800">
         <div className="relative">
           <input
             type="text"
             value={input}
             readOnly
             placeholder="Ej: 15"
-            className="w-full text-center text-4xl font-mono font-bold text-zinc-950 dark:text-white bg-zinc-50 dark:bg-zinc-800 border-2 border-zinc-200 dark:border-zinc-700 rounded-xl py-5 px-6 focus:outline-none focus:border-blue-500 dark:focus:border-blue-400 transition-colors"
+            className="w-full text-center text-4xl font-mono font-bold text-zinc-950 dark:text-white bg-zinc-50 dark:bg-zinc-800 border-2 border-zinc-200 dark:border-zinc-700 rounded-xl py-3 px-14 focus:outline-none focus:border-blue-500 dark:focus:border-blue-400 transition-colors"
           />
           {input && (
             <button
               onClick={handleDelete}
-              className="absolute right-4 top-1/2 -translate-y-1/2 p-2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-all"
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-3 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-all"
               aria-label="Borrar último carácter"
             >
-              <BackspaceIcon className="w-5 h-5" />
+              <BackspaceIcon className="w-6 h-6" />
             </button>
           )}
-        </div>
-
-        {/* Indicador de formato */}
-        <div className="mt-4 text-center">
-          <Text className="text-xs">
-            Ingresa el número de la casa o departamento
-          </Text>
         </div>
       </div>
 
       {/* Teclado Numérico */}
-      <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-xl p-4 mb-3 border border-zinc-200 dark:border-zinc-800">
+      <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-xl p-3 border border-zinc-200 dark:border-zinc-800">
         <div className="grid grid-cols-3 gap-3">
           {buttons.map((btn) => {
             const isNumber = btn.type === 'number';
@@ -109,12 +99,12 @@ export function DialPad({ onCall, disabled = false }: DialPadProps) {
             };
 
             // Estilos base para números
-            let buttonClass = "aspect-square bg-gradient-to-br active:scale-95 border rounded-xl font-bold shadow-sm hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100";
+            let buttonClass = "h-[4.25rem] bg-gradient-to-br active:scale-95 border rounded-xl font-bold shadow-sm hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100";
             
             if (isNumber) {
-              buttonClass += " from-zinc-50 to-zinc-100 dark:from-zinc-800 dark:to-zinc-700 hover:from-zinc-100 hover:to-zinc-200 dark:hover:from-zinc-700 dark:hover:to-zinc-600 border-zinc-200 dark:border-zinc-600 text-2xl text-zinc-900 dark:text-white";
+              buttonClass += " from-zinc-50 to-zinc-100 dark:from-zinc-800 dark:to-zinc-700 hover:from-zinc-100 hover:to-zinc-200 dark:hover:from-zinc-700 dark:hover:to-zinc-600 border-zinc-200 dark:border-zinc-600 text-3xl text-zinc-900 dark:text-white";
             } else if (isClear) {
-              buttonClass += " from-red-50 to-red-100 dark:from-red-900/30 dark:to-red-800/30 hover:from-red-100 hover:to-red-200 dark:hover:from-red-800/40 dark:hover:to-red-700/40 border-red-200 dark:border-red-700 text-xl text-red-700 dark:text-red-300";
+              buttonClass += " from-red-50 to-red-100 dark:from-red-900/30 dark:to-red-800/30 hover:from-red-100 hover:to-red-200 dark:hover:from-red-800/40 dark:hover:to-red-700/40 border-red-200 dark:border-red-700 text-2xl text-red-700 dark:text-red-300";
             } else if (isCall) {
               buttonClass += " from-green-50 to-green-100 dark:from-green-900/30 dark:to-green-800/30 hover:from-green-100 hover:to-green-200 dark:hover:from-green-800/40 dark:hover:to-green-700/40 border-green-200 dark:border-green-700 text-green-700 dark:text-green-300";
             }

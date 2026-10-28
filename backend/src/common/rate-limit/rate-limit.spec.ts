@@ -236,6 +236,7 @@ describe('Rate limit (Fase 4 · P4.B, D9)', () => {
       'concierge-status': { limit: 40, ttl: minute },
       'concierge-respond': { limit: 10, ttl: minute },
       'concierge-device': { limit: 10, ttl: minute },
+      'concierge-qr-redeem': { limit: 10, ttl: minute },
       'concierge-session': { limit: 30, ttl: minute },
       'agent-chat': { limit: 20, ttl: minute },
       'pending-action-resolve': { limit: 20, ttl: minute },

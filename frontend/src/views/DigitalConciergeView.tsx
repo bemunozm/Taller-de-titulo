@@ -2,12 +2,27 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { RealtimeAgent, RealtimeSession, tool } from '@openai/agents/realtime';
 import { ConciergeAPI, type RealtimeToolDefinition, type ToolExecutionResponse } from '@/api/ConciergeAPI';
 import { kioskSocket } from '@/services/KioskSocketService';
+import { kioskEndSessionQueue } from '@/services/kioskEndSessionQueue';
 import type { KioskCredential } from '@/services/kioskCredentialStore';
 import { useKioskCredential } from '@/hooks/useKioskCredential';
+import { useKioskConnectivity } from '@/hooks/kiosk/useKioskConnectivity';
+import { useIdleTimeout } from '@/hooks/kiosk/useIdleTimeout';
+import { useKioskDocumentMode } from '@/hooks/kiosk/useKioskDocumentMode';
+import { useKioskPwa } from '@/hooks/kiosk/useKioskPwa';
+import { useWakeLock } from '@/hooks/kiosk/useWakeLock';
 import { useResidentResponseWatcher } from '@/hooks/useResidentResponseWatcher';
 import { buildResidentOutcomeMessages, type KioskWaitOutcome } from '@/helpers/kioskResidentResponse';
 import { getUserFacingErrorMessage } from '@/helpers/httpErrors';
 import { describeNotifiedResidents, maskHubId } from '@/helpers/kiosk';
+import {
+  KIOSK_CALL_OFFLINE_GRACE_MS,
+  KIOSK_CONNECTION_LOST_NOTICE_MS,
+  KIOSK_IDLE_RESET_MS,
+  KIOSK_TRANSPORT_ERROR_GRACE_MS,
+  KIOSK_VOICE_CONNECT_TIMEOUT_MS,
+  KIOSK_WATCHDOG_MS,
+  withTimeout,
+} from '@/helpers/kioskTimings';
 import { useLongPress } from '@/hooks/useLongPress';
 import { KioskPairingScreen } from '@/components/concierge/KioskPairingScreen';
 import { KioskUnpairPanel } from '@/components/concierge/KioskUnpairPanel';
@@ -17,6 +32,12 @@ import { AudioVisualizer } from '@/components/concierge/AudioVisualizer';
 import { TranscriptDisplay, type TranscriptMessage } from '@/components/concierge/TranscriptDisplay';
 import { DialPad } from '@/components/concierge/DialPad';
 import { KioskPrivacyNotice } from '@/components/concierge/KioskPrivacyNotice';
+import { KioskErrorBoundary } from '@/components/concierge/KioskErrorBoundary';
+import { KioskHomePaths, type KioskHomePath } from '@/components/concierge/KioskHomePaths';
+import { KioskNotice } from '@/components/concierge/KioskNotice';
+import { KioskOfflineOverlay } from '@/components/concierge/KioskOfflineOverlay';
+import { KioskQrMode } from '@/components/concierge/KioskQrMode';
+import { KioskScreensaver, KIOSK_SCREENSAVER_AFTER_MS } from '@/components/concierge/KioskScreensaver';
 import { PrivacyPolicyDialog } from '@/components/privacy/PrivacyPolicyDialog';
 import { PhoneXMarkIcon, ExclamationCircleIcon } from '@heroicons/react/24/outline';
 import { Subheading } from '@/components/ui/Heading';
@@ -164,6 +185,22 @@ function buildRealtimeTool(
  * backend la borra y vuelve a esa pantalla (ver `ConciergeAPI`).
  */
 export function DigitalConciergeView() {
+  return (
+    <KioskErrorBoundary>
+      <KioskShell />
+    </KioskErrorBoundary>
+  );
+}
+
+/**
+ * Modo kiosko del documento (tema oscuro forzado, sin zoom ni selección),
+ * PWA mínima y pantalla siempre encendida: aplican igual con o sin
+ * credencial, así que viven fuera de `KioskConcierge`.
+ */
+function KioskShell() {
+  useKioskDocumentMode();
+  useKioskPwa();
+  useWakeLock();
   const credential = useKioskCredential();
 
   if (!credential) {
@@ -190,6 +227,15 @@ function KioskConcierge({ credential }: KioskConciergeProps) {
   const [awaitingResident, setAwaitingResident] = useState(false);
   const [isUnpairOpen, setIsUnpairOpen] = useState(false);
   const unpairGesture = useLongPress(() => setIsUnpairOpen(true), UNPAIR_LONG_PRESS_MS);
+  // Camino del inicio y reinicio del teclado (sus dígitos viven dentro de `DialPad`: otra `key` lo vacía).
+  const [homePath, setHomePath] = useState<KioskHomePath>('dial');
+  const [dialResetKey, setDialResetKey] = useState(0);
+  // Aviso a pantalla completa (hoy solo el corte de conexión); vuelve solo al inicio.
+  const [notice, setNotice] = useState<'connection-lost' | null>(null);
+  const [isScreensaverOn, setIsScreensaverOn] = useState(false);
+  const { status: connectivityStatus } = useKioskConnectivity();
+  // Inicio: sin llamada ni casa marcada (teclado, aviso de privacidad o lector de QR).
+  const isIdleAtDialPad = !isConnected && !targetHouse;
 
   // Datos recolectados y transcripción
   const [collectedData, setCollectedData] = useState<CollectedData>({});
@@ -204,22 +250,109 @@ function KioskConcierge({ credential }: KioskConciergeProps) {
   const isSpeakingRef = useRef(false); // Si el agente está reproduciendo audio
   const finalizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const safetyHangupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Error del transporte pendiente: si no hay señales de vida, se corta la llamada.
+  const transportErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Cada intento de conexión tiene un número; "Cambiar Casa" o desmontar lo invalidan.
   const connectAttemptRef = useRef(0);
 
-  /** Cierra la sesión en el backend, una sola vez (expira la solicitud pendiente). */
+  /**
+   * Cierra la sesión en el backend, una sola vez (expira la solicitud pendiente).
+   * Si la red falla, el cierre queda en cola y se reintenta al volver la conexión.
+   */
   const endBackendSession = useCallback(async (finalStatus: 'completed' | 'cancelled' | 'timeout') => {
     const currentSessionId = sessionIdRef.current;
     sessionIdRef.current = null;
     if (currentSessionId) {
-      await ConciergeAPI.endSession(currentSessionId, finalStatus);
+      await kioskEndSessionQueue.endOrQueue(currentSessionId, finalStatus);
     }
   }, []);
+
+  /** Vuelve al inicio sin tocar la llamada: borra lo que escribió el visitante y los avisos. */
+  const resetUi = useCallback(() => {
+    setIsConnected(false);
+    setConversationState('idle');
+    setSessionId(null);
+    setAwaitingResident(false);
+    setCollectedData({});
+    setTranscript([]);
+    setSystemNotices([]);
+    setTargetHouse(null);
+    setConsentHouse(null);
+    setError(null);
+    setIsPolicyOpen(false);
+    setIsUnpairOpen(false);
+    setHomePath('dial');
+    setDialResetKey((current) => current + 1);
+    isSpeakingRef.current = false;
+  }, []);
+
+  /**
+   * Corta lo que haya en curso sin esperar a la red: invalida un intento de
+   * conexión, apaga timers, cierra la voz y manda (o encola) el cierre de la
+   * sesión del backend.
+   */
+  const abortCall = useCallback(
+    (finalStatus: 'cancelled' | 'timeout') => {
+      connectAttemptRef.current += 1;
+      clearTimer(finalizeTimerRef);
+      clearTimer(safetyHangupTimerRef);
+      clearTimer(transportErrorTimerRef);
+      const realtimeSession = sessionRef.current;
+      sessionRef.current = null;
+      try {
+        realtimeSession?.close();
+      } catch {
+        // La sesión de voz ya estaba cerrada.
+      }
+      void endBackendSession(finalStatus).catch(() => undefined);
+    },
+    [endBackendSession],
+  );
+
+  /**
+   * Corte de conexión a mitad de llamada o de espera (transporte de voz caído,
+   * o sin red más allá del margen): se cierra todo lo local, se avisa al
+   * visitante y la vista vuelve sola al inicio.
+   */
+  const handleConnectionLost = useCallback(() => {
+    if (!mountedRef.current) {
+      return;
+    }
+    abortCall('cancelled');
+    resetUi();
+    setNotice('connection-lost');
+  }, [abortCall, resetUi]);
+
+  /**
+   * Un error del transporte puede ser puntual (el servidor rechazó un evento) o
+   * el aviso de un enlace roto. Si en unos segundos no llega ninguna señal de
+   * vida, se trata como corte; la primera señal cancela este plazo.
+   */
+  const armTransportErrorCut = useCallback(() => {
+    if (transportErrorTimerRef.current !== null) {
+      return;
+    }
+    transportErrorTimerRef.current = setTimeout(() => {
+      transportErrorTimerRef.current = null;
+      handleConnectionLost();
+    }, KIOSK_TRANSPORT_ERROR_GRACE_MS);
+  }, [handleConnectionLost]);
+
+  // Vigía de la sesión: la actividad de la llamada (no solo los toques) lo reinicia.
+  const callActivity = useIdleTimeout({
+    timeoutMs: KIOSK_WATCHDOG_MS,
+    enabled: !isIdleAtDialPad && notice === null,
+    onIdle: () => {
+      abortCall('timeout');
+      resetUi();
+    },
+  });
 
   /** Desconecta la sesión de voz y cierra la sesión en el backend. */
   const disconnectSession = useCallback(async () => {
     clearTimer(finalizeTimerRef);
     clearTimer(safetyHangupTimerRef);
+    clearTimer(transportErrorTimerRef);
 
     const realtimeSession = sessionRef.current;
     sessionRef.current = null;
@@ -254,6 +387,7 @@ function KioskConcierge({ credential }: KioskConciergeProps) {
    * lógica de presentación: el backend solo devuelve `{ success, data, error }`.
    */
   const applyToolResultToUi = (toolName: string, result: ToolExecutionResponse) => {
+    callActivity.reset();
     if (!result.success || !isRecord(result.data)) {
       return;
     }
@@ -328,6 +462,7 @@ function KioskConcierge({ credential }: KioskConciergeProps) {
    * `buildResidentOutcomeMessages`. En todos los casos la llamada se corta.
    */
   const handleResidentOutcome = (outcome: KioskWaitOutcome) => {
+    callActivity.reset();
     const messages = buildResidentOutcomeMessages(outcome);
     const unanswered = outcome === 'closed' || outcome === 'no-response';
 
@@ -437,7 +572,7 @@ function KioskConcierge({ credential }: KioskConciergeProps) {
       );
       if (!isCurrentAttempt()) {
         // Cancelado mientras se creaba: la sesión nueva no debe quedar ACTIVE.
-        void ConciergeAPI.endSession(newSessionId, 'cancelled').catch(() => undefined);
+        void kioskEndSessionQueue.endOrQueue(newSessionId, 'cancelled').catch(() => undefined);
         return;
       }
       startedSessionId = newSessionId;
@@ -491,6 +626,7 @@ function KioskConcierge({ credential }: KioskConciergeProps) {
 
       // 7. Eventos de la sesión
       session.on('history_updated', (history) => {
+        callActivity.reset();
         setTranscript(historyToTranscript(history));
       });
 
@@ -500,6 +636,12 @@ function KioskConcierge({ credential }: KioskConciergeProps) {
 
       // Eventos de transporte de bajo nivel (estados de audio)
       session.on('transport_event', (event) => {
+        callActivity.reset();
+        // Cualquier otro evento tras un error es señal de vida: el error no era fatal.
+        if (event.type !== 'error' && transportErrorTimerRef.current !== null) {
+          clearTimer(transportErrorTimerRef);
+          setError(null);
+        }
         switch (event.type) {
           case 'input_audio_buffer.speech_started':
             isSpeakingRef.current = false;
@@ -533,16 +675,37 @@ function KioskConcierge({ credential }: KioskConciergeProps) {
             isSpeakingRef.current = false;
             setError(`Error: ${describeTransportError(event)}`);
             setConversationState('error');
+            armTransportErrorCut();
             break;
           default:
             break;
         }
       });
 
-      // 8. Conectar con el token efímero
-      await session.connect({
-        apiKey: ephemeralToken,
+      // Corte del enlace de voz a mitad de llamada: el transporte avisa con
+      // `connection_change` (el SDK cierra solo cuando WebRTC pasa a
+      // disconnected/failed/closed). Si la sesión ya se cerró acá (finalizar,
+      // cambiar casa), `sessionRef` ya no es esta y no es un corte.
+      session.transport.on('connection_change', (status) => {
+        if (status === 'disconnected' && isCurrentAttempt() && sessionRef.current === session) {
+          handleConnectionLost();
+        }
       });
+      // Errores del SDK (canal de datos, protocolo): mismo trato que un error del transporte.
+      session.on('error', () => {
+        if (isCurrentAttempt()) {
+          armTransportErrorCut();
+        }
+      });
+
+      // 8. Conectar con el token efímero
+      await withTimeout(
+        session.connect({
+          apiKey: ephemeralToken,
+        }),
+        KIOSK_VOICE_CONNECT_TIMEOUT_MS,
+        'No se pudo establecer la conexión de voz a tiempo',
+      );
 
       // Cancelado o desmontado durante la conexión (p. ej. un 401 desemparejó el kiosko).
       if (!isCurrentAttempt()) {
@@ -579,6 +742,7 @@ function KioskConcierge({ credential }: KioskConciergeProps) {
    */
   const handleChangeHouse = () => {
     connectAttemptRef.current += 1;
+    clearTimer(transportErrorTimerRef);
     void endBackendSession('cancelled').catch(() => undefined);
     setSessionId(null);
     setAwaitingResident(false);
@@ -630,6 +794,7 @@ function KioskConcierge({ credential }: KioskConciergeProps) {
       mountedRef.current = false;
       clearTimer(finalizeTimerRef);
       clearTimer(safetyHangupTimerRef);
+      clearTimer(transportErrorTimerRef);
       const realtimeSession = sessionRef.current;
       sessionRef.current = null;
       try {
@@ -642,126 +807,220 @@ function KioskConcierge({ credential }: KioskConciergeProps) {
     };
   }, [endBackendSession]);
 
+  // Con la red de vuelta se vacía la cola de cierres de sesión que no pudieron salir.
+  useEffect(() => {
+    if (connectivityStatus === 'online') {
+      void kioskEndSessionQueue.flush();
+    }
+  }, [connectivityStatus]);
+
+  // Sin red (o sin backend) en plena llamada o espera: pasado el margen se da por cortada.
+  const hasCall = sessionId !== null || isConnected;
+  useEffect(() => {
+    if (!hasCall || connectivityStatus === 'online') {
+      return;
+    }
+    const timer = setTimeout(handleConnectionLost, KIOSK_CALL_OFFLINE_GRACE_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [hasCall, connectivityStatus, handleConnectionLost]);
+
+  // El aviso de corte se retira solo y deja la vista en el inicio.
+  useEffect(() => {
+    if (notice === null) {
+      return;
+    }
+    const timer = setTimeout(() => setNotice(null), KIOSK_CONNECTION_LOST_NOTICE_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [notice]);
+
+  // Inactividad: sin llamada activa, 60 s sin toques devuelven al inicio y limpian lo escrito.
+  useIdleTimeout({
+    timeoutMs: KIOSK_IDLE_RESET_MS,
+    enabled: !isConnected && conversationState !== 'processing' && notice === null && !isScreensaverOn,
+    onIdle: () => {
+      abortCall('cancelled');
+      resetUi();
+    },
+  });
+
+  // Salvapantallas: solo en el inicio, nunca con una llamada ni con la espera del residente.
+  const canSleep =
+    isIdleAtDialPad &&
+    consentHouse === null &&
+    homePath === 'dial' &&
+    notice === null &&
+    !isUnpairOpen &&
+    !isPolicyOpen &&
+    conversationState !== 'processing';
+  useIdleTimeout({
+    timeoutMs: KIOSK_SCREENSAVER_AFTER_MS,
+    enabled: canSleep && !isScreensaverOn,
+    onIdle: () => setIsScreensaverOn(true),
+  });
+  useEffect(() => {
+    if (!canSleep) {
+      setIsScreensaverOn(false);
+    }
+  }, [canSleep]);
+
+  const handleSelectPath = (path: KioskHomePath) => {
+    setError(null);
+    setIsPolicyOpen(false);
+    setIsUnpairOpen(false);
+    setHomePath(path);
+  };
+
   const displayedTranscript = systemNotices.length > 0 ? [...transcript, ...systemNotices] : transcript;
-  const isIdleAtDialPad = !isConnected && !targetHouse;
+  const isCoveredByOverlay = connectivityStatus !== 'online' || isScreensaverOn;
 
   return (
-    <div className="h-screen overflow-auto bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 dark:from-zinc-950 dark:via-zinc-900 dark:to-zinc-950 p-4">
-      <div className="max-w-7xl mx-auto">
+    <>
+      <div
+        // Con el aviso de "sin conexión" o el salvapantallas encima, lo de abajo queda inerte.
+        inert={isCoveredByOverlay}
+        className="h-dvh overflow-x-hidden overflow-y-auto bg-black pt-[max(1rem,env(safe-area-inset-top))] pr-[max(1rem,env(safe-area-inset-right))] pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))]"
+      >
+        <div className="mx-auto flex min-h-full w-full max-w-md flex-col justify-center">
 
-        {/* Error Alert */}
-        {error && (
-          <div className="mb-6 max-w-2xl mx-auto">
-            <div role="alert" className="bg-red-50 dark:bg-red-900/20 border-2 border-red-200 dark:border-red-800 rounded-xl p-5 flex items-start gap-4 shadow-lg">
-              <div className="flex-shrink-0 w-10 h-10 bg-red-100 dark:bg-red-900/50 rounded-lg flex items-center justify-center">
-                <ExclamationCircleIcon className="w-6 h-6 text-red-600 dark:text-red-400" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <Subheading className="text-red-900 dark:text-red-100 mb-1">Error</Subheading>
-                <Text className="text-red-700 dark:text-red-300">{error}</Text>
+          {/* Error Alert */}
+          {error && (
+            <div className="mb-4">
+              <div role="alert" className="bg-red-50 dark:bg-red-900/20 border-2 border-red-200 dark:border-red-800 rounded-xl p-5 flex items-start gap-4 shadow-lg">
+                <div className="flex-shrink-0 w-10 h-10 bg-red-100 dark:bg-red-900/50 rounded-lg flex items-center justify-center">
+                  <ExclamationCircleIcon className="w-6 h-6 text-red-600 dark:text-red-400" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <Subheading className="text-red-900 dark:text-red-100 mb-1">Error</Subheading>
+                  <Text className="text-red-700 dark:text-red-300">{error}</Text>
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* Vista: Aviso de privacidad (casa marcada, antes del micrófono) */}
-        {isIdleAtDialPad && consentHouse !== null && (
-          <KioskPrivacyNotice
-            houseNumber={consentHouse}
-            isStarting={conversationState === 'processing'}
-            onContinue={handleConsentContinue}
-            onCancel={handleConsentCancel}
-          />
-        )}
+          {/* Aviso: se perdió la conexión a mitad de la llamada o de la espera */}
+          {notice === 'connection-lost' && (
+            <KioskNotice
+              tone="warning"
+              title="Se perdió la conexión"
+              detail="La llamada se cortó. Si necesita ingresar, use el citófono."
+            >
+              <Button color="cyan" onClick={() => setNotice(null)} className="mt-10 min-h-16 w-full items-center! text-lg!">
+                Volver al inicio
+              </Button>
+            </KioskNotice>
+          )}
 
-        {/* Vista: Teclado Numérico (cuando NO está conectado) */}
-        {isIdleAtDialPad && consentHouse === null && (
-          <div className="flex flex-col items-center">
-            <DialPad
-              onCall={handleDial}
-              disabled={conversationState === 'processing'}
+          {/* Vista: Aviso de privacidad (casa marcada, antes del micrófono) */}
+          {notice === null && isIdleAtDialPad && consentHouse !== null && (
+            <KioskPrivacyNotice
+              houseNumber={consentHouse}
+              isStarting={conversationState === 'processing'}
+              onContinue={handleConsentContinue}
+              onCancel={handleConsentCancel}
             />
+          )}
 
-            <button
-              type="button"
-              onClick={() => setIsPolicyOpen(true)}
-              className="mt-8 rounded-md px-2 py-1 text-sm font-medium text-zinc-500 underline decoration-zinc-400/50 underline-offset-4 hover:text-zinc-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 dark:text-zinc-400 dark:hover:text-zinc-200"
-            >
-              Aviso de privacidad
-            </button>
-            <PrivacyPolicyDialog open={isPolicyOpen} onClose={() => setIsPolicyOpen(false)} />
+          {/* Inicio: los dos caminos (teclado o código QR) */}
+          {notice === null && isIdleAtDialPad && consentHouse === null && (
+            <div className="flex flex-col items-center">
+              {homePath === 'qr' ? (
+                <KioskQrMode onExit={() => setHomePath('dial')} />
+              ) : (
+                <>
+                  <KioskHomePaths selected={homePath} onSelect={handleSelectPath} />
 
-            {/*
-              Desemparejar: gesto de operador sin pista visible (mantener
-              presionado el identificador ~3 s) y luego el secret actual.
-              El hubId va enmascarado: el visitante no lee el identificador.
-            */}
-            <p
-              {...unpairGesture}
-              tabIndex={0}
-              // touch-none: un leve movimiento del dedo no dispara `pointercancel` (scroll/pan del navegador).
-              className="mt-6 touch-none font-mono text-[0.7rem] text-zinc-400 select-none [-webkit-touch-callout:none] dark:text-zinc-500"
-            >
-              Dispositivo {maskHubId(credential.hubId)}
-            </p>
+                  <DialPad
+                    key={dialResetKey}
+                    onCall={handleDial}
+                    disabled={conversationState === 'processing'}
+                  />
 
-            {isUnpairOpen && (
-              <KioskUnpairPanel credential={credential} onCancel={() => setIsUnpairOpen(false)} />
-            )}
-          </div>
-        )}
-
-        {/* Vista: Conversación (cuando está conectado O ya marcó) */}
-        {!isIdleAtDialPad && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Panel Izquierdo: Estado y Controles */}
-          <div className="space-y-6">
-            {/* Estado de Conversación */}
-            <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-xl border border-zinc-200 dark:border-zinc-800 p-8">
-              <ConversationStatus
-                state={conversationState}
-                isConnected={isConnected}
-              />
-
-              {/* Visualizador de Audio */}
-              <div className="mt-8">
-                <AudioVisualizer
-                  isActive={conversationState === 'listening' || conversationState === 'speaking'}
-                  state={conversationState === 'listening' ? 'listening' : conversationState === 'speaking' ? 'speaking' : 'idle'}
-                />
-              </div>
-
-              {/* Botones de Control */}
-              <div className="mt-8 flex justify-center gap-4">
-                {!isConnected ? (
-                  <Button color="zinc" onClick={handleChangeHouse}>
-                    Cambiar Casa
-                  </Button>
-                ) : (
-                  <Button
-                    color="red"
-                    onClick={() => {
-                      void disconnectSession();
-                    }}
+                  <button
+                    type="button"
+                    onClick={() => setIsPolicyOpen(true)}
+                    className="mt-4 min-h-12 rounded-md px-3 py-1 text-base font-medium text-zinc-300 underline decoration-zinc-400/50 underline-offset-4 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500"
                   >
-                    <PhoneXMarkIcon className="w-5 h-5" />
-                    Finalizar Sesión
-                  </Button>
-                )}
-              </div>
+                    Aviso de privacidad
+                  </button>
+                  <PrivacyPolicyDialog open={isPolicyOpen} onClose={() => setIsPolicyOpen(false)} />
+
+                  {/*
+                    Desemparejar: gesto de operador sin pista visible (mantener
+                    presionado el identificador ~3 s) y luego el secret actual.
+                    El hubId va enmascarado: el visitante no lee el identificador.
+                  */}
+                  <p
+                    {...unpairGesture}
+                    tabIndex={0}
+                    // touch-none: un leve movimiento del dedo no dispara `pointercancel` (scroll/pan del navegador).
+                    className="mt-4 touch-none font-mono text-[0.7rem] text-zinc-400 select-none [-webkit-touch-callout:none] dark:text-zinc-500"
+                  >
+                    Dispositivo {maskHubId(credential.hubId)}
+                  </p>
+
+                  {isUnpairOpen && (
+                    <KioskUnpairPanel credential={credential} onCancel={() => setIsUnpairOpen(false)} />
+                  )}
+                </>
+              )}
             </div>
+          )}
 
-            {/* Datos Recolectados */}
-            <CollectedDataPanel data={collectedData} />
-          </div>
+          {/* Vista: Conversación (cuando está conectado O ya marcó) */}
+          {notice === null && !isIdleAtDialPad && (
+            <div className="space-y-4">
+              {/* Estado y controles */}
+              <div className="bg-white dark:bg-zinc-900 rounded-3xl shadow-xl border border-zinc-200 dark:border-zinc-800 p-5">
+                <ConversationStatus
+                  state={conversationState}
+                  isConnected={isConnected}
+                />
 
-          {/* Panel Derecho: Transcripción */}
-          <div>
-            <TranscriptDisplay messages={displayedTranscript} />
-          </div>
+                {/* Visualizador de Audio */}
+                <div className="mt-5">
+                  <AudioVisualizer
+                    isActive={conversationState === 'listening' || conversationState === 'speaking'}
+                    state={conversationState === 'listening' ? 'listening' : conversationState === 'speaking' ? 'speaking' : 'idle'}
+                  />
+                </div>
+
+                {/* Botones de Control */}
+                <div className="mt-5 flex justify-center">
+                  {!isConnected ? (
+                    <Button color="zinc" onClick={handleChangeHouse} className="min-h-14 w-full items-center! text-lg!">
+                      Cambiar Casa
+                    </Button>
+                  ) : (
+                    <Button
+                      color="red"
+                      onClick={() => {
+                        void disconnectSession();
+                      }}
+                      className="min-h-14 w-full items-center! text-lg!"
+                    >
+                      <PhoneXMarkIcon className="w-5 h-5" />
+                      Finalizar Sesión
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {/* Transcripción */}
+              <TranscriptDisplay messages={displayedTranscript} />
+
+              {/* Datos Recolectados */}
+              <CollectedDataPanel data={collectedData} />
+            </div>
+          )}
         </div>
-        )}
       </div>
-    </div>
+
+      {isScreensaverOn && canSleep && <KioskScreensaver onWake={() => setIsScreensaverOn(false)} />}
+      {connectivityStatus !== 'online' && <KioskOfflineOverlay status={connectivityStatus} />}
+    </>
   );
 }

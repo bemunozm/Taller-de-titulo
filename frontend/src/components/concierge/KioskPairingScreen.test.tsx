@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { AxiosError, AxiosHeaders, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
+import { KIOSK_REQUEST_TIMEOUT_MS } from '@/api/ConciergeAPI'
 import { KIOSK_CREDENTIAL_STORAGE_KEY, kioskCredentialStore } from '@/services/kioskCredentialStore'
 import { KioskPairingScreen } from './KioskPairingScreen'
 
@@ -51,6 +52,7 @@ describe('KioskPairingScreen', () => {
     expect(apiMock.get).toHaveBeenCalledWith('/concierge/device', {
       headers: { 'X-Hub-Id': HUB_ID, 'X-Hub-Secret': HUB_SECRET },
       withCredentials: false,
+      timeout: KIOSK_REQUEST_TIMEOUT_MS,
     })
     expect(kioskCredentialStore.get()).toEqual({ hubId: HUB_ID, hubSecret: HUB_SECRET })
     expect(window.localStorage.getItem(KIOSK_CREDENTIAL_STORAGE_KEY)).not.toBeNull()

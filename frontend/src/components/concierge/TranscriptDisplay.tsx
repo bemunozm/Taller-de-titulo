@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import { UserIcon, CpuChipIcon, ChatBubbleLeftRightIcon } from '@heroicons/react/24/outline';
 import { Subheading } from '@/components/ui/Heading';
 import { Text } from '@/components/ui/Text';
@@ -15,6 +16,17 @@ interface TranscriptDisplayProps {
 }
 
 export function TranscriptDisplay({ messages }: TranscriptDisplayProps) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const messageCount = messages.length;
+
+  // La conversación crece hacia abajo: siempre se ve lo último que se dijo.
+  useEffect(() => {
+    const list = listRef.current;
+    if (list) {
+      list.scrollTop = list.scrollHeight;
+    }
+  }, [messageCount]);
+
   if (messages.length === 0) {
     return (
       <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-xl border border-zinc-200 dark:border-zinc-800 p-6">
@@ -32,7 +44,7 @@ export function TranscriptDisplay({ messages }: TranscriptDisplayProps) {
   }
 
   return (
-    <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-xl border border-zinc-200 dark:border-zinc-800 p-6 sticky top-6">
+    <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-xl border border-zinc-200 dark:border-zinc-800 p-5">
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-blue-100 dark:bg-blue-900/30 rounded-lg flex items-center justify-center">
@@ -43,7 +55,7 @@ export function TranscriptDisplay({ messages }: TranscriptDisplayProps) {
         <Badge color="zinc">{messages.length} mensajes</Badge>
       </div>
 
-      <div className="space-y-4 max-h-[600px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-zinc-300 dark:scrollbar-thumb-zinc-700 scrollbar-track-transparent">
+      <div ref={listRef} className="space-y-4 max-h-[min(38dvh,26rem)] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-zinc-300 dark:scrollbar-thumb-zinc-700 scrollbar-track-transparent">
         {messages.map((message) => (
           <div
             key={message.id}
@@ -58,13 +70,13 @@ export function TranscriptDisplay({ messages }: TranscriptDisplayProps) {
 
             {/* Burbuja de mensaje */}
             <div
-              className={`max-w-[75%] rounded-2xl px-4 py-3 shadow-sm ${
+              className={`max-w-[85%] rounded-2xl px-4 py-3 shadow-sm ${
                 message.role === 'user'
                   ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100'
                   : 'bg-gradient-to-br from-blue-600 to-blue-700 text-white'
               }`}
             >
-              <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
+              <p className="text-base leading-relaxed whitespace-pre-wrap">{message.content}</p>
               <p
                 className={`text-xs mt-2 font-mono ${
                   message.role === 'user' ? 'text-zinc-500 dark:text-zinc-400' : 'text-blue-200'

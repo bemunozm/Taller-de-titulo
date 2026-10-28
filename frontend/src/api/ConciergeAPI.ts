@@ -91,6 +91,28 @@ export interface KioskDeviceIdentity {
   organizationId: string | null;
 }
 
+export type KioskQrAccess = 'pedestrian' | 'vehicular';
+
+export type KioskQrDenialReason =
+  | 'invalid'
+  | 'not_yet_valid'
+  | 'expired'
+  | 'already_inside'
+  | 'no_uses_left'
+  | 'host_inactive';
+
+/**
+ * `POST /concierge/qr/redeem` (solo `web-kiosk`). Sin PII: ni nombre, ni
+ * departamento, ni visita. `doorOpened: false` = el canje valió, pero la
+ * apertura no llegó a ningún hub (se avisa a conserjería).
+ */
+export type KioskQrRedeemResult =
+  | { status: 'granted'; access: KioskQrAccess; doorOpened: boolean }
+  | { status: 'denied'; reason: KioskQrDenialReason };
+
+/** Timeout de las requests del kiosko: sin red, el visitante no espera más que esto. */
+export const KIOSK_REQUEST_TIMEOUT_MS = 10_000;
+
 /** El kiosko intentó llamar al backend sin credencial emparejada. */
 export class KioskNotPairedError extends Error {
   constructor() {
@@ -105,6 +127,34 @@ export class UnexpectedDeviceResponseError extends Error {
     super('Respuesta inesperada del servidor al validar el dispositivo.');
     this.name = 'UnexpectedDeviceResponseError';
   }
+}
+
+/** `POST /concierge/qr/redeem` respondió 2xx con un cuerpo que no cumple el contrato. */
+export class UnexpectedQrRedeemResponseError extends Error {
+  constructor() {
+    super('Respuesta inesperada del servidor al canjear el código QR.');
+    this.name = 'UnexpectedQrRedeemResponseError';
+  }
+}
+
+const KIOSK_QR_DENIAL_REASONS: readonly string[] = [
+  'invalid',
+  'not_yet_valid',
+  'expired',
+  'already_inside',
+  'no_uses_left',
+  'host_inactive',
+];
+
+function isKioskQrRedeemResult(value: unknown): value is KioskQrRedeemResult {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const { status, access, doorOpened, reason } = value as Record<string, unknown>;
+  if (status === 'granted') {
+    return (access === 'pedestrian' || access === 'vehicular') && typeof doorOpened === 'boolean';
+  }
+  return status === 'denied' && typeof reason === 'string' && KIOSK_QR_DENIAL_REASONS.includes(reason);
 }
 
 function isKioskDeviceIdentity(value: unknown): value is KioskDeviceIdentity {
@@ -138,7 +188,10 @@ function hubHeaders(credential: KioskCredential): Record<string, string> {
  *   cookie de sesión humana en el navegador, no viaja con sus llamadas.
  * - Un 401 HTTP significa que el backend ya no acepta esa credencial (secret
  *   rotado, hub desactivado): se borra y la vista vuelve al emparejamiento.
- *   Solo los 401 HTTP; los errores de socket no tocan la credencial.
+ *   Solo los 401 HTTP; los errores de socket, de red y los timeouts nunca
+ *   tocan la credencial.
+ * - `timeout`: 10 s solo aquí; la instancia `api` compartida (administración)
+ *   no lo tiene y no se toca.
  */
 async function kioskRequest<T>(config: AxiosRequestConfig): Promise<T> {
   const credential = kioskCredentialStore.get();
@@ -148,6 +201,7 @@ async function kioskRequest<T>(config: AxiosRequestConfig): Promise<T> {
 
   try {
     const response = await api.request<T>({
+      timeout: KIOSK_REQUEST_TIMEOUT_MS,
       ...config,
       headers: hubHeaders(credential),
       withCredentials: false,
@@ -186,11 +240,38 @@ export class ConciergeAPI {
     const response = await api.get<unknown>('/concierge/device', {
       headers: hubHeaders(credential),
       withCredentials: false,
+      timeout: KIOSK_REQUEST_TIMEOUT_MS,
     });
     if (!isKioskDeviceIdentity(response.data)) {
       throw new UnexpectedDeviceResponseError();
     }
     return response.data;
+  }
+
+  /**
+   * Latido del kiosko: `GET /concierge/device` con la credencial emparejada.
+   * Solo importa si el backend responde; un 401 borra la credencial (como en
+   * cualquier request del kiosko) y un error de red no toca nada.
+   */
+  static async pingDevice(): Promise<void> {
+    await kioskRequest<unknown>({ method: 'GET', url: '/concierge/device' });
+  }
+
+  /**
+   * Canje del QR de una visita en el kiosko (apertura determinista, sin el
+   * agente). El código es una credencial de acceso: no se registra en ningún
+   * lado. Un 429 y los errores de red los resuelve quien llama.
+   */
+  static async redeemVisitQr(qrCode: string): Promise<KioskQrRedeemResult> {
+    const data = await kioskRequest<unknown>({
+      method: 'POST',
+      url: '/concierge/qr/redeem',
+      data: { qrCode },
+    });
+    if (!isKioskQrRedeemResult(data)) {
+      throw new UnexpectedQrRedeemResponseError();
+    }
+    return data;
   }
 
   /**

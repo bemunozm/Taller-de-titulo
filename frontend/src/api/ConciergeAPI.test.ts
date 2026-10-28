@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AxiosError, AxiosHeaders, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
 import { kioskCredentialStore } from '@/services/kioskCredentialStore'
-import { ConciergeAPI, KioskNotPairedError, UnexpectedDeviceResponseError } from './ConciergeAPI'
+import {
+  ConciergeAPI,
+  KIOSK_REQUEST_TIMEOUT_MS,
+  KioskNotPairedError,
+  UnexpectedDeviceResponseError,
+  UnexpectedQrRedeemResponseError,
+} from './ConciergeAPI'
 
 const apiMock = vi.hoisted(() => ({
   get: vi.fn(),
@@ -128,6 +134,7 @@ describe('ConciergeAPI.getDeviceIdentity (emparejamiento)', () => {
     expect(apiMock.get).toHaveBeenCalledWith('/concierge/device', {
       headers: HUB_HEADERS,
       withCredentials: false,
+      timeout: KIOSK_REQUEST_TIMEOUT_MS,
     })
   })
 
@@ -144,6 +151,137 @@ describe('ConciergeAPI.getDeviceIdentity (emparejamiento)', () => {
 
     await expect(ConciergeAPI.getDeviceIdentity(CREDENTIAL)).rejects.toBeInstanceOf(AxiosError)
     expect(kioskCredentialStore.get()).toEqual(stored)
+  })
+})
+
+describe('ConciergeAPI: timeout y errores de red del kiosko', () => {
+  beforeEach(() => {
+    kioskCredentialStore.save(CREDENTIAL)
+  })
+
+  it('toda request del kiosko lleva timeout de 10 s', async () => {
+    apiMock.request.mockResolvedValue({ data: {} })
+
+    await ConciergeAPI.startSession('socket-1')
+    await ConciergeAPI.getAgentConfig('15')
+    await ConciergeAPI.executeTool('s-1', 'buscar_residente', {})
+    await ConciergeAPI.endSession('s-1', 'completed')
+    await ConciergeAPI.getKioskSessionStatus('s-1')
+    await ConciergeAPI.pingDevice()
+
+    expect(KIOSK_REQUEST_TIMEOUT_MS).toBe(10_000)
+    for (const [config] of apiMock.request.mock.calls) {
+      expect(config).toEqual(expect.objectContaining({ timeout: 10_000 }))
+    }
+  })
+
+  it('el latido es un GET a /concierge/device con los headers de hub', async () => {
+    apiMock.request.mockResolvedValueOnce({ data: { hubId: 'h', type: 'web-kiosk', organizationId: null } })
+
+    await ConciergeAPI.pingDevice()
+
+    expect(apiMock.request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        url: '/concierge/device',
+        headers: HUB_HEADERS,
+        withCredentials: false,
+      }),
+    )
+  })
+
+  it('un error de red o un timeout NO borra la credencial', async () => {
+    const networkError = new AxiosError('Network Error', 'ERR_NETWORK')
+    const timeoutError = new AxiosError('timeout of 10000ms exceeded', 'ECONNABORTED')
+    apiMock.request.mockRejectedValueOnce(networkError).mockRejectedValueOnce(timeoutError)
+
+    await expect(ConciergeAPI.pingDevice()).rejects.toBe(networkError)
+    await expect(ConciergeAPI.getKioskSessionStatus('s-1')).rejects.toBe(timeoutError)
+
+    expect(kioskCredentialStore.get()).toEqual(CREDENTIAL)
+  })
+
+  it('un 5xx tampoco borra la credencial; un 401 sí', async () => {
+    apiMock.request.mockRejectedValueOnce(httpError(503))
+    await expect(ConciergeAPI.pingDevice()).rejects.toBeInstanceOf(AxiosError)
+    expect(kioskCredentialStore.get()).toEqual(CREDENTIAL)
+
+    apiMock.request.mockRejectedValueOnce(httpError(401))
+    await expect(ConciergeAPI.pingDevice()).rejects.toBeInstanceOf(AxiosError)
+    expect(kioskCredentialStore.get()).toBeNull()
+  })
+})
+
+describe('ConciergeAPI.redeemVisitQr (QR de visitas en el kiosko)', () => {
+  beforeEach(() => {
+    kioskCredentialStore.save(CREDENTIAL)
+  })
+
+  it('POST /concierge/qr/redeem con los headers de hub y { qrCode }', async () => {
+    apiMock.request.mockResolvedValueOnce({ data: { status: 'granted', access: 'pedestrian', doorOpened: true } })
+
+    const result = await ConciergeAPI.redeemVisitQr('ABCD1234')
+
+    expect(result).toEqual({ status: 'granted', access: 'pedestrian', doorOpened: true })
+    expect(apiMock.request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'POST',
+        url: '/concierge/qr/redeem',
+        headers: HUB_HEADERS,
+        withCredentials: false,
+        timeout: 10_000,
+        data: { qrCode: 'ABCD1234' },
+      }),
+    )
+  })
+
+  it.each([
+    [{ status: 'granted', access: 'vehicular', doorOpened: false }],
+    [{ status: 'denied', reason: 'invalid' }],
+    [{ status: 'denied', reason: 'not_yet_valid' }],
+    [{ status: 'denied', reason: 'expired' }],
+    [{ status: 'denied', reason: 'already_inside' }],
+    [{ status: 'denied', reason: 'no_uses_left' }],
+    [{ status: 'denied', reason: 'host_inactive' }],
+  ])('entrega tal cual la respuesta del contrato %o', async (body) => {
+    apiMock.request.mockResolvedValueOnce({ data: body })
+
+    await expect(ConciergeAPI.redeemVisitQr('ABCD1234')).resolves.toEqual(body)
+  })
+
+  it.each([
+    [{ status: 'granted', access: 'otro', doorOpened: true }],
+    [{ status: 'granted', access: 'pedestrian' }],
+    [{ status: 'denied', reason: 'desconocido' }],
+    [{ status: 'quizas' }],
+    ['texto'],
+    [null],
+  ])('rechaza un cuerpo que no cumple el contrato %o', async (body) => {
+    apiMock.request.mockResolvedValueOnce({ data: body })
+
+    await expect(ConciergeAPI.redeemVisitQr('ABCD1234')).rejects.toBeInstanceOf(UnexpectedQrRedeemResponseError)
+  })
+
+  it('un 401 desempareja (como cualquier request del kiosko)', async () => {
+    apiMock.request.mockRejectedValueOnce(httpError(401))
+
+    await expect(ConciergeAPI.redeemVisitQr('ABCD1234')).rejects.toBeInstanceOf(AxiosError)
+    expect(kioskCredentialStore.get()).toBeNull()
+  })
+
+  it('un 403 y un 429 se propagan sin tocar la credencial', async () => {
+    apiMock.request.mockRejectedValueOnce(httpError(403)).mockRejectedValueOnce(httpError(429))
+
+    await expect(ConciergeAPI.redeemVisitQr('ABCD1234')).rejects.toBeInstanceOf(AxiosError)
+    await expect(ConciergeAPI.redeemVisitQr('ABCD1234')).rejects.toBeInstanceOf(AxiosError)
+    expect(kioskCredentialStore.get()).toEqual(CREDENTIAL)
+  })
+
+  it('sin credencial emparejada no llama al backend', async () => {
+    kioskCredentialStore.clear()
+
+    await expect(ConciergeAPI.redeemVisitQr('ABCD1234')).rejects.toBeInstanceOf(KioskNotPairedError)
+    expect(apiMock.request).not.toHaveBeenCalled()
   })
 })
 

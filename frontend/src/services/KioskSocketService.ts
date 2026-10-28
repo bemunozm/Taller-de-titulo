@@ -103,9 +103,29 @@ export class KioskSocketService {
     })
 
     this.socket = socket
+    this.listenForWakeUps()
+  }
+
+  /**
+   * Reintenta ya, sin esperar el backoff. Lo llaman el regreso de la red, de
+   * la pestaña o de la caché de páginas (`bfcache`): son los momentos en que
+   * esperar hasta 60 s deja al kiosko sin respuesta del residente. Con el
+   * socket conectado no hace nada (socket.io detecta los cortes con su ping).
+   */
+  reconnectNow(): void {
+    const socket = this.socket
+    if (!socket || socket.connected) {
+      return
+    }
+    this.clearRetry()
+    // `disconnect()` cancela el backoff interno de socket.io; sin él, `connect()`
+    // no hace nada mientras la reconexión automática sigue "en curso".
+    socket.disconnect()
+    socket.connect()
   }
 
   disconnect(): void {
+    this.stopListeningForWakeUps()
     this.clearRetry()
     this.clearStableTimer()
     this.retryAttempt = 0
@@ -142,6 +162,40 @@ export class KioskSocketService {
         this.handlers.delete(event)
       }
     }
+  }
+
+  private readonly handleOnline = (): void => {
+    this.reconnectNow()
+  }
+
+  private readonly handlePageShow = (): void => {
+    this.reconnectNow()
+  }
+
+  private readonly handleVisibilityChange = (): void => {
+    if (document.visibilityState === 'visible') {
+      this.reconnectNow()
+    }
+  }
+
+  private listenForWakeUps(): void {
+    if (typeof window === 'undefined') {
+      return
+    }
+    // Idempotente: `connect` ya pasó por `disconnect`, pero no cuesta nada asegurarlo.
+    this.stopListeningForWakeUps()
+    window.addEventListener('online', this.handleOnline)
+    window.addEventListener('pageshow', this.handlePageShow)
+    document.addEventListener('visibilitychange', this.handleVisibilityChange)
+  }
+
+  private stopListeningForWakeUps(): void {
+    if (typeof window === 'undefined') {
+      return
+    }
+    window.removeEventListener('online', this.handleOnline)
+    window.removeEventListener('pageshow', this.handlePageShow)
+    document.removeEventListener('visibilitychange', this.handleVisibilityChange)
   }
 
   private scheduleRetry(): void {

@@ -61,8 +61,8 @@ export function KioskPrivacyNotice({ houseNumber, isStarting, onContinue, onCanc
   return (
     <section aria-labelledby={titleId} aria-describedby={descriptionId} className="mx-auto w-full max-w-2xl">
       {/* Encabezado */}
-      <div className="mb-8 text-center">
-        <div className="mb-4 flex justify-center">
+      <div className="mb-5 text-center">
+        <div className="mb-3 flex justify-center">
           <div className="rounded-2xl bg-gradient-to-br from-blue-500 to-blue-600 p-4 shadow-lg">
             <ShieldCheckIcon aria-hidden="true" className="h-10 w-10 text-white" />
           </div>
@@ -81,8 +81,8 @@ export function KioskPrivacyNotice({ houseNumber, isStarting, onContinue, onCanc
       </div>
 
       {/* Aviso (§5.2) */}
-      <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-xl sm:p-8 dark:border-zinc-800 dark:bg-zinc-900">
-        <ul id={descriptionId} role="list" className="space-y-5">
+      <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-800 dark:bg-zinc-900">
+        <ul id={descriptionId} role="list" className="space-y-4">
           {KIOSK_PRIVACY_NOTICE_PARTS.map((part, position) => {
             const PartIcon = NOTICE_ICONS[position]
             return (
@@ -97,25 +97,25 @@ export function KioskPrivacyNotice({ houseNumber, isStarting, onContinue, onCanc
         </ul>
 
         {/* Política: QR para el teléfono del visitante o lectura en el kiosko */}
-        <div className="mt-8 grid gap-5 rounded-xl bg-zinc-50 p-5 sm:grid-cols-[auto_1fr] sm:items-center dark:bg-white/5">
+        <div className="mt-6 grid grid-cols-[auto_1fr] items-center gap-4 rounded-xl bg-zinc-50 p-4 dark:bg-white/5">
           {/* Fondo blanco fijo: el QR debe leerse también en modo oscuro. */}
           <div className="mx-auto w-fit rounded-xl bg-white p-2 ring-1 ring-zinc-950/10">
             <QRCodeSVG
               value={policyUrl}
-              size={128}
+              size={104}
               level="M"
               role="img"
               title="Código QR del aviso de privacidad"
               aria-label="Código QR del aviso de privacidad"
             />
           </div>
-          <div className="text-center sm:text-left">
+          <div className="text-left">
             <p className="font-semibold text-zinc-950 dark:text-white">Aviso de privacidad</p>
             <p className="mt-1 text-sm/6 text-zinc-600 dark:text-zinc-400">
               Escanea el código con tu teléfono para leerlo completo, o entra a:
             </p>
             <p className="mt-1 font-mono text-sm font-medium break-all text-zinc-950 dark:text-white">{displayUrl}</p>
-            <Button outline onClick={() => setIsPolicyOpen(true)} className="mt-4 min-h-11 items-center!">
+            <Button outline onClick={() => setIsPolicyOpen(true)} className="mt-3 min-h-11 items-center!">
               Ver aviso de privacidad
             </Button>
           </div>
@@ -123,15 +123,15 @@ export function KioskPrivacyNotice({ houseNumber, isStarting, onContinue, onCanc
       </div>
 
       {/* Acciones */}
-      <div className="mt-8 flex flex-col-reverse gap-4 sm:flex-row sm:justify-center">
-        <Button outline onClick={onCancel} className="min-h-14 items-center! sm:min-w-44">
+      <div className="mt-5 flex flex-col-reverse gap-3 sm:flex-row sm:justify-center">
+        <Button outline onClick={onCancel} className="min-h-14 items-center! text-lg! sm:min-w-44">
           Cancelar
         </Button>
-        <Button color="blue" onClick={onContinue} disabled={isStarting} className="min-h-14 items-center! sm:min-w-44">
+        <Button color="blue" onClick={onContinue} disabled={isStarting} className="min-h-14 items-center! text-lg! sm:min-w-44">
           {isStarting ? 'Conectando…' : 'Continuar'}
         </Button>
       </div>
-      <p aria-live="polite" className="mt-4 min-h-6 text-center text-sm text-zinc-500 dark:text-zinc-400">
+      <p aria-live="polite" className="mt-3 min-h-6 text-center text-sm text-zinc-500 dark:text-zinc-400">
         {isStarting ? 'Pidiendo acceso al micrófono…' : ''}
       </p>
 
