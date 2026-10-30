@@ -1,78 +1,118 @@
+"""Worker del Guardián: captura RTSP -> `GuardianPipeline` -> envío al backend.
+
+Las decisiones (movimiento, YOLO, intrusión/merodeo, cooldowns, re-enlace de
+tracks) viven en `guardian_pipeline.py` y `guardian_rules.py`, que comparte con
+`lpr/tools/guardian_replay.py`. Aquí queda solo lo que toca el mundo:
+
+* captura con reconexión y detección de stream congelado;
+* zonas del backend en un hilo daemon de fondo (la captura NUNCA espera al GET);
+* armado y POST de la anomalía (sin escribir nada a disco: Ley 21.719);
+* heartbeat con métricas de rendimiento.
+"""
+import concurrent.futures
 import logging
-import time
-import os
 import sys
-import json
+import threading
+import time
+from pathlib import Path
+from typing import Any, Optional
+
 import cv2
 import numpy as np
-import concurrent.futures
-from pathlib import Path
-from ultralytics import YOLO
+import requests  # noqa: F401  (los tests parchean `guardian_worker.requests.get`)
 
-from lpr.utils.images import frame_to_pil, pil_to_base64
-from lpr.utils.capture import reconnect_capture
-from lpr.api.client import fetch_camera_json, post_event, post_anomaly
+from lpr.api.client import consumes_dedupe, fetch_camera_json, post_anomaly
+from lpr.processor.guardian_pipeline import (
+    DEFAULT_IMGSZ,
+    GuardianPipeline,
+    MotionGate,
+    effective_device,
+    load_model,
+)
+from lpr.processor.guardian_rules import (
+    AnomalyDecision,
+    GuardianConfig,
+    GuardianRules,
+    max_gap_for_poll_interval,
+    parse_guardian_zones,
+)
 from lpr.settings import settings
-from lpr.utils.zones import point_in_polygon, polygon_mask, polygon_to_pixels, valid_polygons
-import requests
+from lpr.utils.capture import reconnect_capture
+from lpr.utils.images import frame_to_pil, pil_to_base64
+
+HEARTBEAT_SECONDS = 30.0
+FIRST_ZONES_FETCH_TIMEOUT = 3.0
+# Refetch de zonas: nunca más seguido que esto (aunque la config diga menos).
+MIN_ZONES_REFETCH_SECONDS = 5.0
+# Tras un fallo el hilo reintenta a 2, 4, 8 s... hasta el intervalo normal.
+ZONES_BACKOFF_BASE_SECONDS = 2.0
+
 
 class GuardianWorker:
-    def __init__(self, cfg):
+    def __init__(self, cfg, model: Any = None, model_path: Optional[Path] = None,
+                 rules: Optional[GuardianRules] = None, start_zones_thread: bool = True):
         self.cfg = cfg
-        # Usamos YOLOv11 nano con alta resolución para detectar a lo lejos sin perder velocidad
-        self.model = YOLO('yolo11n.pt') 
-        self.sightings = {} # track_id -> {'first_seen': float, 'last_seen': float}
-        
+        if model is None:
+            try:
+                # Modelo LOCAL (`lpr/yolo11n.pt`), sin descarga en runtime.
+                model = load_model(model_path)
+            except FileNotFoundError as exc:
+                logging.error(
+                    'Modelo del Guardián no encontrado (%s): no se descarga nada en runtime. '
+                    'Copia yolo11n.pt a lpr/. Terminando para que el supervisor reintente.', exc)
+                sys.exit(1)
+        self.model = model
+        self.rules = rules or GuardianRules(GuardianConfig(
+            max_gap_seconds=max_gap_for_poll_interval(getattr(self.cfg, 'poll_interval', None))))
+        self.pipeline = GuardianPipeline(
+            model=self.model, rules=self.rules, gate=MotionGate(),
+            device=getattr(self.cfg, 'device', None), imgsz=DEFAULT_IMGSZ)
+
         max_workers = int(settings.LPR_MAX_WORKERS)
         try:
             self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
         except Exception:
             self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.processing_future = None
-        self.detections_dir = getattr(self.cfg, 'detections_dir', 'detecciones')
 
-        try:
-            os.makedirs(self.detections_dir, exist_ok=True)
-        except Exception:
-            logging.exception('No se pudo crear detections_dir %s', self.detections_dir)
-            
-        self.loitering_seconds_threshold = 20.0 # Segundos para considerar merodeo
-        self.emitted_cache = {} # track_id -> last_emitted_ts para no spamear
-        
-        # Heartbeat para visibilidad
+        # Métricas del heartbeat. La captura y el hilo de proceso las tocan a la vez.
+        self._stats_lock = threading.Lock()
         self.last_heartbeat = time.time()
-        self.frame_count = 0
-        
-        # Zonas de intrusión
-        self.guardian_zones = []
-        self.zones_last_fetched = 0
+        self._reads = 0
+        self._inferences = 0
+        self._inference_ms = 0.0
+
         # Si el backend deshabilita el Guardián para esta cámara, se respeta.
         # Por defecto habilitado (fail-safe: ante un fetch fallido preferimos
         # vigilar de más que apagar la seguridad en silencio).
         self.guardian_enabled = True
-        self._fetch_zones()
+        self.zones_last_fetched = 0.0
+        self._zones_ok = False
+        self._stop_zones = threading.Event()
+        self._zones_thread: Optional[threading.Thread] = None
+        self._start_zones_thread = start_zones_thread
+        # Primera carga síncrona pero con timeout corto: arrancar con las zonas
+        # correctas sin atascar el inicio si el backend no responde.
+        self._fetch_zones(timeout=FIRST_ZONES_FETCH_TIMEOUT)
 
-        # --- MEJORAS SAAS ---
-        # 1. Motion Gating (MOG2)
-        self.back_sub = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=25, detectShadows=False)
-        self.motion_pixel_threshold = 150 # Área mínima de movimiento para "despertar" a la IA
-        
-        # 2. Estabilidad Temporal
-        self.track_hits = {} # track_id -> total_frames_seen
-        self.min_hits_threshold = 3 # Mínimo de frames para confiar en la detección
-        
-        # 3. Control de FPS (IA)
-        self.target_ia_fps = 5.0
-        self.last_ia_proc_time = 0
+    # ------------------------------------------------------------------
+    # Zonas (hilo de fondo)
+    # ------------------------------------------------------------------
+    @property
+    def guardian_zones(self):
+        """Zonas vigentes (tipadas), para inspección y tests."""
+        return self.rules.zones
 
-    def _fetch_zones(self):
+    def _fetch_zones(self, timeout: float = 5.0) -> bool:
+        """Un intento de carga. Devuelve True si el backend entregó zonas válidas."""
+        ok = False
         try:
             # Fase 4 · P5.B/P5.C: la ruta exige la API key de servicio
             # (ServiceApiKeyGuard, acotada al condominio de la key); el helper
             # manda `service_headers`. Sin el header respondía 401 y el Guardián
             # corría SIN zonas (todo el cuadro).
             data = fetch_camera_json(
-                self.cfg.backend_url, f"/anomalies/cameras/{self.cfg.camera_id}/zones", timeout=5,
+                self.cfg.backend_url, f"/anomalies/cameras/{self.cfg.camera_id}/zones", timeout=timeout,
             )
             if data is None:
                 # El helper ya logueó el motivo (4xx/5xx/red/cuerpo inválido).
@@ -81,25 +121,64 @@ class GuardianWorker:
                     self.cfg.camera_id,
                 )
             else:
-                logging.info(f"[VIGILIA-DEBUG] [ZONE-FETCH] Raw data received: {json.dumps(data)}")
-                # Solo un `false` explícito deshabilita; ausente o true => habilitado.
-                self.guardian_enabled = data.get('enableGuardian') is not False
-                if not self.guardian_enabled:
-                    logging.warning('Guardián deshabilitado en BD para %s — no se procesarán frames.', self.cfg.camera_id)
-
-                # list of polygons (lists of dicts {x: float, y: float})
-                zones = data.get('guardianZones', [])
-                valid_zones = valid_polygons(zones)
-                self.guardian_zones = valid_zones
-                logging.info('Descargadas %d zonas de intrusión para %s', len(valid_zones), self.cfg.camera_id)
+                self._apply_zones(data)
+                ok = True
         except Exception as e:
             logging.error('Error obteniendo zonas del Guardián: %s', e)
         finally:
             # Marcar el intento SIEMPRE (éxito o fallo) para que el refetch
-            # respete `LPR_ZONES_REFETCH_SECONDS`. Sin esto, con el backend
-            # caído se reintentaba el GET bloqueante en CADA frame → colapso de FPS.
+            # respete `LPR_ZONES_REFETCH_SECONDS`.
             self.zones_last_fetched = time.time()
+            self._zones_ok = ok
+        return ok
 
+    def _apply_zones(self, data: dict) -> None:
+        """Reemplaza zonas y toggle de una vez (el parseo ocurre ANTES de tocar
+        el estado, así el hilo de frames nunca ve zonas a medias)."""
+        enabled = data.get('enableGuardian') is not False  # solo un `false` explícito deshabilita
+        zones = parse_guardian_zones(data.get('guardianZones', []))
+        changed = self.rules.set_zones(zones)
+        if enabled != self.guardian_enabled:
+            self.guardian_enabled = enabled
+            if not enabled:
+                logging.warning('Guardián deshabilitado en BD para %s — no se procesarán frames.',
+                                self.cfg.camera_id)
+        if changed:
+            logging.info('Zonas del Guardián de %s actualizadas: %d (intrusión=%d, merodeo=%d)',
+                         self.cfg.camera_id, len(zones),
+                         sum(1 for z in zones if z.type == 'intrusion'),
+                         sum(1 for z in zones if z.type == 'loitering'))
+
+    @staticmethod
+    def _refetch_interval() -> float:
+        return max(MIN_ZONES_REFETCH_SECONDS, float(settings.LPR_ZONES_REFETCH_SECONDS))
+
+    @staticmethod
+    def _zones_delay(refetch_seconds: float, failures: int) -> float:
+        """Espera hasta el próximo intento: normal si todo va bien; con fallos,
+        backoff corto (2, 4, 8 s...) acotado por el intervalo normal."""
+        if failures <= 0:
+            return refetch_seconds
+        return min(refetch_seconds, ZONES_BACKOFF_BASE_SECONDS * (2 ** (failures - 1)))
+
+    def _zones_loop(self, refetch_seconds: float) -> None:
+        # Si la primera carga (síncrona, en __init__) falló, se arranca ya en backoff:
+        # un backend que levanta después no deja al Guardián sin zonas minutos.
+        failures = 0 if self._zones_ok else 1
+        while not self._stop_zones.wait(self._zones_delay(refetch_seconds, failures)):
+            failures = 0 if self._fetch_zones() else failures + 1
+
+    def _ensure_zones_thread(self) -> None:
+        if not self._start_zones_thread or self._zones_thread is not None:
+            return
+        refetch = self._refetch_interval()
+        self._zones_thread = threading.Thread(
+            target=self._zones_loop, args=(refetch,), name='guardian-zones', daemon=True)
+        self._zones_thread.start()
+
+    # ------------------------------------------------------------------
+    # Captura
+    # ------------------------------------------------------------------
     def start_capture_loop(self, cap):
         last_frame_ts = 0
         last_successful_read_ts = time.time()
@@ -107,7 +186,7 @@ class GuardianWorker:
         consecutive_failures = 0
         max_failures = int(settings.LPR_STREAM_MAX_READ_FAILURES)
         stale_seconds = float(settings.LPR_STREAM_STALE_SECONDS)
-        zones_refetch_seconds = float(settings.LPR_ZONES_REFETCH_SECONDS)
+        self._ensure_zones_thread()
         try:
             while True:
                 ret, frame = cap.read()
@@ -129,6 +208,8 @@ class GuardianWorker:
                     time.sleep(1)
                     continue
                 consecutive_failures = 0
+                with self._stats_lock:
+                    self._reads += 1
                 # Stream CONGELADO: ret=True con el mismo frame en buffer. Firma
                 # barata (muestra dispersa); solo un frame NUEVO refresca stale.
                 try:
@@ -150,35 +231,42 @@ class GuardianWorker:
                     last_successful_read_ts = time.time()
                     continue
 
-                # Refetch periódico de zonas/config del Guardián: antes
-                # `_fetch_zones()` solo corría en `__init__`, así que editar
-                # zonas o el toggle enableGuardian en la UI no tenía efecto
-                # hasta reiniciar el proceso (zones_last_fetched se escribía
-                # pero nunca se releía).
-                if now - self.zones_last_fetched > zones_refetch_seconds:
-                    self._fetch_zones()
+                self._maybe_heartbeat(now)
 
                 # Un FPS bajo es suficiente para tracking de personas/merodeo (ej: 2 a 5 FPS)
                 if now - last_frame_ts < self.cfg.poll_interval:
                     time.sleep(0.005)
                     continue
                 last_frame_ts = now
-                self.frame_count += 1
-
-                # Heartbeat cada 30 segundos
-                if now - self.last_heartbeat > 30:
-                    fps = self.frame_count / (now - self.last_heartbeat)
-                    logging.info(f"[VIGILIA-DEBUG] --- [HEARTBEAT] {self.cfg.camera_id} - Procesando a {fps:.2f} FPS ---")
-                    self.last_heartbeat = now
-                    self.frame_count = 0
 
                 self.submit_frame(frame)
         finally:
+            self._stop_zones.set()
             try:
                 self.executor.shutdown(wait=False)
             except Exception:
                 pass
 
+    def _maybe_heartbeat(self, now: float) -> None:
+        elapsed = now - self.last_heartbeat
+        if elapsed <= HEARTBEAT_SECONDS:
+            return
+        with self._stats_lock:
+            reads, inferences, total_ms = self._reads, self._inferences, self._inference_ms
+            self._reads = self._inferences = 0
+            self._inference_ms = 0.0
+        self.last_heartbeat = now
+        avg_ms = total_ms / inferences if inferences else 0.0
+        logging.info(
+            '[HEARTBEAT] %s - captura %.2f fps, inferencias %.2f/s (%.1f ms promedio), device=%s, '
+            'tracks activos=%d, zonas=%d, habilitado=%s',
+            self.cfg.camera_id, reads / elapsed, inferences / elapsed, avg_ms,
+            effective_device(self.model, getattr(self.cfg, 'device', None)),
+            self.rules.active_tracks, len(self.rules.zones), self.guardian_enabled)
+
+    # ------------------------------------------------------------------
+    # Proceso de frames
+    # ------------------------------------------------------------------
     def _on_frame_done(self, fut):
         """Hace visible cualquier excepción del pipeline (ver LprWorker)."""
         try:
@@ -195,197 +283,74 @@ class GuardianWorker:
         self.processing_future = fut
 
     def _process_frame(self, frame: np.ndarray):
-        now_ts = time.time()
-
         # Respetar el toggle del backend: si el Guardián está deshabilitado
         # para esta cámara, no se procesa nada.
         if not self.guardian_enabled:
             return
+        result = self.pipeline.process(frame, time.monotonic())
+        if result.ran_inference:
+            with self._stats_lock:
+                self._inferences += 1
+                self._inference_ms += result.inference_ms
+            logging.debug('[GUARDIAN] %s personas=%d (%.1f ms, movimiento=%s, retención=%s)',
+                          self.cfg.camera_id, result.people, result.inference_ms,
+                          result.motion, result.retained)
+        for decision in result.decisions:
+            self._trigger_anomaly(frame, decision)
 
-        # --- CONTROL DE FPS (IA) ---
-        # No procesamos IA más rápido de lo necesario (5 FPS es suficiente para seguridad)
-        if now_ts - self.last_ia_proc_time < (1.0 / self.target_ia_fps):
-            return
-        
-        # --- DETECCION DE MOVIMIENTO (MOTION GATING) ---
-        # Convertimos a escala de grises y aplicamos MOG2 (muy rápido)
-        fg_mask = self.back_sub.apply(frame)
-        
-        # Limpiar ruido de la máscara
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
-        
-        motion_detected = False
+    def _trigger_anomaly(self, frame: np.ndarray, decision: AnomalyDecision):
         h, w = frame.shape[:2]
-        
-        if not self.guardian_zones:
-            # Si no hay zonas, cualquier movimiento grande despierta la IA
-            if np.count_nonzero(fg_mask) > self.motion_pixel_threshold:
-                motion_detected = True
-        else:
-            # Solo buscar movimiento dentro de las zonas definidas
-            for zone in self.guardian_zones:
-                # Crear máscara para la zona
-                zone_mask = polygon_mask(fg_mask.shape[:2], polygon_to_pixels(zone, w, h))
-                
-                # Intersección: movimiento dentro de la zona
-                motion_in_zone = cv2.bitwise_and(fg_mask, zone_mask)
-                if np.count_nonzero(motion_in_zone) > self.motion_pixel_threshold:
-                    motion_detected = True
-                    break
-        
-        if not motion_detected:
-            # Si no hay movimiento, saltamos la IA pesada (Ahorro masivo de CPU)
-            return
+        x1, y1, x2, y2 = decision.bbox
+        x1c, y1c, x2c, y2c = max(0, int(x1)), max(0, int(y1)), min(w - 1, int(x2)), min(h - 1, int(y2))
+        anomaly_type = decision.type
 
-        self.last_ia_proc_time = now_ts
-        self.frame_count += 1
-        
-        # Opcional: Debug log de frame cada 100 frames
-        if self.frame_count % 100 == 0:
-            avg_color = np.mean(frame)
-            logging.info(f"[VIGILIA-DEBUG] [FRAME-DEBUG] {self.cfg.camera_id} - IA Procesando (Movimiento detectado)")
-
-        # classes=0 (sólo personas), persist=True (mantener IDs entre frames)
-        # imgsz=960 es un buen balance entre velocidad y detección a lo lejos
-        results = self.model.track(frame, classes=[0], persist=True, tracker="bytetrack.yaml", verbose=False, imgsz=960)
-        
-        if not results or not results[0].boxes:
-            logging.info(f"[VIGILIA-DEBUG] [TRACK-DEBUG] No se detectaron personas en este frame.")
-            # Limpiar track_hits para IDs que ya no se ven
-            self.track_hits = {tid: hits for tid, hits in self.track_hits.items() if now_ts - self.sightings.get(tid, {}).get('last_seen', 0) < 5}
-            return
-            
-        boxes = results[0].boxes
-        logging.info(f"[VIGILIA-DEBUG] [TRACK-DEBUG] Detectadas {len(boxes)} personas.")
-        
-        # Iterar sobre las detecciones en este frame
-        for i, box in enumerate(boxes):
-            if box.id is None: continue
-            
-            track_id = int(box.id.item())
-            conf = float(box.conf.item())
-            
-            # Limpiar sightins antiguos para no llenar RAM
-            self._cleanup_sightings(now_ts)
-            
-            # Actualizar sightings y contador de frames (estabilidad)
-            if track_id not in self.sightings:
-                self.sightings[track_id] = {'first_seen': now_ts, 'last_seen': now_ts}
-            else:
-                self.sightings[track_id]['last_seen'] = now_ts
-                
-            self.track_hits[track_id] = self.track_hits.get(track_id, 0) + 1
-            elapsed_seconds = now_ts - self.sightings[track_id]['first_seen']
-            
-            # REGLA 1: Intrusión de Zona
-            intrusion_detected = False
-            is_stable = self.track_hits[track_id] >= self.min_hits_threshold
-            
-            if self.guardian_zones:
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
-                h, w = frame.shape[:2]
-                
-                points_to_check = [
-                    ((x1 + x2) / 2.0, y1), # Cabeza
-                    ((x1 + x2) / 2.0, (y1 + y2) / 2.0), # Centro
-                    ((x1 + x2) / 2.0, y2)  # Pies
-                ]
-
-                for idx, zone in enumerate(self.guardian_zones):
-                    poly_pts = polygon_to_pixels(zone, w, h)
-                    
-                    for p_idx, pt in enumerate(points_to_check):
-                        inside = point_in_polygon(pt, poly_pts)
-                        
-                        if inside:
-                            p_name = ["Cabeza", "Centro", "Pies"][p_idx]
-                            logging.info(f"[VIGILIA-DEBUG-INTRUSION] Track:{track_id} Hits:{self.track_hits[track_id]} Pos:{p_name} Inside:True Stable:{is_stable}")
-                            if is_stable:
-                                intrusion_detected = True
-                                break
-                    if intrusion_detected: break
-            
-            # Decidir qué anomalía lanzar
-            if intrusion_detected:
-                logging.info(f"[VIGILIA-IA] 🚩 INTRUSION CONFIRMADA - Track:{track_id} (Hits:{self.track_hits[track_id]})")
-                last_emitted = self.emitted_cache.get(f"intrusion_{track_id}", 0)
-                if now_ts - last_emitted > 10: 
-                    self._trigger_anomaly(frame, track_id, box, "intrusion", elapsed_seconds)
-                    self.emitted_cache[f"intrusion_{track_id}"] = now_ts
-                    
-            elif elapsed_seconds > self.loitering_seconds_threshold and is_stable:
-                last_emitted = self.emitted_cache.get(f"loitering_{track_id}", 0)
-                if now_ts - last_emitted > 60: 
-                    self._trigger_anomaly(frame, track_id, box, "loitering", elapsed_seconds)
-                    self.emitted_cache[f"loitering_{track_id}"] = now_ts
-                    
-    def _trigger_anomaly(self, frame, track_id, box, anomaly_type, elapsed_seconds):
-        x1, y1, x2, y2 = box.xyxy[0].tolist()
-        h, w = frame.shape[:2]
-        x1c, y1c, x2c, y2c = max(0, int(x1)), max(0, int(y1)), min(w-1, int(x2)), min(h-1, int(y2))
-        
-        crop = frame[y1c:y2c, x1c:x2c]
-        pil_crop = frame_to_pil(crop)
-        
-        conf = float(box.conf.item())
-        
-        now_ts = time.time()
-        
-        # Guardar disco
-        det_fname = f'{self.cfg.camera_id}_anomaly_{anomaly_type}_{int(now_ts)}.jpg'
-        det_path = os.path.join(self.detections_dir, det_fname)
-        frame_det = frame.copy()
-        
-        try:
-            cv2.rectangle(frame_det, (int(x1c), int(y1c)), (int(x2c), int(y2c)), (0, 0, 255), 3)
-            label = f'P-{track_id} {anomaly_type} ({int(elapsed_seconds)}s)'
-            cv2.putText(frame_det, label, (int(x1c), max(20, int(y1c) - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            cv2.imwrite(det_path, frame_det)
-        except Exception:
-            logging.exception('Error anotando frame de anomalia')
-            
-        # Contexto Visual Enriquecido: Enviamos el frame completo con la anotación para que la IA vea el entorno
+        # Contexto visual: el frame completo con la caja dibujada, para que la IA
+        # vea el entorno. Solo en memoria: nada se escribe a disco.
         snapshot_b64 = None
         if getattr(self.cfg, 'include_snapshot', True):
             try:
-                # Usamos frame_det que ya tiene el recuadro dibujado
-                snapshot_b64 = pil_to_base64(frame_to_pil(frame_det), quality=70)
+                annotated = frame.copy()
+                cv2.rectangle(annotated, (x1c, y1c), (x2c, y2c), (0, 0, 255), 3)
+                label = f'P-{decision.track_id} {anomaly_type} ({int(decision.duration_seconds)}s)'
+                cv2.putText(annotated, label, (x1c, max(20, y1c - 10)), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.8, (0, 0, 255), 2)
+                snapshot_b64 = pil_to_base64(frame_to_pil(annotated), quality=70)
             except Exception:
-                logging.exception('Error convirtiendo full-frame anotado a B64')
-                snapshot_b64 = pil_to_base64(pil_crop)
+                logging.exception('Error anotando/convirtiendo el frame de la anomalía; se envía el recorte')
+                try:
+                    snapshot_b64 = pil_to_base64(frame_to_pil(frame[y1c:y2c, x1c:x2c]))
+                except Exception:
+                    logging.exception('Error convirtiendo el recorte a B64')
 
         meta = {
-            'bbox': [int(x1c), int(y1c), int(x2c), int(y2c)],
+            'bbox': [x1c, y1c, x2c, y2c],
             'snapshot_jpeg_b64': snapshot_b64,
             'anomaly_type': anomaly_type,
-            'duration_seconds': int(elapsed_seconds),
-            'track_id': track_id
+            'duration_seconds': int(decision.duration_seconds),
+            'track_id': decision.track_id,
         }
-        
-        # El ID puede venir con sufijo '_guardia' si es administrado por el manager. 
+
+        # El ID puede venir con sufijo '_guardia' si es administrado por el manager.
         # Lo limpiamos para que el backend asocie bien la cámara.
         clean_camera_id = self.cfg.camera_id.replace('_guardia', '')
 
         payload = {
             'cameraId': clean_camera_id,
             'anomalyType': anomaly_type,
-            'confidence': conf,
+            'confidence': decision.conf,
             'meta': meta,
             # NO se envía la URL RTSP (credenciales de la cámara); el backend
             # identifica la cámara por `cameraId`.
-            'detectionTimestamp': int(now_ts * 1000),
-            'detection_path': det_path,
+            'detectionTimestamp': int(time.time() * 1000),
         }
-        
-        logging.info('[VIGILIA-IA] 🚨 REPORTANDO ANOMALIA: %s en %s (Real: %s). Tracker ID: %s', anomaly_type, self.cfg.camera_id, clean_camera_id, track_id)
-        post_anomaly(self.cfg.backend_url, payload, dry_run=self.cfg.dry_run)
-        
-    def _cleanup_sightings(self, now_ts):
-        # Eliminar items que no hemos visto en más de 30 segundos
-        to_delete = []
-        for tid, data in self.sightings.items():
-            if now_ts - data['last_seen'] > 30:
-                to_delete.append(tid)
-        for tid in to_delete:
-            del self.sightings[tid]
+
+        logging.info('[VIGILIA-IA] REPORTANDO ANOMALIA: %s en %s (Real: %s). Tracker ID: %s zona=%s',
+                     anomaly_type, self.cfg.camera_id, clean_camera_id, decision.track_id, decision.zone_index)
+        status = post_anomaly(self.cfg.backend_url, payload, dry_run=self.cfg.dry_run)
+        if not consumes_dedupe(status):
+            # El aviso NO llegó (backend caído, 4xx/5xx): sin esto el cooldown se
+            # "gastaba" igual y la alerta se perdía. Se olvida para re-alertar.
+            # STATUS_MAYBE_SENT sí consume el cooldown (reintentar duplicaría).
+            self.rules.forget_emission(decision)
+            logging.warning('Anomalía %s de %s no entregada (estado %s): se reintentará en el próximo frame',
+                            anomaly_type, self.cfg.camera_id, status)

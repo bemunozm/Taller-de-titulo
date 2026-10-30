@@ -33,7 +33,13 @@ def debug_guardian(camera_id, video_path=None):
     try:
         url_zones = f"{BACKEND_URL}/anomalies/cameras/{camera_id}/zones"
         resp_zones = requests.get(url_zones, headers=HEADERS, timeout=5)
-        zones_data = resp_zones.json().get('guardianZones', [])
+        # El backend devuelve zonas `{points, type, loiterSeconds?}` (o el formato
+        # legacy, solo la lista de puntos): aquí solo se dibujan los polígonos.
+        zones_data = [
+            zone['points'] if isinstance(zone, dict) else zone
+            for zone in resp_zones.json().get('guardianZones', [])
+            if not isinstance(zone, dict) or isinstance(zone.get('points'), list)
+        ]
         
         source_to_use = video_path
         if not source_to_use:
