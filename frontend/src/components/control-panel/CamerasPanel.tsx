@@ -9,6 +9,7 @@ import type { Role } from '@/types/index'
 import MultiSelectCombobox from '@/components/ui/MultiSelectCombobox'
 import { useForm, Controller } from 'react-hook-form'
 import type { CreateCameraFormData, CreateCameraPayload, UpdateCameraFormData, Camera, OrganizationScoped } from '@/types/index'
+import { parseGuardianZones } from '@/types/index'
 import { CONDOMINIUM_REQUIRED_MESSAGE, scopeCreatePayload, withoutOrganizationId } from '@/helpers/condominium'
 import { useCondominiumScope } from '@/hooks/useCondominiumScope'
 import { CondominiumSelect } from '@/components/condominiums/CondominiumSelect'
@@ -657,7 +658,8 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
       {showZoneEditor && (
         <ZoneEditor
           camera={showZoneEditor}
-          initialZones={showZoneEditor.guardianZones ?? []}
+          initialZones={parseGuardianZones(showZoneEditor.guardianZones).map((zone) => zone.points)}
+          initialZoneSettings={parseGuardianZones(showZoneEditor.guardianZones)}
           tone="guardian"
           title={
             <>
@@ -669,7 +671,7 @@ export default function CamerasPanel({ triggerNew }: CamerasPanelProps) {
               Ajustando precisión visual para <span className="text-indigo-400 font-bold">{showZoneEditor.name}</span>
             </>
           }
-          onSave={async (zones) => {
+          onSaveZones={async (zones) => {
             await updateCameraGuardianZones(showZoneEditor.id, zones)
             await queryClient.invalidateQueries({ queryKey: ['cameras'] })
           }}

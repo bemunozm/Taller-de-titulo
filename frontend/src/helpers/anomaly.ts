@@ -1,4 +1,4 @@
-import type { AnomalyEvent } from '@/types/anomaly'
+import type { AnomalyEvent, AnomalyStatus } from '@/types/anomaly'
 
 export type AnomalySeverityColor = 'red' | 'orange' | 'zinc'
 
@@ -56,4 +56,82 @@ export function formatAnomalyDuration(seconds: number | null | undefined): strin
 /** Metadatos descargables: todo menos la foto (base64 pesado, ya visible en pantalla). */
 export function anomalyMetadata(anomaly: AnomalyEvent): Record<string, unknown> {
   return Object.fromEntries(Object.entries(anomaly).filter(([key]) => key !== 'snapshotJpegB64'))
+}
+
+export type AnomalyBadgeColor = 'amber' | 'green' | 'zinc' | 'sky'
+
+export const ANOMALY_STATUS_META: Record<AnomalyStatus, { label: string; color: AnomalyBadgeColor }> = {
+  open: { label: 'Abierta', color: 'amber' },
+  reviewed: { label: 'Revisada', color: 'green' },
+  dismissed: { label: 'Descartada', color: 'zinc' },
+  false_alarm: { label: 'Falsa alarma', color: 'sky' },
+}
+
+/** Etiqueta y color del estado de revisión. */
+export function anomalyStatusMeta(status: AnomalyStatus): { label: string; color: AnomalyBadgeColor } {
+  return ANOMALY_STATUS_META[status]
+}
+
+export interface AnomalyStatusAction {
+  /** Estado al que lleva la acción. */
+  target: AnomalyStatus
+  label: string
+  /** Título del diálogo de confirmación. */
+  dialogTitle: string
+  /** Texto del botón de confirmación. */
+  confirmLabel: string
+  toastMessage: string
+}
+
+const STATUS_ACTIONS: Record<AnomalyStatus, AnomalyStatusAction> = {
+  reviewed: {
+    target: 'reviewed',
+    label: 'Marcar revisada',
+    dialogTitle: 'Marcar como revisada',
+    confirmLabel: 'Marcar revisada',
+    toastMessage: 'Anomalía marcada como revisada',
+  },
+  dismissed: {
+    target: 'dismissed',
+    label: 'Descartar',
+    dialogTitle: 'Descartar anomalía',
+    confirmLabel: 'Descartar',
+    toastMessage: 'Anomalía descartada',
+  },
+  false_alarm: {
+    target: 'false_alarm',
+    label: 'Falsa alarma',
+    dialogTitle: 'Marcar como falsa alarma',
+    confirmLabel: 'Marcar falsa alarma',
+    toastMessage: 'Anomalía marcada como falsa alarma',
+  },
+  open: {
+    target: 'open',
+    label: 'Reabrir',
+    dialogTitle: 'Reabrir anomalía',
+    confirmLabel: 'Reabrir',
+    toastMessage: 'Anomalía reabierta',
+  },
+}
+
+/** Acciones según el estado actual: una abierta se resuelve; una resuelta solo se reabre. */
+export function anomalyStatusActions(status: AnomalyStatus): AnomalyStatusAction[] {
+  return status === 'open'
+    ? [STATUS_ACTIONS.reviewed, STATUS_ACTIONS.dismissed, STATUS_ACTIONS.false_alarm]
+    : [STATUS_ACTIONS.open]
+}
+
+/** Permiso que habilita revisar/descartar anomalías (Administrador y Conserje). */
+export const ANOMALY_RESOLVE_PERMISSION = 'anomalies.resolve'
+
+/** Refresco mientras la IA analiza: cada 5 s y como máximo 24 veces (~2 min). */
+export const ANOMALY_AI_POLL_MS = 5_000
+export const ANOMALY_AI_POLL_MAX_UPDATES = 24
+
+/**
+ * Intervalo de refresco mientras la IA analiza (`aiStatus = 'pending'`), con
+ * tope de intentos: complementa a `security:anomaly_updated` si el socket cae.
+ */
+export function anomalyAiPollInterval(isPending: boolean, updateCount: number): number | false {
+  return isPending && updateCount < ANOMALY_AI_POLL_MAX_UPDATES ? ANOMALY_AI_POLL_MS : false
 }

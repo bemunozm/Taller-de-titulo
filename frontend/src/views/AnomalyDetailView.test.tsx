@@ -7,8 +7,22 @@ import { ApiError } from '@/helpers/httpErrors'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import AnomalyDetailView from './AnomalyDetailView'
 
-const detectionsApi = vi.hoisted(() => ({ getAnomaly: vi.fn<(id: string) => Promise<AnomalyEvent>>() }))
+const detectionsApi = vi.hoisted(() => ({
+  getAnomaly: vi.fn<(id: string) => Promise<AnomalyEvent>>(),
+  updateAnomalyStatus: vi.fn<(id: string, status: string, note?: string) => Promise<AnomalyEvent>>(),
+}))
 vi.mock('@/api/DetectionsAPI', () => detectionsApi)
+
+const permissionsState = vi.hoisted(() => ({ permissions: [] as string[] }))
+vi.mock('@/hooks/usePermissions', () => ({
+  usePermissions: () => ({
+    userPermissions: permissionsState.permissions,
+    hasPermission: (permission: string) => permissionsState.permissions.includes(permission),
+  }),
+}))
+
+const toastMock = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }))
+vi.mock('react-toastify', () => ({ toast: toastMock }))
 
 const cameraApi = vi.hoisted(() => ({ listCameras: vi.fn() }))
 vi.mock('@/api/CameraAPI', () => cameraApi)
@@ -30,6 +44,7 @@ const FULL: AnomalyEvent = {
   suspicionLevel: 'HIGH',
   aiReasoning: 'Persona trepando el cerco perimetral',
   timestamp: '2026-10-08T12:00:00.000Z',
+  status: 'open',
 }
 
 function LocationProbe() {
@@ -52,6 +67,7 @@ function renderDetail(path = `/traceability/anomalies/${ID}`) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  permissionsState.permissions = []
   cameraApi.listCameras.mockResolvedValue([{ id: 'cam-uuid-1', name: 'Portón principal' }])
 })
 

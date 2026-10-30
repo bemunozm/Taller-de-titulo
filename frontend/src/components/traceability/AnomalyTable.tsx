@@ -1,15 +1,12 @@
 import { useMemo, useState, type ComponentProps, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { listAnomalies, type AnomalyEvent } from '@/api/DetectionsAPI'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { listAnomalies } from '@/api/DetectionsAPI'
 import {
   createColumnHelper,
   getCoreRowModel,
-  useReactTable,
-  getSortedRowModel,
   getFilteredRowModel,
-  getPaginationRowModel,
+  useReactTable,
   flexRender,
-  type SortingState,
 } from '@tanstack/react-table'
 import { Button } from '@/components/ui/Button'
 import { Input, InputGroup } from '@/components/ui/Input'
@@ -18,25 +15,47 @@ import { Badge } from '@/components/ui/Badge'
 import { Subheading } from '@/components/ui/Heading'
 import {
   ArrowPathIcon,
-  ChevronUpIcon,
-  ChevronDownIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
   MagnifyingGlassIcon,
   FunnelIcon,
-  XMarkIcon
+  XMarkIcon,
 } from '@heroicons/react/16/solid'
-import { anomalyDetailPath } from '@/helpers/anomaly'
+import { anomalyAiPollInterval, anomalyDetailPath, anomalyStatusMeta } from '@/helpers/anomaly'
+import { ANOMALY_STATUSES, ANOMALY_TYPES, type AnomalyListItem, type AnomalyStatus } from '@/types/anomaly'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table'
 
 type BadgeColor = NonNullable<ComponentProps<typeof Badge>['color']>
 
 const SUSPICION_COLORS: Record<string, BadgeColor> = { HIGH: 'red', MEDIUM: 'orange', LOW: 'green' }
 
+/** Filas por página: el servidor pagina (tope 100) y el listado no trae fotos. */
+export const ANOMALY_PAGE_SIZE = 20
+
+const TYPE_FILTER_LABELS: Record<(typeof ANOMALY_TYPES)[number], string> = {
+  intrusion: 'Intrusión',
+  loitering: 'Merodeo',
+}
+
 function formatRowDate(timestamp: string): string {
   const date = new Date(timestamp)
   return Number.isNaN(date.getTime()) ? 'fecha desconocida' : date.toLocaleString('es-CL')
 }
 
-const columnHelper = createColumnHelper<AnomalyEvent>()
+function isAiPending(item: AnomalyListItem): boolean {
+  return item.aiStatus === 'pending'
+}
+
+function AnalyzingIndicator() {
+  return (
+    <span role="status" className="inline-flex items-center gap-1.5 text-sm text-zinc-500 dark:text-zinc-400">
+      <ArrowPathIcon className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+      Analizando…
+    </span>
+  )
+}
+
+const columnHelper = createColumnHelper<AnomalyListItem>()
 
 // Definidas a nivel de módulo: no dependen del estado del componente.
 const columns = [
@@ -68,9 +87,17 @@ const columns = [
       </Badge>
     ),
   }),
+  columnHelper.accessor('status', {
+    header: 'Estado',
+    cell: (info) => {
+      const meta = anomalyStatusMeta(info.getValue())
+      return <Badge color={meta.color}>{meta.label}</Badge>
+    },
+  }),
   columnHelper.accessor('suspicionLevel', {
     header: 'Nivel IA',
     cell: (info) => {
+      if (isAiPending(info.row.original)) return <AnalyzingIndicator />
       const level = info.getValue()
       if (!level) return <span className="text-sm text-zinc-500">Sin evaluar</span>
       return <Badge color={SUSPICION_COLORS[level] ?? 'zinc'}>{level}</Badge>
@@ -78,13 +105,18 @@ const columns = [
   }),
   columnHelper.accessor('aiReasoning', {
     header: 'Veredicto de la IA (Razonamiento)',
-    cell: (info) => (
-      <div className="max-w-md">
-        <p className="text-xs text-zinc-600 dark:text-zinc-400 line-clamp-2">
-          {info.getValue() || 'Sin evaluación disponible'}
-        </p>
-      </div>
-    ),
+    cell: (info) => {
+      const item = info.row.original
+      if (isAiPending(item)) return <AnalyzingIndicator />
+      return (
+        <div className="max-w-md space-y-1">
+          {item.aiFalsePositive === true && <Badge color="amber">Posible falso positivo</Badge>}
+          <p className="text-xs text-zinc-600 dark:text-zinc-400 line-clamp-2">
+            {info.getValue() || (item.aiStatus === 'failed' ? 'El análisis de la IA falló' : 'Sin evaluación disponible')}
+          </p>
+        </div>
+      )
+    },
   }),
   columnHelper.accessor('confidence', {
     header: 'Confianza IA',
@@ -100,35 +132,67 @@ const columns = [
 ]
 
 export default function AnomalyTable() {
-  const { data = [], isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ['anomalies'],
-    queryFn: () => listAnomalies(),
+  const [statusFilter, setStatusFilter] = useState<AnomalyStatus | ''>('')
+  const [typeFilter, setTypeFilter] = useState('')
+  const [page, setPage] = useState(0)
+
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
+    queryKey: ['anomalies', 'list', { status: statusFilter, type: typeFilter, page }],
+    queryFn: () =>
+      listAnomalies({
+        status: statusFilter || undefined,
+        type: typeFilter || undefined,
+        limit: ANOMALY_PAGE_SIZE,
+        offset: page * ANOMALY_PAGE_SIZE,
+      }),
+    placeholderData: keepPreviousData,
+    // Mientras la IA analiza alguna fila se refresca (acotado); `security:anomaly_updated` lo adelanta.
+    refetchInterval: (query) =>
+      anomalyAiPollInterval(query.state.data?.items.some(isAiPending) ?? false, query.state.dataUpdateCount),
   })
 
+  const items = useMemo(() => data?.items ?? [], [data])
+  const total = data?.total ?? 0
+  const pageCount = Math.max(1, Math.ceil(total / ANOMALY_PAGE_SIZE))
+
+  // Búsqueda y nivel de riesgo se aplican solo sobre la página cargada.
   const [globalFilter, setGlobalFilter] = useState('')
   const [levelFilter, setLevelFilter] = useState<string>('')
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'timestamp', desc: true }])
   const [showFilters, setShowFilters] = useState(true)
 
   const filteredData = useMemo(
-    () => (levelFilter ? data.filter((item) => item.suspicionLevel === levelFilter) : data),
-    [data, levelFilter],
+    () => (levelFilter ? items.filter((item) => item.suspicionLevel === levelFilter) : items),
+    [items, levelFilter],
   )
 
   const table = useReactTable({
     data: filteredData,
     columns,
-    state: { sorting, globalFilter },
-    onSortingChange: setSorting,
+    state: { globalFilter },
     onGlobalFilterChange: setGlobalFilter,
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
-    initialState: { pagination: { pageSize: 15 } }
   })
 
   const rows = table.getRowModel().rows
+  const hasServerFilters = statusFilter !== '' || typeFilter !== ''
+  const hasFilters = hasServerFilters || globalFilter !== '' || levelFilter !== ''
+
+  const changeStatus = (value: string) => {
+    setStatusFilter(ANOMALY_STATUSES.find((status) => status === value) ?? '')
+    setPage(0)
+  }
+  const changeType = (value: string) => {
+    setTypeFilter(value)
+    setPage(0)
+  }
+  const clearFilters = () => {
+    setStatusFilter('')
+    setTypeFilter('')
+    setGlobalFilter('')
+    setLevelFilter('')
+    setPage(0)
+  }
 
   // Un fallo de esta pestaña no debe tumbar la trazabilidad de accesos: se
   // muestra en la tabla, con opción de reintentar.
@@ -148,8 +212,12 @@ export default function AnomalyTable() {
       </div>
     )
   } else if (rows.length === 0) {
-    emptyState = data.length === 0 ? 'No hay anomalías registradas' : 'Ninguna anomalía coincide con los filtros'
+    emptyState =
+      items.length === 0 && !hasServerFilters ? 'No hay anomalías registradas' : 'Ninguna anomalía coincide con los filtros'
   }
+
+  const firstShown = total === 0 ? 0 : page * ANOMALY_PAGE_SIZE + 1
+  const lastShown = Math.min(total, page * ANOMALY_PAGE_SIZE + items.length)
 
   return (
     <div className="bg-white dark:bg-zinc-900 rounded-lg shadow-sm border border-zinc-200 dark:border-zinc-800">
@@ -164,8 +232,8 @@ export default function AnomalyTable() {
             >
               <FunnelIcon className="w-4 h-4" />
             </Button>
-            {(globalFilter || levelFilter) && (
-              <Button plain onClick={() => { setGlobalFilter(''); setLevelFilter('') }} aria-label="Limpiar filtros">
+            {hasFilters && (
+              <Button plain onClick={clearFilters} aria-label="Limpiar filtros">
                 <XMarkIcon className="w-4 h-4" />
               </Button>
             )}
@@ -173,15 +241,40 @@ export default function AnomalyTable() {
         </div>
 
         {showFilters && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
             <InputGroup>
               <MagnifyingGlassIcon />
               <Input
-                placeholder="Buscar en descripción..."
+                aria-label="Buscar en esta página"
+                placeholder="Buscar en esta página..."
                 value={globalFilter}
                 onChange={(e) => setGlobalFilter(e.target.value)}
               />
             </InputGroup>
+            <Select
+              aria-label="Filtrar por estado"
+              value={statusFilter}
+              onChange={(e) => changeStatus(e.target.value)}
+            >
+              <option value="">Todos los estados</option>
+              {ANOMALY_STATUSES.map((status) => (
+                <option key={status} value={status}>
+                  {anomalyStatusMeta(status).label}
+                </option>
+              ))}
+            </Select>
+            <Select
+              aria-label="Filtrar por tipo"
+              value={typeFilter}
+              onChange={(e) => changeType(e.target.value)}
+            >
+              <option value="">Todos los tipos</option>
+              {ANOMALY_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {TYPE_FILTER_LABELS[type]}
+                </option>
+              ))}
+            </Select>
             <Select
               aria-label="Filtrar por nivel de riesgo"
               value={levelFilter}
@@ -202,19 +295,8 @@ export default function AnomalyTable() {
             {table.getHeaderGroups().map((headerGroup) => (
               <TableRow key={headerGroup.id}>
                 {headerGroup.headers.map((header) => (
-                  <TableHeader
-                    key={header.id}
-                    className={header.column.getCanSort() ? 'cursor-pointer select-none' : ''}
-                    onClick={header.column.getToggleSortingHandler()}
-                  >
-                    <div className="flex items-center gap-2">
-                      {flexRender(header.column.columnDef.header, header.getContext())}
-                      {header.column.getIsSorted() && (
-                        <span className="text-teal-600">
-                          {header.column.getIsSorted() === 'asc' ? <ChevronUpIcon className="w-3 h-3"/> : <ChevronDownIcon className="w-3 h-3"/>}
-                        </span>
-                      )}
-                    </div>
+                  <TableHeader key={header.id}>
+                    {flexRender(header.column.columnDef.header, header.getContext())}
                   </TableHeader>
                 ))}
               </TableRow>
@@ -246,6 +328,34 @@ export default function AnomalyTable() {
           </TableBody>
         </Table>
       </div>
+
+      {!isError && total > 0 && (
+        <nav
+          aria-label="Paginación de anomalías"
+          className="flex items-center justify-between gap-3 border-t border-zinc-200 px-4 py-3 dark:border-zinc-800"
+        >
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            {firstShown}–{lastShown} de {total}
+          </p>
+          <div className="flex items-center gap-2">
+            <Button plain onClick={() => setPage((current) => Math.max(0, current - 1))} disabled={page === 0}>
+              <ChevronLeftIcon />
+              Anterior
+            </Button>
+            <span className="text-sm text-zinc-600 dark:text-zinc-400" aria-live="polite">
+              Página {page + 1} de {pageCount}
+            </span>
+            <Button
+              plain
+              onClick={() => setPage((current) => Math.min(pageCount - 1, current + 1))}
+              disabled={page >= pageCount - 1}
+            >
+              Siguiente
+              <ChevronRightIcon />
+            </Button>
+          </div>
+        </nav>
+      )}
     </div>
   )
 }

@@ -1,6 +1,17 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import type { ReactNode } from 'react'
-import { DIRECTION_LINE_MIN_LENGTH, ZONE_LIMITS, type Camera, type DirectionLine, type LprExitSide, type ZonePoint } from '@/types/index'
+import {
+  DIRECTION_LINE_MIN_LENGTH,
+  LOITER_SECONDS,
+  ZONE_LIMITS,
+  clampLoiterSeconds,
+  type Camera,
+  type DirectionLine,
+  type GuardianZone,
+  type GuardianZoneType,
+  type LprExitSide,
+  type ZonePoint,
+} from '@/types/index'
 import { getUserFacingErrorMessage } from '@/helpers/httpErrors'
 import { toast } from 'react-toastify'
 import {
@@ -75,11 +86,36 @@ const TONES: Record<ZoneEditorTone, ToneClasses> = {
   },
 }
 
-export interface ZoneEditorProps {
+// Zonas de merodeo del Guardián: ámbar, para distinguirlas de las de intrusión (rojo).
+const GUARDIAN_LOITERING_TONE: ToneClasses = {
+  polygon: 'fill-amber-500/10 stroke-amber-400/60 hover:fill-amber-500/20',
+  halo: 'fill-amber-500/10',
+  point: 'stroke-amber-400',
+  glow: 'rgba(245, 158, 11, 0.6)',
+}
+
+/** Polígono del lienzo con su tipo. Solo el tono `guardian` lo expone; en LPR siempre es `intrusion` y no se guarda. */
+interface EditorZone {
+  points: Point[]
+  type: GuardianZoneType
+  loiterSeconds: number
+}
+
+/** Tipo y segundos de una zona que ya existía (misma posición que en `initialZones`). */
+export type ZoneSetting = Pick<GuardianZone, 'type' | 'loiterSeconds'>
+
+const GUARDIAN_TYPE_LABELS: Record<GuardianZoneType, string> = {
+  intrusion: 'Intrusión',
+  loitering: 'Merodeo',
+}
+
+export interface ZoneEditorBaseProps {
   /** Cámara cuyo video en vivo se muestra de fondo. */
   camera: Pick<Camera, 'id' | 'name' | 'mountPath'>
   /** Polígonos normalizados (0 a 1) con los que arranca el lienzo. */
   initialZones: Point[][]
+  /** Solo `guardian`: tipo y segundos de cada zona de `initialZones` (mismo orden). Sin esto todas arrancan como intrusión. */
+  initialZoneSettings?: ReadonlyArray<ZoneSetting>
   title: ReactNode
   description: ReactNode
   /** Texto del botón de guardado. */
@@ -96,24 +132,91 @@ export interface ZoneEditorProps {
   initialDirectionLine?: DirectionLine | null
   /** Herramienta activa al abrir (solo con `enableDirectionLine`). */
   initialTool?: ZoneEditorTool
+  /** Rol de la cámara ("Dirección" del diálogo LPR): fija qué representa la flecha. Con "Ambas" o sin definir se elige en el editor. */
+  cameraRole?: CameraRole
+  onClose: () => void
+}
+
+/**
+ * Cómo se persisten las zonas: EXACTAMENTE una de las dos vías (unión
+ * discriminada, así el tipo impide un editor sin forma de guardar).
+ */
+export interface ZoneEditorSavePlain {
   /**
    * Persiste (o encola) las zonas. Con `enableDirectionLine` recibe además la
    * línea (`null` = sin línea). Si rechaza, el editor sigue abierto y avisa
    * con un toast; si resuelve, avisa y se cierra con `onClose`.
    */
   onSave: (zones: Point[][], directionLine?: DirectionLine | null) => Promise<void>
-  /** Rol de la cámara ("Dirección" del diálogo LPR): fija qué representa la flecha. Con "Ambas" o sin definir se elige en el editor. */
-  cameraRole?: CameraRole
-  onClose: () => void
+  onSaveZones?: never
 }
+
+export interface ZoneEditorSaveTyped {
+  /** Solo `guardian`: recibe cada zona con su tipo (`intrusion` | `loitering`) y los segundos de merodeo. */
+  onSaveZones: (zones: GuardianZone[]) => Promise<void>
+  onSave?: never
+}
+
+export type ZoneEditorProps = ZoneEditorBaseProps & (ZoneEditorSavePlain | ZoneEditorSaveTyped)
 
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value))
 }
 
+const GUARDIAN_ZONE_TYPE_OPTIONS: ReadonlyArray<GuardianZoneType> = ['intrusion', 'loitering']
+
+interface LoiterSecondsInputProps {
+  zoneNumber: number
+  value: number
+  onCommit: (seconds: number) => void
+}
+
+/**
+ * Segundos de permanencia (5 a 600) de una zona de merodeo. Mientras se escribe
+ * el texto es libre; al salir del campo (o con Enter) se ajusta al rango.
+ */
+function LoiterSecondsInput({ zoneNumber, value, onCommit }: LoiterSecondsInputProps) {
+  const [draft, setDraft] = useState(String(value))
+
+  // Deshacer o cargar otra zona cambia `value` desde afuera.
+  useEffect(() => setDraft(String(value)), [value])
+
+  const commit = () => {
+    const parsed = Number(draft)
+    const seconds = draft.trim() === '' || !Number.isFinite(parsed) ? value : clampLoiterSeconds(parsed)
+    setDraft(String(seconds))
+    if (seconds !== value) onCommit(seconds)
+  }
+
+  return (
+    <label className="flex items-center justify-between gap-3 text-[10px] font-bold uppercase tracking-wider text-amber-300">
+      <span>Segundos en la zona</span>
+      <input
+        type="number"
+        inputMode="numeric"
+        min={LOITER_SECONDS.min}
+        max={LOITER_SECONDS.max}
+        step={1}
+        aria-label={`Segundos de merodeo de la zona ${zoneNumber}`}
+        value={draft}
+        onChange={event => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={event => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            commit()
+          }
+        }}
+        className="w-20 rounded-lg border border-white/10 bg-zinc-900 px-2 py-1 text-right font-mono text-xs text-white focus:border-amber-400/60 focus:outline-none"
+      />
+    </label>
+  )
+}
+
 export function ZoneEditor({
   camera,
   initialZones,
+  initialZoneSettings,
   title,
   description,
   saveLabel = 'Fijar Precisión',
@@ -124,10 +227,23 @@ export function ZoneEditor({
   cameraRole,
   initialTool = 'zone',
   onSave,
+  onSaveZones,
   onClose,
 }: ZoneEditorProps) {
+  const isGuardian = tone === 'guardian'
   const toneClasses = TONES[tone]
-  const [zones, setZones] = useState<Point[][]>(initialZones)
+  const toneFor = (zone: EditorZone): ToneClasses =>
+    isGuardian && zone.type === 'loitering' ? GUARDIAN_LOITERING_TONE : toneClasses
+  const [zones, setZones] = useState<EditorZone[]>(() =>
+    initialZones.map((points, index) => {
+      const setting = isGuardian ? initialZoneSettings?.[index] : undefined
+      return {
+        points,
+        type: setting?.type ?? 'intrusion',
+        loiterSeconds: clampLoiterSeconds(setting?.loiterSeconds ?? LOITER_SECONDS.default),
+      }
+    }),
+  )
   const [currentZone, setCurrentZone] = useState<Point[]>([])
   const [tool, setTool] = useState<ZoneEditorTool>(enableDirectionLine ? initialTool : 'zone')
   const [directionLine, setDirectionLine] = useState<DirectionLine | null>(
@@ -148,7 +264,7 @@ export function ZoneEditor({
   const [draggingPoint, setDraggingPoint] = useState<{ zoneIndex: number, pointIndex: number } | null>(null)
   
   // Undo/History capability
-  const [history, setHistory] = useState<Point[][][]>([])
+  const [history, setHistory] = useState<EditorZone[][]>([])
   
   const svgRef = useRef<SVGSVGElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -269,12 +385,12 @@ export function ZoneEditor({
       } else {
         setZones(prev => {
           const next = [...prev]
-          const zone = next[zoneIndex].filter((_, i) => i !== pointIndex)
+          const zone = next[zoneIndex].points.filter((_, i) => i !== pointIndex)
           if (zone.length < 3) {
             toast.warning('La zona fue eliminada por tener menos de 3 puntos')
             return next.filter((_, i) => i !== zoneIndex)
           }
-          next[zoneIndex] = zone
+          next[zoneIndex] = { ...next[zoneIndex], points: zone }
           return next
         })
       }
@@ -313,9 +429,9 @@ export function ZoneEditor({
     } else {
       setZones(prev => {
         const next = [...prev]
-        const zone = [...next[draggingPoint.zoneIndex]]
+        const zone = [...next[draggingPoint.zoneIndex].points]
         zone[draggingPoint.pointIndex] = pt
-        next[draggingPoint.zoneIndex] = zone
+        next[draggingPoint.zoneIndex] = { ...next[draggingPoint.zoneIndex], points: zone }
         return next
       })
     }
@@ -400,11 +516,16 @@ export function ZoneEditor({
         return
       }
       saveToHistory()
-      setZones(prev => [...prev, currentZone])
+      setZones(prev => [...prev, { points: currentZone, type: 'intrusion', loiterSeconds: LOITER_SECONDS.default }])
       setCurrentZone([])
     } else if (currentZone.length > 0) {
       toast.info('Se requieren al menos 3 puntos.')
     }
+  }
+
+  const updateZone = (index: number, patch: Partial<Pick<EditorZone, 'type' | 'loiterSeconds'>>) => {
+    saveToHistory()
+    setZones(prev => prev.map((zone, i) => (i === index ? { ...zone, ...patch } : zone)))
   }
 
   const deleteZoneWithHistory = (index: number) => {
@@ -419,8 +540,17 @@ export function ZoneEditor({
     }
     setIsSaving(true)
     try {
-      if (enableDirectionLine) await onSave(zones, directionLine)
-      else await onSave(zones)
+      if (onSaveZones) {
+        await onSaveZones(
+          zones.map((zone): GuardianZone =>
+            zone.type === 'loitering'
+              ? { points: zone.points, type: 'loitering', loiterSeconds: clampLoiterSeconds(zone.loiterSeconds) }
+              : { points: zone.points, type: 'intrusion' },
+          ),
+        )
+      } else if (onSave && enableDirectionLine) await onSave(zones.map(zone => zone.points), directionLine)
+      else if (onSave) await onSave(zones.map(zone => zone.points))
+      else throw new Error('El editor no tiene cómo guardar las zonas')
       toast.success(successMessage)
       onClose()
     } catch (err) {
@@ -521,11 +651,11 @@ export function ZoneEditor({
                 {zones.map((zone, zIdx) => (
                   <g key={`gz-${zIdx}`}>
                     <polygon
-                      points={zone.map(p => `${p.x * vw},${p.y * vh}`).join(' ')}
-                      className={`${toneClasses.polygon} transition-all duration-300 cursor-pointer`}
+                      points={zone.points.map(p => `${p.x * vw},${p.y * vh}`).join(' ')}
+                      className={`${toneFor(zone).polygon} transition-all duration-300 cursor-pointer`}
                       strokeWidth="2"
                     />
-                    {zone.map((p, pIdx) => {
+                    {zone.points.map((p, pIdx) => {
                       const isHovered = hoveredPoint?.zoneIndex === zIdx && hoveredPoint?.pointIndex === pIdx
                       const isDragging = draggingPoint?.zoneIndex === zIdx && draggingPoint?.pointIndex === pIdx
                       
@@ -539,14 +669,14 @@ export function ZoneEditor({
                         >
                           <circle cx={p.x * vw} cy={p.y * vh} r="25" fill="transparent" />
                           {(isHovered || isDragging) && (
-                            <circle cx={p.x * vw} cy={p.y * vh} r="18" className={`${toneClasses.halo} animate-pulse`} />
+                            <circle cx={p.x * vw} cy={p.y * vh} r="18" className={`${toneFor(zone).halo} animate-pulse`} />
                           )}
                           <circle
                             cx={p.x * vw}
                             cy={p.y * vh}
                             r={isDragging ? "10" : isHovered ? "9" : "6"}
-                            className={`fill-white ${toneClasses.point} stroke-[3] transition-all duration-200 ${isDragging ? 'shadow-2xl' : ''}`}
-                            style={{ filter: isHovered || isDragging ? `drop-shadow(0 0 12px ${toneClasses.glow})` : 'none' }}
+                            className={`fill-white ${toneFor(zone).point} stroke-[3] transition-all duration-200 ${isDragging ? 'shadow-2xl' : ''}`}
+                            style={{ filter: isHovered || isDragging ? `drop-shadow(0 0 12px ${toneFor(zone).glow})` : 'none' }}
                           />
                         </g>
                       )
@@ -827,7 +957,7 @@ El cruce de la línea manda sobre la dirección fija de la cámara. {DIRECTION_A
                           initial={{ opacity: 0, x: 10 }}
                           animate={{ opacity: 1, x: 0 }}
                           exit={{ opacity: 0, scale: 0.9 }}
-                          className="group flex items-center justify-between bg-zinc-900/40 hover:bg-zinc-900/70 p-4 rounded-[20px] border border-white/5 transition-all shadow-xl"
+                          className="group flex flex-wrap items-center justify-between bg-zinc-900/40 hover:bg-zinc-900/70 p-4 rounded-[20px] border border-white/5 transition-all shadow-xl"
                         >
                           <div className="flex items-center gap-4">
                             <div className="w-10 h-10 rounded-2xl bg-indigo-500/5 flex items-center justify-center text-indigo-400 text-xs font-black border border-indigo-500/10">
@@ -835,7 +965,7 @@ El cruce de la línea manda sobre la dirección fija de la cámara. {DIRECTION_A
                             </div>
                             <div>
                               <p className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">Zona {i + 1}</p>
-                              <p className="text-[9px] text-zinc-600 font-mono tracking-tighter">{z.length} puntos de interés</p>
+                              <p className="text-[9px] text-zinc-600 font-mono tracking-tighter">{z.points.length} puntos de interés</p>
                             </div>
                           </div>
                           <button
@@ -846,6 +976,36 @@ El cruce de la línea manda sobre la dirección fija de la cámara. {DIRECTION_A
                           >
                             <TrashIcon className="h-4 w-4" />
                           </button>
+                          {isGuardian && (
+                            <div className="mt-3 w-full space-y-2">
+                              <div role="group" aria-label={`Tipo de la zona ${i + 1}`} className="grid grid-cols-2 gap-2">
+                                {GUARDIAN_ZONE_TYPE_OPTIONS.map(option => (
+                                  <button
+                                    key={option}
+                                    type="button"
+                                    aria-pressed={z.type === option}
+                                    onClick={() => updateZone(i, { type: option })}
+                                    className={`rounded-xl border px-2 py-1.5 text-[10px] font-black uppercase tracking-wider transition-all ${
+                                      z.type === option
+                                        ? option === 'loitering'
+                                          ? 'border-amber-400/60 bg-amber-400/15 text-amber-300'
+                                          : 'border-red-500/60 bg-red-500/15 text-red-300'
+                                        : 'border-white/10 bg-white/5 text-zinc-400 hover:bg-white/10'
+                                    }`}
+                                  >
+                                    {GUARDIAN_TYPE_LABELS[option]}
+                                  </button>
+                                ))}
+                              </div>
+                              {z.type === 'loitering' && (
+                                <LoiterSecondsInput
+                                  zoneNumber={i + 1}
+                                  value={z.loiterSeconds}
+                                  onCommit={seconds => updateZone(i, { loiterSeconds: seconds })}
+                                />
+                              )}
+                            </div>
+                          )}
                         </motion.div>
                       ))}
 

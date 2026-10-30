@@ -1,5 +1,5 @@
 import { useEffect, useState, type ComponentProps } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
 import { useNavigate } from 'react-router-dom'
 import { ShieldExclamationIcon } from '@heroicons/react/24/outline'
@@ -48,10 +48,23 @@ export function GlobalSecurityNotifications() {
 function SecurityAlertListener() {
   const [alert, setAlert] = useState<AnomalyHighlight | null>(null)
   const [isOpen, setIsOpen] = useState(false)
+  const queryClient = useQueryClient()
+
+  // La IA terminó o alguien resolvió la anomalía: el listado y el detalle abiertos se refrescan.
+  useEffect(
+    () =>
+      webSocketService.onAnomalyUpdated((update) => {
+        void queryClient.invalidateQueries({ queryKey: ['anomalies'] })
+        void queryClient.invalidateQueries({ queryKey: ['anomalies', 'detail', update.anomalyId] })
+      }),
+    [queryClient],
+  )
 
   useEffect(
     () =>
       webSocketService.onAnomalyHighlight((highlight) => {
+        // La anomalía nueva aparece en el listado abierto sin recargar.
+        void queryClient.invalidateQueries({ queryKey: ['anomalies', 'list'] })
         // Un nivel bajo queda en Trazabilidad; no interrumpe con un aviso.
         if (highlight.severity === 'LOW') {
           return
@@ -59,7 +72,7 @@ function SecurityAlertListener() {
         setAlert(highlight)
         setIsOpen(true)
       }),
-    [],
+    [queryClient],
   )
 
   if (!alert) {

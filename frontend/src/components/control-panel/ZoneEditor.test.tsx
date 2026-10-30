@@ -2,7 +2,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { toast } from 'react-toastify'
-import { ZoneEditor, type ZoneEditorProps } from './ZoneEditor'
+import { ZoneEditor, type ZoneEditorBaseProps, type ZoneEditorProps, type ZoneEditorSavePlain, type ZoneEditorSaveTyped } from './ZoneEditor'
 
 // El reproductor WHEP no corre en jsdom: un <video> con tamaño intrínseco basta
 // para que el editor calcule el rectángulo del video y monte el lienzo SVG.
@@ -36,8 +36,14 @@ beforeEach(() => {
 })
 
 
-function renderEditor(overrides: Partial<ZoneEditorProps> = {}) {
-  const props: ZoneEditorProps = {
+/** Los tests combinan base + una vía de guardado a mano: las sobrescrituras son sueltas y el resultado se afirma como `ZoneEditorProps`. */
+type EditorOverrides = Partial<ZoneEditorBaseProps> & {
+  onSave?: ZoneEditorSavePlain['onSave']
+  onSaveZones?: ZoneEditorSaveTyped['onSaveZones']
+}
+
+function renderEditor(overrides: EditorOverrides = {}) {
+  const props = {
     camera: CAMERA,
     initialZones: [],
     title: 'Zona de prueba',
@@ -45,7 +51,7 @@ function renderEditor(overrides: Partial<ZoneEditorProps> = {}) {
     onSave: vi.fn(async () => undefined),
     onClose: vi.fn(),
     ...overrides,
-  }
+  } as ZoneEditorProps
   render(<ZoneEditor {...props} />)
   return props
 }

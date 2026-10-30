@@ -156,12 +156,32 @@ En un proceso de ~800 MB, los pesos ocupan ~30 MB (**4%**); **torch + ultralytic
 ### ¿Cabe en un RPi5?
 **2-3 cámaras con el stack actual — y la CPU revienta antes que la RAM.** `target_ia_fps=5.0` (Guardián) está fuera de rango por ~3,4× (techo real ~1,5 FPS con 1 cámara acaparando 4 cores). Con ONNX/NCNN: ~300 MB/proceso y ~68 ms/inferencia → muchas más cámaras. **Todas las cifras de RAM/CPU son estimaciones con la aritmética a la vista; ninguna medida en Pi real** — no cambian el veredicto cualitativo pero mueven la frontera exacta de "cuántas cámaras por Pi" (número de *pricing* para el SaaS).
 
-### Guardián — roto en lo esencial
-- `enableGuardian:false` **se ignora** (`guardian_worker.py:70-71`: solo warning, sigue procesando).
-- Zonas descargadas **una sola vez** (`zones_last_fetched` se escribe y nunca se lee) → editar en la UI no tiene efecto hasta reiniciar.
-- **El merodeo no consulta las zonas** (`:244`): cualquiera visible 20s en cualquier parte del frame dispara alerta (cartero, vecino).
-- **El motion gating ciega al merodeo por diseño**: merodear es estar quieto → sin movimiento MOG2 no dispara YOLO → el track expira a los 30s → contador a cero. El intruso que se queda quieto vigilando es exactamente el que no se ve.
-- Pérdida de track ID (ByteTrack sin re-ID, oclusión por un auto) → contador de merodeo a cero → explotable escondiéndose ~15s cada vez.
+### Guardián — estado (auditoría original y qué resolvió la rama `feature/guardian-people-vision`)
+La auditoría original describía el Guardián como "roto en lo esencial". Dos de los cinco hallazgos estaban **mal**: ya funcionaban en `main`. El resto se resolvió en las Fases 0 y 1 de la rama (sin commitear al escribir esto). Detalle del diseño en [vision.md](vision.md#guardián-visual-personas-intrusión-y-merodeo) y la decisión en [D11](../05-decisiones-tecnicas.md).
+
+| Hallazgo original | Estado |
+|---|---|
+| `enableGuardian:false` se ignora | **Ya funcionaba en `main`** (el worker lo respeta). Sin cambio. |
+| Zonas descargadas una sola vez | **Ya funcionaba en `main`** (refetch cada `LPR_ZONES_REFETCH_SECONDS`). En la rama el refetch pasó a un hilo de fondo para que la captura nunca se bloquee. |
+| El merodeo no consulta las zonas | ✅ Resuelto: zonas con `type: 'loitering'` y `loiterSeconds`; el tiempo se acumula **dentro** de la zona. Sin zonas, se conserva el comportamiento histórico (visible en el cuadro). |
+| El motion gating ciega al merodeo | ✅ Resuelto: gating **con retención** (si hubo personas en los últimos ~10 s, YOLO corre aunque MOG2 no vea movimiento). |
+| Pérdida de track ID reinicia el merodeo / re-dispara alertas | ✅ Mitigado: **re-enlace** de tracks (un track nuevo cerca de donde se perdió otro hace ≤ 5 s hereda su tiempo y cooldowns) y **supresión espacial** por (zona, tipo). No es ReID: ver límites en vision.md. |
+| `POST /anomalies` esperaba a GPT-4o (el worker cortaba por timeout y perdía avisos) | ✅ Resuelto: el backend responde 201 de inmediato y la IA corre en segundo plano (`aiStatus`), con timeout, tope de concurrencia y presupuesto por condominio. |
+| JPG huérfano en disco | ✅ Resuelto: el Guardián ya no escribe imágenes en disco (la foto viaja en el POST y vive solo en BD, con retención). |
+| Borrar una cámara no detenía `<id>_guardia` | ✅ Resuelto: `remove()` desregistra el worker LPR y el del Guardián, cada uno en su propio try (best-effort). |
+| Fugas de memoria (`emitted_cache`, `track_hits`, `sightings`) | ✅ Resuelto: toda la memoria del motor se purga junta, con TTL y tope duro de tracks. |
+| Modelo por ruta relativa al CWD / descarga en runtime | ✅ Resuelto: `lpr/yolo11n.pt` por ruta local (sin descarga) y `device` desde `LPR_DEVICE`. |
+| Anomalías no revisables; `isFalsePositive` de la IA se tiraba | ✅ Resuelto: `status` (open/reviewed/dismissed/false_alarm), permiso `anomalies.resolve`, `aiFalsePositive` guardado. |
+| Sin tests de reglas ni forma de medir | ✅ Resuelto: motor de reglas puro con tests y replay (`lpr/tools/guardian_replay.py`). **No hay aún verdad terreno**: no se afirma ninguna cifra de precisión. |
+
+**Sigue pendiente** (Fases 2 a 5 del plan, fuera de esta rama):
+- Horarios por zona.
+- Rol de la cámara (qué vigila cada una).
+- Cascada de IA (filtros baratos antes de llamar a Vision).
+- Bitácora de peatones.
+- Correlación con el conserje digital.
+- **Interruptor de IA por condominio** (`aiVisionEnabled`): descartado por ahora; Benjamin decidió (2026-10-28) mantener la IA encendida como antes. El control es el presupuesto por condominio (`AI_VISION_RATE_PER_MINUTE`, `AI_VISION_DAILY_CAP`); el DPA con OpenAI sigue pendiente.
+- Medir el Guardián con verdad terreno propia (Fase 0: grabar, etiquetar y correr el replay "antes/después").
 
 ---
 

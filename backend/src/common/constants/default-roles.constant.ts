@@ -116,6 +116,8 @@ export const DEFAULT_ROLES: RoleDefinition[] = [
       'detections.approve',
       'detections.list-pending',
       'detections.check-status',
+      // Guardián: revisar/descartar anomalías
+      'anomalies.resolve',
 
       // Notificaciones
       'notifications.read',
@@ -194,6 +196,8 @@ export const DEFAULT_ROLES: RoleDefinition[] = [
       'detections.approve',
       'detections.list-pending',
       'detections.check-status',
+      // Guardián: revisar/descartar anomalías (sin conserje humano lo hace el Administrador)
+      'anomalies.resolve',
 
       // Notificaciones
       'notifications.read',

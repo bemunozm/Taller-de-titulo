@@ -379,6 +379,53 @@ describe('CamerasService — aislamiento por condominio (P5.B)', () => {
     expect(repo.delete).toHaveBeenCalledWith(CAM_A);
   });
 
+  it('DELETE /cameras/:id desregistra el worker LPR Y el del Guardián (`<id>_guardia`)', async () => {
+    await service.remove(CAM_A);
+
+    expect(workerNotifier.unregisterCamera).toHaveBeenCalledTimes(2);
+    expect(workerNotifier.unregisterCamera).toHaveBeenCalledWith(CAM_A);
+    expect(workerNotifier.unregisterCamera).toHaveBeenCalledWith(
+      `${CAM_A}_guardia`,
+    );
+  });
+
+  it('DELETE /cameras/:id: si falla desregistrar el LPR igual desregistra el Guardián y borra (best-effort)', async () => {
+    workerNotifier.unregisterCamera.mockImplementation((id: string) =>
+      id === CAM_A
+        ? Promise.reject(new Error('worker manager caído'))
+        : Promise.resolve(undefined),
+    );
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+
+    await expect(service.remove(CAM_A)).resolves.toEqual({
+      message: 'Cámara eliminada',
+    });
+
+    expect(workerNotifier.unregisterCamera).toHaveBeenCalledWith(
+      `${CAM_A}_guardia`,
+    );
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('DELETE /cameras/:id: si falla desregistrar el Guardián la cámara se borra igual', async () => {
+    workerNotifier.unregisterCamera.mockImplementation((id: string) =>
+      id.endsWith('_guardia')
+        ? Promise.reject(new Error('worker manager caído'))
+        : Promise.resolve(undefined),
+    );
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+
+    await expect(service.remove(CAM_A)).resolves.toBeDefined();
+
+    expect(repo.delete).toHaveBeenCalledWith(CAM_A);
+    warn.mockRestore();
+  });
+
   it('POST /cameras/:id/register de otro condominio -> 404 sin registrar en MediaMTX', async () => {
     await expect(service.registerInMediamtx(CAM_B)).rejects.toThrow(
       NotFoundException,
@@ -406,6 +453,7 @@ describe('CamerasService — aislamiento por condominio (P5.B)', () => {
     point.x = 0.1;
     point.y = 0.2;
 
+    // Formato legacy ([[{x,y}]]): se guarda normalizado a `intrusion`.
     const result = await service.updateGuardianZones(CAM_A, [
       [point, { x: 0.9, y: 0.2 }, { x: 0.5, y: 0.8 }],
     ]);
@@ -413,13 +461,16 @@ describe('CamerasService — aislamiento por condominio (P5.B)', () => {
     const saved = (repo.save.mock.calls[0] as [Camera])[0];
     expect(saved.id).toBe(CAM_A);
     expect(saved.guardianZones).toEqual([
-      [
-        { x: 0.1, y: 0.2 },
-        { x: 0.9, y: 0.2 },
-        { x: 0.5, y: 0.8 },
-      ],
+      {
+        points: [
+          { x: 0.1, y: 0.2 },
+          { x: 0.9, y: 0.2 },
+          { x: 0.5, y: 0.8 },
+        ],
+        type: 'intrusion',
+      },
     ]);
-    expect(Object.getPrototypeOf(saved.guardianZones?.[0][0])).toBe(
+    expect(Object.getPrototypeOf(saved.guardianZones?.[0].points[0])).toBe(
       Object.prototype,
     );
     expect(result).toEqual({
@@ -427,6 +478,46 @@ describe('CamerasService — aislamiento por condominio (P5.B)', () => {
       name: 'Cámara',
       guardianZones: saved.guardianZones,
     });
+  });
+
+  it('zones en formato nuevo: conserva type y loiterSeconds, solo x/y en los puntos', async () => {
+    await service.updateGuardianZones(CAM_A, [
+      {
+        points: [
+          { x: 0.1, y: 0.2, extra: 1 },
+          { x: 0.9, y: 0.2 },
+          { x: 0.5, y: 0.8 },
+        ],
+        type: 'loitering',
+        loiterSeconds: 45,
+      },
+      [
+        { x: 0, y: 0 },
+        { x: 1, y: 0 },
+        { x: 1, y: 1 },
+      ],
+    ]);
+
+    const saved = (repo.save.mock.calls[0] as [Camera])[0];
+    expect(saved.guardianZones).toEqual([
+      {
+        points: [
+          { x: 0.1, y: 0.2 },
+          { x: 0.9, y: 0.2 },
+          { x: 0.5, y: 0.8 },
+        ],
+        type: 'loitering',
+        loiterSeconds: 45,
+      },
+      {
+        points: [
+          { x: 0, y: 0 },
+          { x: 1, y: 0 },
+          { x: 1, y: 1 },
+        ],
+        type: 'intrusion',
+      },
+    ]);
   });
 
   describe('lprSettings (plan LPR por cámara, F2)', () => {

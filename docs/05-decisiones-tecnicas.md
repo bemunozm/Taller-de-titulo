@@ -395,3 +395,43 @@ Las emisiones (texto y dirección) coinciden en los 83 clips de la mañana. Los 
 - La rueda `av==19.0.2` debe confirmarse en ARM64. `cli.py` abre primero un `cv2.VideoCapture` HD que el worker suelta antes de abrir PyAV; hay una conexión extra transitoria contra el límite de lectores del relay.
 
 **Cómo activarlo y qué vigilar.** `LPR_REST_MODE=true` en el env del worker (por defecto `false`), con la URL HD terminada en `-hd` y PyAV instalado. Probar primero en una sola cámara. En el log, cada 60 s aparece una línea `Reposo: estado=… activo=…% de 60s hd_decodificados=… sub_decodificados=… activaciones=…`; revisar que el % activo sea bajo y que no haya activaciones sin vehículo en bucle, y los avisos `Reposo -> ACTIVO` / `ACTIVO -> reposo`. Un WARNING al arrancar indica que cayó al bucle normal (sin sub-stream, sin PyAV, sin modelo o apertura fallida). Variables en [`docs/modulos/vision.md`](modulos/vision.md).
+
+---
+
+## D11 — Guardián: reglas puras, IA asíncrona y presupuesto 🟢 *implementado (2026-10-22, rama `feature/guardian-people-vision`); falta medir con verdad terreno y PR*
+
+**Contexto.** El Guardián (intrusión y merodeo de personas) perdía avisos y no se podía medir:
+- `POST /anomalies` esperaba a GPT-4o y el worker cortaba a los 10 s (31 de 50 envíos con timeout el 21-oct);
+- el merodeo ignoraba las zonas y el motion gating lo dejaba ciego con la persona quieta;
+- ByteTrack cambiaba el id y se re-disparaban alertas o el contador volvía a cero;
+- las anomalías no se podían revisar y `isFalsePositive` de la IA se tiraba;
+- las reglas vivían mezcladas con captura y red, sin tests ni forma de comparar cambios.
+
+**Decisión.**
+- **Reglas puras.** `GuardianRules` (`lpr/processor/guardian_rules.py`) no hace I/O: recibe detecciones con un reloj inyectado. `GuardianPipeline` (gating + YOLO + reglas) lo comparten el worker y el replay (`lpr/tools/guardian_replay.py`), así que lo medido es lo desplegado.
+- **Zonas tipadas** `{points, type: intrusion|loitering, loiterSeconds}`, con el formato legacy aceptado y normalizado al guardar.
+- **Intrusión por cualquier punto de la caja** (cabeza, centro o pies).
+- **No re-disparar:** cooldown por track y por (zona, tipo) con supresión espacial (**20 s para intrusión, 60 s para merodeo**), más re-enlace de tracks perdidos ≤ 5 s.
+- **Gating con retención** para no cegar el merodeo.
+- **IA asíncrona:** el backend guarda con `aiStatus='pending'`, responde 201 y analiza en segundo plano (fire-and-forget con `.catch`), con timeout de 20 s, y emite `security:anomaly_updated`. Un barrido marca `failed` los `pending` huérfanos.
+- **Presupuesto de IA:** tope global de 3 análisis en vuelo, token bucket por condominio (`AI_VISION_RATE_PER_MINUTE`, 10) y tope diario (`AI_VISION_DAILY_CAP`, 300). Excedido, la anomalía se guarda igual con `aiStatus='skipped'`: perder el análisis es mejor que perder el aviso.
+- **Revisión humana:** `status` de la anomalía con permiso propio `anomalies.resolve` (Administrador y Conserje; en la operación real quien revisa es el Administrador). `ANOMALY_TYPES` en lista blanca en la ingesta, porque el tipo se interpola en el prompt de Vision.
+
+**Alternativas descartadas.**
+- **Intrusión solo por pies o por pose.** Descartada por Benjamin: hay cámaras de muro donde los pies no se ven. Se acepta el costo en falsas alarmas (una cabeza que asoma por el borde de una zona).
+- **Reconocimiento facial para distinguir residentes de intrusos.** Descartado por Benjamin tras el deep research: la Ley 21.719 trata el rostro como dato biométrico (sensible), hay problemas de licencias de los modelos y la precisión en cámaras de exterior es insuficiente.
+- **Esperar a la IA en el POST con un timeout mayor.** Sigue atando el aviso a la latencia de un tercero y mantiene abiertas las conexiones del worker.
+- **`@Cron` para el barrido.** Un `@Cron` en un provider con dependencias request-scoped se descarta en silencio; se usa `setTimeout` + `unref`, como el resync de MediaMTX.
+- **Presupuesto en BD o en Redis.** Más infraestructura para una red de contención de costo; en memoria alcanza mientras haya un solo proceso.
+- **ReID entre cámaras o por apariencia** para el cambio de id: más costo y otra fuente de error; se usa re-enlace espacial y temporal por cámara.
+
+**Consecuencias.**
+- ✅ El aviso ya no depende de OpenAI; la IA se ve como "Analizando…" y luego se completa.
+- ✅ Cada cambio de reglas se puede comparar antes/después con el replay.
+- ⚠️ **Sin cifras de precisión.** No hay verdad terreno aún; la Fase 0 del plan la produce.
+- ⚠️ **Dos personas juntas = una alerta por 20 s (intrusión) o 60 s (merodeo)** (supresión espacial por (zona, tipo)). La cifra de intrusión se midió con verdad terreno de 71 clips de Acceso a 1 fps: con 60 s, 33/54 intrusiones (29 falsas alarmas); con 30 s, 37/54 (34); con **20 s, 44/54 intrusiones y 41 falsas alarmas**, frente a **48/54 y 65** de las reglas anteriores (9 duplicados del legacy contra 1 con 20 s). Con 60 s se suprimía la entrada real de visitas que antes esperaron pegadas a la reja.
+- ⚠️ **Despliegue ordenado:** el worker nuevo antes o junto con el backend; las cámaras con zonas legacy pierden el merodeo hasta marcar una zona como Merodeo.
+- ⚠️ El presupuesto vive en memoria: se reinicia con el proceso y no se comparte entre instancias.
+- ⚠️ La foto y el texto de la IA salen a OpenAI: ver [privacidad §9](modulos/privacidad-ley-21719.md).
+
+**Pendiente (fuera de esta decisión).** Horarios por zona, rol de cámara, cascada de IA, bitácora peatonal, correlación con el conserje digital. **Sin interruptor de IA por condominio:** Benjamin decidió (2026-10-28) mantener el análisis encendido como antes; el control es el presupuesto por condominio y el DPA con OpenAI sigue pendiente.

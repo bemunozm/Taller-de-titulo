@@ -160,6 +160,17 @@ export const DEFAULT_VISIT_EXIT_COOLDOWN_MINUTES = 5;
 export const MAX_VISIT_EXIT_COOLDOWN_MINUTES = 120;
 
 /**
+ * Presupuesto de análisis de IA (Vision) del Guardián por condominio, en
+ * memoria del proceso: AI_VISION_RATE_PER_MINUTE (token bucket; default 10,
+ * 1 a 600) y AI_VISION_DAILY_CAP (por día calendario UTC; default 300, 1 a
+ * 100000). Pasado el presupuesto la anomalía se guarda con aiStatus 'skipped'.
+ */
+export const DEFAULT_AI_VISION_RATE_PER_MINUTE = 10;
+export const MAX_AI_VISION_RATE_PER_MINUTE = 600;
+export const DEFAULT_AI_VISION_DAILY_CAP = 300;
+export const MAX_AI_VISION_DAILY_CAP = 100000;
+
+/**
  * LPR_PASSAGE_WINDOW_SECONDS (dirección + pasadas multicámara): segundos
  * durante los que las lecturas de una misma patente (de cualquier cámara del
  * condominio) se agrupan en UNA pasada: un solo intento de acceso y una sola
@@ -198,7 +209,7 @@ export const DEFAULT_LPR_PASSAGE_FUZZY_SECONDS = 30;
 export const MAX_LPR_PASSAGE_FUZZY_SECONDS = 600;
 
 /** Unidad de una variable de duración entera (aparece en el mensaje de error). */
-type DurationUnit = 'segundos' | 'minutos' | 'horas' | 'días';
+type DurationUnit = 'segundos' | 'minutos' | 'horas' | 'días' | 'análisis';
 
 /**
  * Motivo por el que `value` (ya recortado y no vacío) no es un entero de
@@ -617,6 +628,14 @@ const envFieldsSchema = z.object({
     integerDuration(MAX_VISIT_EXIT_COOLDOWN_MINUTES, 'minutos'),
   ),
 
+  // Presupuesto de análisis de IA por condominio (Guardián).
+  AI_VISION_RATE_PER_MINUTE: optionalNonBlank(
+    integerDuration(MAX_AI_VISION_RATE_PER_MINUTE, 'análisis'),
+  ),
+  AI_VISION_DAILY_CAP: optionalNonBlank(
+    integerDuration(MAX_AI_VISION_DAILY_CAP, 'análisis'),
+  ),
+
   // Segundos que las lecturas de una misma patente se agrupan en una pasada.
   LPR_PASSAGE_WINDOW_SECONDS: optionalNonBlank(
     integerDuration(MAX_LPR_PASSAGE_WINDOW_SECONDS, 'segundos'),
@@ -857,6 +876,28 @@ export function parseVisitExitCooldownMinutes(raw: string | undefined): number {
     DEFAULT_VISIT_EXIT_COOLDOWN_MINUTES,
     MAX_VISIT_EXIT_COOLDOWN_MINUTES,
     'minutos',
+  );
+}
+
+/** Interpreta AI_VISION_RATE_PER_MINUTE (default 10). Inválido lanza. */
+export function parseAiVisionRatePerMinute(raw: string | undefined): number {
+  return parseIntegerDuration(
+    'AI_VISION_RATE_PER_MINUTE',
+    raw,
+    DEFAULT_AI_VISION_RATE_PER_MINUTE,
+    MAX_AI_VISION_RATE_PER_MINUTE,
+    'análisis',
+  );
+}
+
+/** Interpreta AI_VISION_DAILY_CAP (default 300). Inválido lanza. */
+export function parseAiVisionDailyCap(raw: string | undefined): number {
+  return parseIntegerDuration(
+    'AI_VISION_DAILY_CAP',
+    raw,
+    DEFAULT_AI_VISION_DAILY_CAP,
+    MAX_AI_VISION_DAILY_CAP,
+    'análisis',
   );
 }
 

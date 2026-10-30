@@ -1,9 +1,10 @@
 import { io, type ManagerOptions, type Socket, type SocketOptions } from 'socket.io-client'
-import { parseAnomalyHighlight, type AnomalyHighlight } from '@/helpers/securityAlerts'
+import { parseAnomalyHighlight, parseAnomalyUpdate, type AnomalyHighlight, type AnomalyUpdate } from '@/helpers/securityAlerts'
 
 type SocketFactory = (url: string, options: Partial<ManagerOptions & SocketOptions>) => Socket
 type NotificationHandler = (payload: unknown) => void
 type AnomalyHighlightHandler = (highlight: AnomalyHighlight) => void
+type AnomalyUpdateHandler = (update: AnomalyUpdate) => void
 type StatusListener = () => void
 
 /**
@@ -29,6 +30,7 @@ export interface RealtimeSession {
 
 export const NOTIFICATION_EVENT = 'notification'
 export const ANOMALY_HIGHLIGHT_EVENT = 'security:anomaly_highlight'
+export const ANOMALY_UPDATED_EVENT = 'security:anomaly_updated'
 
 /** Red caída: socket.io reintenta solo, 2 s → máx. 30 s, sin tope de intentos. */
 export const REALTIME_RECONNECT_DELAY_MS = 2_000
@@ -86,6 +88,7 @@ export class WebSocketService {
   private isVerifying = false
   private readonly notificationHandlers = new Set<NotificationHandler>()
   private readonly anomalyHandlers = new Set<AnomalyHighlightHandler>()
+  private readonly anomalyUpdateHandlers = new Set<AnomalyUpdateHandler>()
   private readonly statusListeners = new Set<StatusListener>()
 
   constructor(createSocket: SocketFactory = io) {
@@ -172,6 +175,20 @@ export class WebSocketService {
         }
       })
     })
+
+    socket.on(ANOMALY_UPDATED_EVENT, (payload: unknown) => {
+      const update = parseAnomalyUpdate(payload)
+      if (!update) {
+        return
+      }
+      this.anomalyUpdateHandlers.forEach((handler) => {
+        try {
+          handler(update)
+        } catch {
+          // Aislado a propósito: el error es del handler, no del socket.
+        }
+      })
+    })
   }
 
   /** Cierre intencional (logout, sin sesión, kiosko). Los handlers suscritos se conservan. */
@@ -195,6 +212,14 @@ export class WebSocketService {
     this.anomalyHandlers.add(handler)
     return () => {
       this.anomalyHandlers.delete(handler)
+    }
+  }
+
+  /** `security:anomaly_updated` (IA terminó o cambió el estado de revisión) ya normalizado. */
+  onAnomalyUpdated(handler: AnomalyUpdateHandler): () => void {
+    this.anomalyUpdateHandlers.add(handler)
+    return () => {
+      this.anomalyUpdateHandlers.delete(handler)
     }
   }
 

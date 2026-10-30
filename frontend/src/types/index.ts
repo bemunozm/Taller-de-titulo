@@ -244,6 +244,67 @@ export const zonePolygonsSchema = z
 
 export type ZonePoint = z.infer<typeof zonePointSchema>
 
+// Zonas del Guardián: cada polígono lleva su tipo. Formato NUEVO
+// `{ points, type, loiterSeconds? }`; las filas viejas del backend pueden traer
+// el formato LEGACY (un arreglo de puntos), que se lee como `intrusion`.
+export const GUARDIAN_ZONE_TYPES = ['intrusion', 'loitering'] as const
+export type GuardianZoneType = (typeof GUARDIAN_ZONE_TYPES)[number]
+
+/** Segundos de permanencia para el merodeo: mismo rango que el backend (5..600). */
+export const LOITER_SECONDS = { min: 5, max: 600, default: 20 } as const
+
+export const guardianZoneSchema = z.object({
+    points: z.array(zonePointSchema).min(ZONE_LIMITS.minPoints).max(ZONE_LIMITS.maxPoints),
+    type: z.enum(GUARDIAN_ZONE_TYPES),
+    loiterSeconds: z.number().min(LOITER_SECONDS.min).max(LOITER_SECONDS.max).optional(),
+})
+
+export type GuardianZone = z.infer<typeof guardianZoneSchema>
+
+/** Lo que puede traer `Camera.guardianZones`: formato nuevo o legacy. */
+const guardianZoneReadSchema = z.union([
+    z.object({ points: z.array(zonePointSchema), type: z.string().optional(), loiterSeconds: z.number().optional() }),
+    z.array(zonePointSchema),
+])
+
+/** Ajusta los segundos de merodeo al rango válido (entero). */
+export function clampLoiterSeconds(value: number): number {
+    if (!Number.isFinite(value)) return LOITER_SECONDS.default
+    return Math.min(LOITER_SECONDS.max, Math.max(LOITER_SECONDS.min, Math.round(value)))
+}
+
+/**
+ * Normaliza `guardianZones` venga como venga: legacy `[[{x,y}]]` pasa a
+ * intrusión; un polígono nuevo con tipo desconocido se lee como intrusión; un
+ * merodeo sin segundos válidos toma el valor por defecto. Los polígonos
+ * inválidos (menos de 3 puntos, fuera de 0..1) se descartan.
+ */
+export function parseGuardianZones(raw: unknown): GuardianZone[] {
+    if (!Array.isArray(raw)) return []
+    return raw.flatMap((item): GuardianZone[] => {
+        if (Array.isArray(item)) {
+            const legacy = z.array(zonePointSchema).min(ZONE_LIMITS.minPoints).max(ZONE_LIMITS.maxPoints).safeParse(item)
+            return legacy.success ? [{ points: legacy.data, type: 'intrusion' }] : []
+        }
+        if (typeof item !== 'object' || item === null) return []
+        const { points, type, loiterSeconds } = item as { points?: unknown; type?: unknown; loiterSeconds?: unknown }
+        const parsedPoints = z.array(zonePointSchema).min(ZONE_LIMITS.minPoints).max(ZONE_LIMITS.maxPoints).safeParse(points)
+        if (!parsedPoints.success) return []
+        if (type !== 'loitering') return [{ points: parsedPoints.data, type: 'intrusion' }]
+        const seconds = typeof loiterSeconds === 'number' ? clampLoiterSeconds(loiterSeconds) : LOITER_SECONDS.default
+        return [{ points: parsedPoints.data, type: 'loitering', loiterSeconds: seconds }]
+    })
+}
+
+/** Cuerpo de `PATCH /cameras/:id/zones`: siempre el formato nuevo; `loiterSeconds` solo en merodeo. */
+export function serializeGuardianZones(zones: ReadonlyArray<GuardianZone>): GuardianZone[] {
+    return zones.map((zone) =>
+        zone.type === 'loitering'
+            ? { points: zone.points, type: 'loitering', loiterSeconds: clampLoiterSeconds(zone.loiterSeconds ?? LOITER_SECONDS.default) }
+            : { points: zone.points, type: 'intrusion' },
+    )
+}
+
 // Línea de dirección del LPR (backend/src/cameras/lpr-settings.ts): coordenadas
 // normalizadas 0-1. `exitSide` es el lado hacia el que se mueve el vehículo al
 // SALIR, mirando de `from` a `to` tal como se ve en pantalla (eje y hacia abajo).
@@ -383,7 +444,7 @@ export const cameraSchema = z.object({
     active: z.boolean().optional(),
     // roles may be present in populated responses
     roles: z.array(roleSchema).optional(),
-    guardianZones: z.array(z.array(zonePointSchema)).optional(),
+    guardianZones: z.array(guardianZoneReadSchema).optional(),
 })
 
 export type Camera = z.infer<typeof cameraSchema>

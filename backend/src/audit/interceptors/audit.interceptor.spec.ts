@@ -27,6 +27,7 @@ interface FakeRequest {
   headers: Record<string, string>;
   url: string;
   method: string;
+  auditNewValue?: unknown;
 }
 
 /**
@@ -101,6 +102,22 @@ describe('AuditInterceptor — organizationId (Fase 4 · P5.A)', () => {
 
     expect(entry.organizationId).toBe(ORG_A);
     expect(membership.getOrganizationIdForUser).not.toHaveBeenCalled();
+  });
+
+  it('auditNewValue del handler es el newValue (sin capturar la respuesta) y se sanea', async () => {
+    const req = request();
+    const entry = await run(req, {
+      handle: () => {
+        req.auditNewValue = { status: 'reviewed', previousStatus: 'open' };
+        return of({ id: 'target-1', resolutionNote: 'nota libre' });
+      },
+    });
+
+    expect(entry.newValue).toEqual({
+      status: 'reviewed',
+      previousStatus: 'open',
+    });
+    expect(JSON.stringify(entry)).not.toContain('nota libre');
   });
 
   it('super-admin (sin condominio): organizationId null, sin buscar membresía', async () => {

@@ -48,12 +48,16 @@ const ZONES = [
     { x: 0.9, y: 0.9 },
   ],
 ]
-const zoneEditorProps = vi.hoisted(() => ({ last: null as null | { initialZones: unknown[]; tone?: string } }))
+const GUARDIAN_ZONES = [{ points: ZONES[0], type: 'loitering' as const, loiterSeconds: 30 }]
+const zoneEditorProps = vi.hoisted(() => ({
+  last: null as null | { initialZones: unknown[]; initialZoneSettings?: unknown[]; tone?: string },
+}))
 vi.mock('./ZoneEditor', () => ({
   ZoneEditor: (props: {
     initialZones: unknown[]
+    initialZoneSettings?: unknown[]
     tone?: string
-    onSave: (zones: unknown[]) => Promise<void>
+    onSaveZones: (zones: unknown[]) => Promise<void>
     onClose: () => void
   }) => {
     zoneEditorProps.last = props
@@ -61,7 +65,7 @@ vi.mock('./ZoneEditor', () => ({
       <button
         type="button"
         onClick={() => {
-          void props.onSave(ZONES).then(props.onClose)
+          void props.onSaveZones(GUARDIAN_ZONES).then(props.onClose)
         }}
       >
         Guardar zonas (mock)
@@ -237,11 +241,46 @@ describe('CamerasPanel: zonas del Guardián', () => {
     await user.click(await screen.findByRole('menuitem', { name: 'Configurar Zonas Alarmas' }))
     await user.click(await screen.findByRole('button', { name: 'Guardar zonas (mock)' }))
 
-    await waitFor(() => expect(cameraApi.updateCameraGuardianZones).toHaveBeenCalledWith(CAMERA.id, ZONES))
+    await waitFor(() => expect(cameraApi.updateCameraGuardianZones).toHaveBeenCalledWith(CAMERA.id, GUARDIAN_ZONES))
     expect(zoneEditorProps.last).toMatchObject({ tone: 'guardian', initialZones: ZONES })
     // Tras guardar se vuelve a pedir la lista de cámaras.
     await waitFor(() => expect(cameraApi.listCameras.mock.calls.length).toBeGreaterThan(1))
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Guardar zonas (mock)' })).not.toBeInTheDocument())
+  })
+
+  it('abre el editor con zonas LEGACY ([[{x,y}]]) como intrusión', async () => {
+    cameraApi.listCameras.mockResolvedValue([{ ...CAMERA, guardianZones: ZONES }])
+    const user = userEvent.setup()
+    await openMenu(user)
+
+    await user.click(await screen.findByRole('menuitem', { name: 'Configurar Zonas Alarmas' }))
+    await screen.findByRole('button', { name: 'Guardar zonas (mock)' })
+
+    expect(zoneEditorProps.last?.initialZones).toEqual(ZONES)
+    expect(zoneEditorProps.last?.initialZoneSettings).toEqual([{ points: ZONES[0], type: 'intrusion' }])
+  })
+
+  it('abre el editor con zonas en el formato nuevo conservando tipo y segundos', async () => {
+    cameraApi.listCameras.mockResolvedValue([
+      {
+        ...CAMERA,
+        guardianZones: [
+          { points: ZONES[0], type: 'intrusion' },
+          { points: ZONES[0], type: 'loitering', loiterSeconds: 45 },
+        ],
+      },
+    ])
+    const user = userEvent.setup()
+    await openMenu(user)
+
+    await user.click(await screen.findByRole('menuitem', { name: 'Configurar Zonas Alarmas' }))
+    await screen.findByRole('button', { name: 'Guardar zonas (mock)' })
+
+    expect(zoneEditorProps.last?.initialZones).toEqual([ZONES[0], ZONES[0]])
+    expect(zoneEditorProps.last?.initialZoneSettings).toEqual([
+      { points: ZONES[0], type: 'intrusion' },
+      { points: ZONES[0], type: 'loitering', loiterSeconds: 45 },
+    ])
   })
 
   it('una cámara sin zonas abre el editor vacío', async () => {
