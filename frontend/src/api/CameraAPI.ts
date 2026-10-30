@@ -1,7 +1,7 @@
 import api from '@/lib/axios'
 import { isAxiosError } from 'axios'
-import type { Camera, CameraLprSettingsResponse, CreateCameraPayload, LprSettings, UpdateCameraFormData, ZonePoint } from '@/types/index'
-import { cameraLprSettingsResponseSchema } from '@/types/index'
+import type { Camera, GuardianZone, CameraLprSettingsResponse, CreateCameraPayload, LprSettings, UpdateCameraFormData } from '@/types/index'
+import { cameraLprSettingsResponseSchema, serializeGuardianZones } from '@/types/index'
 import { toApiError } from '@/helpers/httpErrors'
 
 export async function enableCameraGuardian(id: string, enableGuardian: boolean): Promise<{ id: string; name: string; enableGuardian: boolean }> {
@@ -136,10 +136,10 @@ export async function enableCameraLpr(id: string, enableLpr: boolean): Promise<{
   }
 }
 
-/** Zonas de intrusión del Guardián (reemplaza todas las zonas de la cámara). */
-export async function updateCameraGuardianZones(id: string, zones: ZonePoint[][]): Promise<void> {
+/** Zonas del Guardián con su tipo (intrusión o merodeo): reemplaza todas las zonas de la cámara. Siempre envía el formato nuevo. */
+export async function updateCameraGuardianZones(id: string, zones: GuardianZone[]): Promise<void> {
   try {
-    await api.patch(`/cameras/${id}/zones`, { zones })
+    await api.patch(`/cameras/${id}/zones`, { zones: serializeGuardianZones(zones) })
   } catch (error) {
     throw toApiError(error, 'Error al guardar las zonas')
   }

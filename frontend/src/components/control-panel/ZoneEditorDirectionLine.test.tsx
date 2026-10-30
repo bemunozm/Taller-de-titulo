@@ -2,7 +2,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { toast } from 'react-toastify'
-import { ZoneEditor, type ZoneEditorProps } from './ZoneEditor'
+import { ZoneEditor, type ZoneEditorBaseProps, type ZoneEditorProps, type ZoneEditorSavePlain, type ZoneEditorSaveTyped } from './ZoneEditor'
 
 // Mismo andamiaje que ZoneEditor.test.tsx: sin reproductor real y con geometría SVG
 // identidad (1 px de pantalla = 1 unidad del viewBox de 1000, así clientX/1000 es la coordenada).
@@ -33,8 +33,14 @@ beforeEach(() => {
   vi.clearAllMocks()
 })
 
-function renderEditor(overrides: Partial<ZoneEditorProps> = {}) {
-  const props: ZoneEditorProps = {
+/** Los tests combinan base + una vía de guardado a mano: las sobrescrituras son sueltas y el resultado se afirma como `ZoneEditorProps`. */
+type EditorOverrides = Partial<ZoneEditorBaseProps> & {
+  onSave?: ZoneEditorSavePlain['onSave']
+  onSaveZones?: ZoneEditorSaveTyped['onSaveZones']
+}
+
+function renderEditor(overrides: EditorOverrides = {}) {
+  const props = {
     camera: CAMERA,
     initialZones: [],
     title: 'Zona de prueba',
@@ -44,7 +50,7 @@ function renderEditor(overrides: Partial<ZoneEditorProps> = {}) {
     onSave: vi.fn(async () => undefined),
     onClose: vi.fn(),
     ...overrides,
-  }
+  } as ZoneEditorProps
   render(<ZoneEditor {...props} />)
   return props
 }
