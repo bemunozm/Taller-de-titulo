@@ -15,7 +15,11 @@ import {
   type LprSettingsDto,
 } from './dto/lpr-settings.dto';
 import type { LprSettings, WorkerLprSettingsView } from './lpr-settings';
-import { Camera, type GuardianZone } from './entities/camera.entity';
+import { Camera } from './entities/camera.entity';
+import {
+  normalizeGuardianZones,
+  type GuardianZoneConfig,
+} from './guardian-zones';
 import { Role } from 'src/roles/entities/role.entity';
 import { encryptString, decryptString } from 'src/utils/crypto.util';
 import { MediamtxService } from 'src/mediamtx/mediamtx.service';
@@ -667,15 +671,8 @@ export class CamerasService {
           await this.mediamtxService.deregisterSource(mount);
           await queryRunner.manager.delete(Camera, id);
           await queryRunner.commitTransaction();
-          // notify worker manager to unregister LPR for this camera (best-effort)
-          try {
-            if (this.workerNotifier)
-              await this.workerNotifier.unregisterCamera(id);
-          } catch (err) {
-            this.logger.warn(
-              `No se pudo notificar al worker manager para desregistrar cámara tras delete (strict): ${err?.message || err}`,
-            );
-          }
+          // notify worker manager to unregister LPR + Guardián (best-effort)
+          await this.unregisterWorkersOf(id, 'tras delete (strict)');
           return { message: 'Cámara eliminada' };
         } catch (err) {
           await queryRunner.rollbackTransaction();
@@ -708,18 +705,34 @@ export class CamerasService {
       const result = await this.cameraRepository.delete(id);
       if (result.affected === 0)
         throw new NotFoundException(`Cámara con ID ${id} no encontrada`);
-      // notify worker manager to unregister LPR for this camera (best-effort)
-      try {
-        if (this.workerNotifier) await this.workerNotifier.unregisterCamera(id);
-      } catch (err) {
-        this.logger.warn(
-          `No se pudo notificar al worker manager para desregistrar cámara tras delete: ${err?.message || err}`,
-        );
-      }
+      // notify worker manager to unregister LPR + Guardián (best-effort)
+      await this.unregisterWorkersOf(id, 'tras delete');
       return { message: 'Cámara eliminada' };
     } catch (error) {
       if (error instanceof NotFoundException) throw error;
       throw new InternalServerErrorException('Error al eliminar la cámara');
+    }
+  }
+
+  /**
+   * Desregistra los workers de una cámara borrada: el LPR (`<id>`) y el
+   * Guardián (`<id>_guardia`). Best-effort: cada uno en su propio try para
+   * que el fallo de uno no deje al otro corriendo contra una cámara que ya no
+   * existe. Nunca lanza.
+   */
+  private async unregisterWorkersOf(
+    cameraId: string,
+    context: string,
+  ): Promise<void> {
+    if (!this.workerNotifier) return;
+    for (const workerId of [cameraId, `${cameraId}_guardia`]) {
+      try {
+        await this.workerNotifier.unregisterCamera(workerId);
+      } catch (err) {
+        this.logger.warn(
+          `No se pudo notificar al worker manager para desregistrar ${workerId} ${context}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
   }
 
@@ -997,15 +1010,23 @@ export class CamerasService {
 
   /**
    * Actualiza los polígonos/zonas del Guardián Visual. Fase 4 · P9: `zones`
-   * llega validado por `UpdateGuardianZonesDto`; se guardan solo `x` e `y`
-   * (JSON plano, la forma que lee el LPR).
+   * llega validado por `UpdateGuardianZonesDto`; se guardan siempre en
+   * formato nuevo (`{ points, type, loiterSeconds? }`, solo `x`/`y` en los
+   * puntos). Se normaliza otra vez acá por si el llamador no pasó por el DTO
+   * (zonas legacy `[[{x,y}]]` pasan a `type: 'intrusion'`).
    */
-  async updateGuardianZones(cameraId: string, zones: GuardianZone[]) {
+  async updateGuardianZones(cameraId: string, zones: unknown) {
     try {
       const camera = await this.loadScopedOrFail(cameraId);
 
-      camera.guardianZones = zones.map((zone) =>
-        zone.map(({ x, y }) => ({ x, y })),
+      camera.guardianZones = normalizeGuardianZones(zones).map(
+        (zone): GuardianZoneConfig => ({
+          points: zone.points.map(({ x, y }) => ({ x, y })),
+          type: zone.type,
+          ...(zone.loiterSeconds !== undefined
+            ? { loiterSeconds: zone.loiterSeconds }
+            : {}),
+        }),
       );
       const updated = await this.cameraRepository.save(camera);
 
