@@ -58,9 +58,9 @@ export default function TraceabilityView() {
     queryKey: ['detections', 'attempts'], 
     queryFn: () => listAccessAttempts() 
   })
-  const { data: anomalies = [], isError: isAnomaliesError } = useQuery({
-    queryKey: ['anomalies'], 
-    queryFn: () => listAnomalies() 
+  const { data: anomalySummary, isError: isAnomaliesError } = useQuery({
+    queryKey: ['anomalies', 'summary'],
+    queryFn: () => listAnomalies({ limit: 1 }),
   })
 
   // `?tab=anomalies` permite volver desde el detalle de una anomalía a su pestaña.
@@ -147,7 +147,7 @@ export default function TraceabilityView() {
           icon={ShieldExclamationIcon}
           iconClassName="text-red-600 dark:text-red-400"
           label="Anomalías IA"
-          value={anomalies.length}
+          value={anomalySummary?.total ?? 0}
           valueClassName="text-red-600 dark:text-red-400"
           footnote={isAnomaliesError ? 'No se pudieron cargar' : 'Eventos críticos detectados'}
         />

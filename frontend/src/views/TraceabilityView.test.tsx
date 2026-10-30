@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import { screen, waitFor, within } from '@testing-library/react'
-import type { AccessAttempt, AnomalyEvent } from '@/api/DetectionsAPI'
+import type { AccessAttempt, AnomalyListPage } from '@/api/DetectionsAPI'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import TraceabilityView from './TraceabilityView'
 
 const detectionsApi = vi.hoisted(() => ({
   listAccessAttempts: vi.fn<() => Promise<AccessAttempt[]>>(),
-  listAnomalies: vi.fn<() => Promise<AnomalyEvent[]>>(),
+  listAnomalies: vi.fn<() => Promise<AnomalyListPage>>(),
 }))
 vi.mock('@/api/DetectionsAPI', () => detectionsApi)
 
@@ -35,7 +35,7 @@ describe('TraceabilityView: estadísticas', () => {
       makeAttempt('3', 'Duplicado'),
       makeAttempt('4', 'Denegado'),
     ])
-    detectionsApi.listAnomalies.mockResolvedValue([])
+    detectionsApi.listAnomalies.mockResolvedValue({ items: [], total: 0 })
     renderWithProviders(<TraceabilityView />)
 
     const total = screen.getByRole('region', { name: 'Total de Intentos' })
@@ -54,7 +54,7 @@ describe('TraceabilityView: estadísticas', () => {
 describe('TraceabilityView: pestaña por URL', () => {
   it('?tab=anomalies abre la pestaña de anomalías (vuelta desde el detalle)', async () => {
     detectionsApi.listAccessAttempts.mockResolvedValue([])
-    detectionsApi.listAnomalies.mockResolvedValue([])
+    detectionsApi.listAnomalies.mockResolvedValue({ items: [], total: 0 })
     renderWithProviders(<TraceabilityView />, { route: '/traceability?tab=anomalies' })
 
     expect(await screen.findByText('Historial de Anomalías IA')).toBeInTheDocument()

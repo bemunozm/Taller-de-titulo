@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Socket } from 'socket.io-client'
-import type { AnomalyHighlight } from '@/helpers/securityAlerts'
+import type { AnomalyHighlight, AnomalyUpdate } from '@/helpers/securityAlerts'
 import {
   ANOMALY_HIGHLIGHT_EVENT,
+  ANOMALY_UPDATED_EVENT,
   NOTIFICATION_EVENT,
   REALTIME_RECOVERY_MAX_ATTEMPTS,
   REALTIME_STABLE_CONNECTION_MS,
@@ -385,6 +386,37 @@ describe('WebSocketService: eventos', () => {
 
     off()
     sockets[0].fire(ANOMALY_HIGHLIGHT_EVENT, { anomalyId: 'anom-2' })
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it('normaliza security:anomaly_updated y descarta los payloads sin id', () => {
+    const { service, sockets } = setup()
+    const handler = vi.fn<(update: AnomalyUpdate) => void>()
+    const off = service.onAnomalyUpdated(handler)
+    service.connect(session())
+
+    sockets[0].fire(ANOMALY_UPDATED_EVENT, { aiStatus: 'done' })
+    sockets[0].fire(ANOMALY_UPDATED_EVENT, {
+      anomalyId: 'anom-1',
+      aiStatus: 'done',
+      severity: 'medium',
+      reasoning: 'Es el jardinero',
+      aiFalsePositive: true,
+      status: 'open',
+    })
+
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledWith({
+      anomalyId: 'anom-1',
+      aiStatus: 'done',
+      severity: 'MEDIUM',
+      reasoning: 'Es el jardinero',
+      aiFalsePositive: true,
+      status: 'open',
+    })
+
+    off()
+    sockets[0].fire(ANOMALY_UPDATED_EVENT, { anomalyId: 'anom-2' })
     expect(handler).toHaveBeenCalledTimes(1)
   })
 })

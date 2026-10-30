@@ -1,12 +1,18 @@
 import api from '@/lib/axios'
 import { isAxiosError } from 'axios'
 import { ApiError, toApiError } from '@/helpers/httpErrors'
-import { parseAnomalyEvent, type AnomalyEvent } from '@/types/anomaly'
+import {
+  parseAnomalyEvent,
+  parseAnomalyListPage,
+  type AnomalyEvent,
+  type AnomalyListPage,
+  type AnomalyStatus,
+} from '@/types/anomaly'
 import { parseAttemptPassage, type AttemptPassage } from '@/types/passage'
 
 export { parseAttemptPassage, PASSAGE_DIRECTIONS, PASSAGE_DIRECTION_SOURCES } from '@/types/passage'
 export type { AttemptPassage, PassageSighting } from '@/types/passage'
-export type { AnomalyEvent } from '@/types/anomaly'
+export type { AnomalyEvent, AnomalyListItem, AnomalyListPage, AnomalyStatus } from '@/types/anomaly'
 
 /** Metadatos libres del worker LPR; solo se lee el snapshot. */
 export type PlateDetectionMeta = {
@@ -79,15 +85,31 @@ export async function listAccessAttempts(): Promise<AccessAttempt[]> {
   }
 }
 
+/** Filtros de `GET /anomalies`: se aplican en el servidor (el listado va paginado y sin foto). */
+export interface AnomalyListFilters {
+  status?: AnomalyStatus
+  type?: string
+  cameraId?: string
+  /** Por defecto 50 y máximo 100 en el backend. */
+  limit?: number
+  offset?: number
+}
+
 /**
- * Anomalías del condominio de la sesión (P5.C: `GET /anomalies` con sesión
- * humana; antes solo con la API key del worker y la UI recibía 401). Se
- * asume un arreglo; cualquier otra forma se trata como vacío.
+ * Anomalías del condominio de la sesión: `GET /anomalies` devuelve
+ * `{ items, total }` sin foto (la foto va solo en `GET /anomalies/:id`).
+ * Los filtros vacíos no se envían.
  */
-export async function listAnomalies(): Promise<AnomalyEvent[]> {
+export async function listAnomalies(filters: AnomalyListFilters = {}): Promise<AnomalyListPage> {
+  const params: Record<string, string | number> = {}
+  if (filters.status) params.status = filters.status
+  if (filters.type) params.type = filters.type
+  if (filters.cameraId) params.cameraId = filters.cameraId
+  if (filters.limit !== undefined) params.limit = filters.limit
+  if (filters.offset !== undefined) params.offset = filters.offset
   try {
-    const { data } = await api.get<unknown>('/anomalies')
-    return Array.isArray(data) ? (data as AnomalyEvent[]) : []
+    const { data } = await api.get<unknown>('/anomalies', { params })
+    return parseAnomalyListPage(data)
   } catch (error) {
     throw toApiError(error, 'No se pudieron cargar las anomalías', {
       401: 'Tu sesión no permite ver las anomalías',
@@ -113,6 +135,32 @@ export async function getAnomaly(id: string): Promise<AnomalyEvent> {
     throw toApiError(error, 'No se pudo cargar la anomalía', {
       401: 'Tu sesión no permite ver la anomalía',
       403: 'No tienes permiso para ver la anomalía',
+      404: 'La anomalía no existe o no pertenece a tu condominio',
+    })
+  }
+}
+
+/**
+ * Revisa, descarta, marca como falsa alarma o reabre una anomalía
+ * (`PATCH /anomalies/:id/status`, permiso `anomalies.resolve`). La respuesta
+ * es la anomalía actualizada, sin foto.
+ */
+export async function updateAnomalyStatus(id: string, status: AnomalyStatus, note?: string): Promise<AnomalyEvent> {
+  const trimmed = note?.trim()
+  try {
+    const { data } = await api.patch<unknown>(`/anomalies/${encodeURIComponent(id)}/status`, {
+      status,
+      ...(trimmed ? { note: trimmed } : {}),
+    })
+    const anomaly = parseAnomalyEvent(data)
+    if (!anomaly) {
+      throw new ApiError('La respuesta del servidor llegó con un formato inesperado', null)
+    }
+    return anomaly
+  } catch (error) {
+    throw toApiError(error, 'No se pudo actualizar el estado de la anomalía', {
+      401: 'Tu sesión no permite resolver anomalías',
+      403: 'No tienes permiso para resolver anomalías',
       404: 'La anomalía no existe o no pertenece a tu condominio',
     })
   }

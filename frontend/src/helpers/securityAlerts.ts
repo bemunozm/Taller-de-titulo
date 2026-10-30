@@ -119,3 +119,36 @@ export function toJpegDataUrl(base64: string | null | undefined): string | null 
   }
   return `data:image/jpeg;base64,${compact}`
 }
+
+/** Cambio de una anomalía por WebSocket (`security:anomaly_updated`): resultado de la IA o nuevo estado. */
+export interface AnomalyUpdate {
+  anomalyId: string
+  aiStatus: string | null
+  severity: AnomalySeverity | null
+  reasoning: string | null
+  aiFalsePositive: boolean | null
+  status: string | null
+}
+
+/**
+ * Lee `security:anomaly_updated` (`{ anomalyId, aiStatus, severity, reasoning,
+ * aiFalsePositive, status }`) sin confiar en su forma. Sin id no hay evento,
+ * porque las consultas a refrescar se identifican por él.
+ */
+export function parseAnomalyUpdate(raw: unknown): AnomalyUpdate | null {
+  if (!isRecord(raw)) {
+    return null
+  }
+  const anomalyId = firstString(raw, 'anomalyId', 'id')
+  if (!anomalyId) {
+    return null
+  }
+  return {
+    anomalyId,
+    aiStatus: firstString(raw, 'aiStatus'),
+    severity: toSeverity(firstString(raw, 'severity', 'suspicionLevel')),
+    reasoning: firstString(raw, 'reasoning', 'aiReasoning'),
+    aiFalsePositive: typeof raw.aiFalsePositive === 'boolean' ? raw.aiFalsePositive : null,
+    status: firstString(raw, 'status'),
+  }
+}

@@ -1,10 +1,12 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'react-toastify'
 import {
   ArrowDownTrayIcon,
   ArrowPathIcon,
   CameraIcon,
+  CheckCircleIcon,
   ChevronLeftIcon,
   ClockIcon,
   CodeBracketIcon,
@@ -14,23 +16,33 @@ import {
   ShieldExclamationIcon,
   SparklesIcon,
 } from '@heroicons/react/24/outline'
-import { getAnomaly } from '@/api/DetectionsAPI'
+import { getAnomaly, updateAnomalyStatus } from '@/api/DetectionsAPI'
 import { listCameras } from '@/api/CameraAPI'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { DescriptionDetails, DescriptionList, DescriptionTerm } from '@/components/ui/DescriptionList'
+import { Dialog, DialogActions, DialogBody, DialogDescription, DialogTitle } from '@/components/ui/Dialog'
+import { Field, Label } from '@/components/ui/Fieldset'
 import { Heading, Subheading } from '@/components/ui/Heading'
+import { Textarea } from '@/components/ui/TextArea'
 import {
   ANOMALIES_LIST_PATH,
+  ANOMALY_RESOLVE_PERMISSION,
+  anomalyAiPollInterval,
   anomalyMetadata,
   anomalySeverity,
+  anomalyStatusActions,
+  anomalyStatusMeta,
   formatAnomalyConfidence,
   formatAnomalyDuration,
   resolveAnomalyCameraName,
+  type AnomalyStatusAction,
 } from '@/helpers/anomaly'
 import { saveBlobAsFile } from '@/helpers/download'
 import { ApiError } from '@/helpers/httpErrors'
 import { anomalyTypeLabel, toJpegDataUrl } from '@/helpers/securityAlerts'
+import { usePermissions } from '@/hooks/usePermissions'
+import { ANOMALY_NOTE_MAX_LENGTH, type AnomalyEvent } from '@/types/anomaly'
 
 const CARD = 'rounded-lg border border-zinc-200 bg-white shadow dark:border-zinc-800 dark:bg-zinc-900'
 const EMPTY = <span className="text-zinc-400 dark:text-zinc-600">-</span>
@@ -113,8 +125,64 @@ function TechnicalField({ label, value }: TechnicalFieldProps) {
   )
 }
 
+interface ResolveDialogProps {
+  action: AnomalyStatusAction
+  isPending: boolean
+  onConfirm: (note: string) => void
+  onClose: () => void
+}
+
+/** Confirmación del cambio de estado con una nota opcional (máx. 500 caracteres). */
+function ResolveDialog({ action, isPending, onConfirm, onClose }: ResolveDialogProps) {
+  const [note, setNote] = useState('')
+
+  return (
+    <Dialog open onClose={() => (isPending ? undefined : onClose())}>
+      <DialogTitle>{action.dialogTitle}</DialogTitle>
+      <DialogDescription>La nota es opcional y queda registrada junto a quién y cuándo lo hizo.</DialogDescription>
+      <DialogBody>
+        <Field>
+          <Label>Nota (opcional)</Label>
+          <Textarea
+            name="resolution-note"
+            rows={3}
+            maxLength={ANOMALY_NOTE_MAX_LENGTH}
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            disabled={isPending}
+          />
+          <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+            No escribas nombres, RUT ni otros datos personales; la nota queda registrada.
+          </p>
+          <p className="mt-1 text-right text-xs text-zinc-500 dark:text-zinc-400">
+            {note.length}/{ANOMALY_NOTE_MAX_LENGTH}
+          </p>
+        </Field>
+      </DialogBody>
+      <DialogActions>
+        <Button plain onClick={onClose} disabled={isPending}>
+          Cancelar
+        </Button>
+        <Button onClick={() => onConfirm(note)} disabled={isPending}>
+          {isPending ? 'Guardando...' : action.confirmLabel}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  )
+}
+
+function formatResolvedAt(value: string | null | undefined): string | null {
+  if (!value) return null
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleString('es-CL', { dateStyle: 'long', timeStyle: 'short' })
+}
+
 export default function AnomalyDetailView() {
   const { id = '' } = useParams()
+  const queryClient = useQueryClient()
+  const { hasPermission } = usePermissions()
+  const canResolve = hasPermission(ANOMALY_RESOLVE_PERMISSION)
+  const [pendingAction, setPendingAction] = useState<AnomalyStatusAction | null>(null)
 
   const anomalyQuery = useQuery({
     queryKey: ['anomalies', 'detail', id],
@@ -122,6 +190,26 @@ export default function AnomalyDetailView() {
     enabled: id !== '',
     // Un 404/403 no se arregla reintentando.
     retry: false,
+    // Mientras la IA analiza se vuelve a pedir (acotado); `security:anomaly_updated` lo adelanta.
+    refetchInterval: (query) =>
+      anomalyAiPollInterval(query.state.data?.aiStatus === 'pending', query.state.dataUpdateCount),
+  })
+
+  const statusMutation = useMutation({
+    mutationFn: ({ action, note }: { action: AnomalyStatusAction; note: string }) =>
+      updateAnomalyStatus(id, action.target, note),
+    onSuccess: (updated, { action }) => {
+      // La respuesta no trae la foto: se conserva la del detalle ya cargado.
+      queryClient.setQueryData<AnomalyEvent>(['anomalies', 'detail', id], (previous) =>
+        previous ? { ...previous, ...updated, snapshotJpegB64: previous.snapshotJpegB64 } : updated,
+      )
+      void queryClient.invalidateQueries({ queryKey: ['anomalies', 'list'] })
+      toast.success(action.toastMessage)
+      setPendingAction(null)
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'No se pudo actualizar el estado de la anomalía')
+    },
   })
   // El nombre de la cámara es un extra: si falla, se muestra el identificador.
   const { data: cameras = [] } = useQuery({ queryKey: ['cameras'], queryFn: () => listCameras(), retry: false })
@@ -144,6 +232,10 @@ export default function AnomalyDetailView() {
   const duration = formatAnomalyDuration(anomaly.durationSeconds)
   const typeLabel = anomalyTypeLabel(anomaly.anomalyType)
   const metadata = anomalyMetadata(anomaly)
+  const statusMeta = anomalyStatusMeta(anomaly.status)
+  const aiPending = anomaly.aiStatus === 'pending'
+  const resolvedAt = formatResolvedAt(anomaly.resolvedAt)
+  const statusActions = canResolve ? anomalyStatusActions(anomaly.status) : []
 
   const downloadMetadata = () => {
     const blob = new Blob([JSON.stringify(metadata, null, 2)], { type: 'application/json' })
@@ -193,13 +285,41 @@ export default function AnomalyDetailView() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            {severity ? (
+            <Badge color={statusMeta.color}>Estado: {statusMeta.label}</Badge>
+            {aiPending ? (
+              <Badge color="zinc">Analizando…</Badge>
+            ) : severity ? (
               <Badge color={severity.color}>Riesgo {severity.label}</Badge>
             ) : (
               <Badge color="zinc">Sin evaluar</Badge>
             )}
           </div>
         </div>
+        {statusActions.length > 0 && (
+          <div
+            role="group"
+            aria-label="Acciones de revisión"
+            className="mt-4 flex flex-wrap items-center gap-2 border-t border-zinc-200 pt-4 dark:border-zinc-800"
+          >
+            {statusActions.map((action) =>
+              action.target === 'reviewed' ? (
+                <Button key={action.target} onClick={() => setPendingAction(action)} disabled={statusMutation.isPending}>
+                  <CheckCircleIcon className="h-4 w-4" aria-hidden="true" />
+                  {action.label}
+                </Button>
+              ) : (
+                <Button
+                  key={action.target}
+                  outline
+                  onClick={() => setPendingAction(action)}
+                  disabled={statusMutation.isPending}
+                >
+                  {action.label}
+                </Button>
+              ),
+            )}
+          </div>
+        )}
       </header>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -230,14 +350,72 @@ export default function AnomalyDetailView() {
               <SparklesIcon className="h-5 w-5 text-zinc-700 dark:text-zinc-300" aria-hidden="true" />
               <Subheading id="anomaly-analysis">Análisis de la IA</Subheading>
             </div>
-            <div className="p-6">
-              {anomaly.aiReasoning ? (
-                <p className="text-sm/6 whitespace-pre-line text-zinc-700 dark:text-zinc-300">{anomaly.aiReasoning}</p>
+            <div className="space-y-4 p-6">
+              {aiPending ? (
+                <p role="status" className="flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">
+                  <ArrowPathIcon className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                  Analizando con IA…
+                </p>
               ) : (
-                <p className="text-sm text-zinc-500 dark:text-zinc-400">Sin evaluación disponible</p>
+                <>
+                  {anomaly.aiFalsePositive === true && (
+                    <div
+                      role="note"
+                      className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200"
+                    >
+                      <ExclamationTriangleIcon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                      <span>La IA considera que esto podría ser un falso positivo. Revisa la evidencia antes de resolver.</span>
+                    </div>
+                  )}
+                  {anomaly.aiReasoning ? (
+                    <p className="text-sm/6 whitespace-pre-line text-zinc-700 dark:text-zinc-300">{anomaly.aiReasoning}</p>
+                  ) : (
+                    <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                      {anomaly.aiStatus === 'failed'
+                        ? 'El análisis de la IA falló. Revisa la evidencia manualmente.'
+                        : anomaly.aiStatus === 'skipped'
+                          ? 'La IA no analizó este evento.'
+                          : 'Sin evaluación disponible'}
+                    </p>
+                  )}
+                </>
               )}
             </div>
           </section>
+
+          {anomaly.status !== 'open' && (
+            <section aria-labelledby="anomaly-resolution" className={CARD}>
+              <div className="flex items-center gap-2 border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
+                <CheckCircleIcon className="h-5 w-5 text-zinc-700 dark:text-zinc-300" aria-hidden="true" />
+                <Subheading id="anomaly-resolution">Resolución</Subheading>
+              </div>
+              <div className="p-6">
+                <DescriptionList>
+                  <DescriptionTerm>Estado</DescriptionTerm>
+                  <DescriptionDetails>
+                    <Badge color={statusMeta.color}>{statusMeta.label}</Badge>
+                  </DescriptionDetails>
+
+                  <DescriptionTerm>Resuelta por</DescriptionTerm>
+                  <DescriptionDetails>
+                    {anomaly.resolvedById ? anomaly.resolvedByName || 'Usuario eliminado' : EMPTY}
+                  </DescriptionDetails>
+
+                  <DescriptionTerm>Fecha de resolución</DescriptionTerm>
+                  <DescriptionDetails>{resolvedAt ?? EMPTY}</DescriptionDetails>
+
+                  <DescriptionTerm>Nota</DescriptionTerm>
+                  <DescriptionDetails>
+                    {anomaly.resolutionNote ? (
+                      <span className="whitespace-pre-line">{anomaly.resolutionNote}</span>
+                    ) : (
+                      EMPTY
+                    )}
+                  </DescriptionDetails>
+                </DescriptionList>
+              </div>
+            </section>
+          )}
 
           <section aria-labelledby="anomaly-summary" className={CARD}>
             <div className="flex items-center gap-2 border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
@@ -251,7 +429,13 @@ export default function AnomalyDetailView() {
 
                 <DescriptionTerm>Nivel de riesgo</DescriptionTerm>
                 <DescriptionDetails>
-                  {severity ? <Badge color={severity.color}>{severity.label}</Badge> : <span>Sin evaluar</span>}
+                  {aiPending ? (
+                    <span>Analizando…</span>
+                  ) : severity ? (
+                    <Badge color={severity.color}>{severity.label}</Badge>
+                  ) : (
+                    <span>Sin evaluar</span>
+                  )}
                 </DescriptionDetails>
 
                 <DescriptionTerm>Confianza de la IA</DescriptionTerm>
@@ -292,6 +476,15 @@ export default function AnomalyDetailView() {
           </div>
         </aside>
       </div>
+
+      {pendingAction && (
+        <ResolveDialog
+          action={pendingAction}
+          isPending={statusMutation.isPending}
+          onConfirm={(note) => statusMutation.mutate({ action: pendingAction, note })}
+          onClose={() => setPendingAction(null)}
+        />
+      )}
     </div>
   )
 }

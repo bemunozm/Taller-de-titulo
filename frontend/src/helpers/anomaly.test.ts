@@ -2,8 +2,13 @@ import { describe, expect, it } from 'vitest'
 import type { AnomalyEvent } from '@/types/anomaly'
 import {
   anomalyDetailPath,
+  ANOMALY_AI_POLL_MAX_UPDATES,
+  ANOMALY_AI_POLL_MS,
+  anomalyAiPollInterval,
   anomalyMetadata,
   anomalySeverity,
+  anomalyStatusActions,
+  anomalyStatusMeta,
   formatAnomalyConfidence,
   formatAnomalyDuration,
   resolveAnomalyCameraName,
@@ -49,11 +54,35 @@ describe('anomaly helpers', () => {
       cameraId: 'c',
       anomalyType: 'intrusion',
       confidence: 0.5,
+      status: 'open',
       snapshotJpegB64: '/9j/4AAQ',
       timestamp: '2026-10-08T12:00:00.000Z',
     }
     const meta = anomalyMetadata(anomaly)
     expect(meta).not.toHaveProperty('snapshotJpegB64')
     expect(meta).toMatchObject({ id: 'a', cameraId: 'c' })
+  })
+
+  it('anomalyStatusMeta da etiqueta y color a cada estado', () => {
+    expect(anomalyStatusMeta('open')).toEqual({ label: 'Abierta', color: 'amber' })
+    expect(anomalyStatusMeta('reviewed').label).toBe('Revisada')
+    expect(anomalyStatusMeta('dismissed').label).toBe('Descartada')
+    expect(anomalyStatusMeta('false_alarm').label).toBe('Falsa alarma')
+  })
+
+  it('una anomalía abierta se puede revisar, descartar o marcar falsa alarma', () => {
+    expect(anomalyStatusActions('open').map((action) => action.target)).toEqual(['reviewed', 'dismissed', 'false_alarm'])
+  })
+
+  it.each(['reviewed', 'dismissed', 'false_alarm'] as const)('una anomalía %s solo se reabre', (status) => {
+    const actions = anomalyStatusActions(status)
+    expect(actions.map((action) => action.target)).toEqual(['open'])
+    expect(actions[0].label).toBe('Reabrir')
+  })
+
+  it('anomalyAiPollInterval refresca solo mientras la IA analiza y con tope', () => {
+    expect(anomalyAiPollInterval(true, 1)).toBe(ANOMALY_AI_POLL_MS)
+    expect(anomalyAiPollInterval(false, 1)).toBe(false)
+    expect(anomalyAiPollInterval(true, ANOMALY_AI_POLL_MAX_UPDATES)).toBe(false)
   })
 })

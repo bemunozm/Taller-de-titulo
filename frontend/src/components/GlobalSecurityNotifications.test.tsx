@@ -25,12 +25,19 @@ vi.mock('@/hooks/usePermissions', () => ({
 // Socket de la sesión: se capturan los handlers para emitir avisos a mano.
 const socketState = vi.hoisted(() => ({
   handlers: new Set<(highlight: AnomalyHighlight) => void>(),
+  updateHandlers: new Set<(update: { anomalyId: string }) => void>(),
 }))
 const webSocketServiceMock = vi.hoisted(() => ({
   onAnomalyHighlight: vi.fn((handler: (highlight: AnomalyHighlight) => void) => {
     socketState.handlers.add(handler)
     return () => {
       socketState.handlers.delete(handler)
+    }
+  }),
+  onAnomalyUpdated: vi.fn((handler: (update: { anomalyId: string }) => void) => {
+    socketState.updateHandlers.add(handler)
+    return () => {
+      socketState.updateHandlers.delete(handler)
     }
   }),
 }))
@@ -70,9 +77,49 @@ function httpError(status: number, data: unknown): AxiosError {
 beforeEach(() => {
   vi.clearAllMocks()
   socketState.handlers.clear()
+  socketState.updateHandlers.clear()
   permissionsState.permissions = ['detections.read', 'condominium.view-all']
   permissionsState.isSuperAdmin = false
   apiMock.get.mockResolvedValue({ data: { id: 'anom-1', snapshotJpegB64: SNAPSHOT_B64 } })
+})
+
+describe('GlobalSecurityNotifications: security:anomaly_updated', () => {
+  it('invalida el listado y el detalle de esa anomalía', () => {
+    const { queryClient } = renderWithProviders(<GlobalSecurityNotifications />)
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+
+    act(() => {
+      socketState.updateHandlers.forEach((handler) => handler({ anomalyId: 'anom-7' }))
+    })
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['anomalies'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['anomalies', 'detail', 'anom-7'] })
+  })
+
+  it('un aviso nuevo refresca el listado abierto', () => {
+    const { queryClient } = renderWithProviders(<GlobalSecurityNotifications />)
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+
+    emitHighlight(highlight({ severity: 'LOW' }))
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['anomalies', 'list'] })
+  })
+
+  it('deja de escuchar al desmontarse', () => {
+    const { unmount } = renderWithProviders(<GlobalSecurityNotifications />)
+    expect(socketState.updateHandlers.size).toBe(1)
+
+    unmount()
+
+    expect(socketState.updateHandlers.size).toBe(0)
+  })
+
+  it('sin los permisos de seguridad no escucha', () => {
+    permissionsState.permissions = []
+    renderWithProviders(<GlobalSecurityNotifications />)
+
+    expect(webSocketServiceMock.onAnomalyUpdated).not.toHaveBeenCalled()
+  })
 })
 
 describe('GlobalSecurityNotifications: montaje por permisos', () => {
