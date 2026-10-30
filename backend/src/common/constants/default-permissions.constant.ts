@@ -468,6 +468,13 @@ export const DEFAULT_PERMISSIONS: PermissionDefinition[] = [
     module: 'detections',
     action: 'check-status',
   },
+  {
+    name: 'anomalies.resolve',
+    description:
+      'Revisar y resolver anomalías del Guardián (revisada, descartada, falsa alarma)',
+    module: 'anomalies',
+    action: 'resolve',
+  },
 
   // ============================================
   // GESTIÓN DE NOTIFICACIONES

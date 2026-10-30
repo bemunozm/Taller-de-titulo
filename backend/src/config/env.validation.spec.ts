@@ -13,6 +13,8 @@ import {
   parseLprPassageFuzzySeconds,
   parseLprPassageOrphanSeconds,
   parseLprPassageReverseMinSeconds,
+  parseAiVisionDailyCap,
+  parseAiVisionRatePerMinute,
   parseLprPassageWindowSeconds,
   parseOpenAiApiBaseUrl,
   parseRetentionDays,
@@ -617,6 +619,32 @@ describe('LPR_PASSAGE_WINDOW_SECONDS', () => {
     expect(() => parseLprPassageWindowSeconds('601')).toThrow(
       /LPR_PASSAGE_WINDOW_SECONDS/,
     );
+  });
+});
+
+describe('presupuesto de IA del Guardián', () => {
+  it('AI_VISION_RATE_PER_MINUTE: default 10, válido y fail-closed', () => {
+    expect(parseAiVisionRatePerMinute(undefined)).toBe(10);
+    expect(parseAiVisionRatePerMinute(' ')).toBe(10);
+    expect(parseAiVisionRatePerMinute(' 25 ')).toBe(25);
+    expect(() => parseAiVisionRatePerMinute('0')).toThrow(
+      /AI_VISION_RATE_PER_MINUTE/,
+    );
+    expect(() => parseAiVisionRatePerMinute('601')).toThrow(
+      /AI_VISION_RATE_PER_MINUTE/,
+    );
+    expect(() => parseAiVisionRatePerMinute('abc')).toThrow(
+      /AI_VISION_RATE_PER_MINUTE/,
+    );
+  });
+
+  it('AI_VISION_DAILY_CAP: default 300, válido y fail-closed', () => {
+    expect(parseAiVisionDailyCap(undefined)).toBe(300);
+    expect(parseAiVisionDailyCap('1000')).toBe(1000);
+    expect(() => parseAiVisionDailyCap('100001')).toThrow(
+      /AI_VISION_DAILY_CAP/,
+    );
+    expect(() => parseAiVisionDailyCap('-5')).toThrow(/AI_VISION_DAILY_CAP/);
   });
 });
 

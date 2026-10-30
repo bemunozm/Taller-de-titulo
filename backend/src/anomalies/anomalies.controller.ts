@@ -6,6 +6,8 @@ import {
   HttpStatus,
   Get,
   Param,
+  Patch,
+  Query,
   ParseUUIDPipe,
   Req,
   UseGuards,
@@ -24,6 +26,10 @@ import { AuthGuard } from '../auth/auth.guard';
 import { AuthorizationGuard } from '../auth/guards/authorization.guard';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
 import { CurrentActor, type TenantActor } from '../common/tenant/tenant-actor';
+import { Auditable } from '../audit/decorators/auditable.decorator';
+import { AuditAction, AuditModule } from '../audit/entities/audit-log.entity';
+import { ListAnomaliesQueryDto } from './dto/list-anomalies-query.dto';
+import { UpdateAnomalyStatusDto } from './dto/update-anomaly-status.dto';
 import type { AnomalyIngestPayload } from './anomalies.service';
 import {
   ServiceApiKeyGuard,
@@ -51,16 +57,22 @@ export class AnomaliesController {
   @ApiOperation({
     summary: 'Listar anomalías',
     description:
-      'Últimas 100 anomalías del condominio del usuario (super-admin: de todos). Requiere "detections.read"; sin "condominium.view-all" la lista va vacía.',
+      'Página de anomalías del condominio del usuario (super-admin: de todos), de la más nueva a la más antigua, SIN foto. Filtros opcionales: status, type, cameraId; paginación limit (50 por defecto, máx. 100) y offset. Devuelve { items, total }. Requiere "detections.read"; sin "condominium.view-all" la lista va vacía.',
   })
-  @ApiResponse({ status: 200, description: 'Lista de anomalías' })
+  @ApiResponse({
+    status: 200,
+    description: 'Página { items, total } de anomalías',
+  })
   @ApiUnauthorizedResponse({ description: 'Sesión inválida o ausente' })
   @ApiForbiddenResponse({
     description:
       'No tiene permiso para ver detecciones (requiere detections.read)',
   })
-  async getAnomalies(@CurrentActor() actor: TenantActor) {
-    return await this.anomaliesService.findAllForActor(actor);
+  async getAnomalies(
+    @CurrentActor() actor: TenantActor,
+    @Query() query: ListAnomaliesQueryDto,
+  ) {
+    return await this.anomaliesService.findAllForActor(actor, query);
   }
 
   // Fase 4 · P6.R (D13): la foto de una anomalía. `security:anomaly_highlight`
@@ -91,6 +103,49 @@ export class AnomaliesController {
     return await this.anomaliesService.findOneForActor(id, actor);
   }
 
+  // Revisión de la anomalía (open | reviewed | dismissed | false_alarm). Va
+  // antes de `@Post` y es PATCH con sufijo `/status`: no choca con `GET :id`.
+  @Patch(':id/status')
+  @UseGuards(AuthGuard, AuthorizationGuard)
+  @RequirePermissions('anomalies.resolve')
+  @ApiBearerAuth('JWT-auth')
+  @Auditable({
+    module: AuditModule.DETECTIONS,
+    action: AuditAction.UPDATE,
+    entityType: 'AnomalyEvent',
+    description: 'Revisión de una anomalía del Guardián',
+    // La nota es texto libre (puede nombrar personas): no se copia a la bitácora.
+    captureRequest: false,
+    captureResponse: false,
+  })
+  @ApiOperation({
+    summary: 'Cambiar el estado de revisión de una anomalía',
+    description:
+      'Marca la anomalía como revisada, descartada o falsa alarma (o la reabre con "open"). Registra quién y cuándo, y una nota opcional (máx. 500). Requiere "anomalies.resolve" y "condominium.view-all"; ajena, inexistente o sin "condominium.view-all": 404. Devuelve la anomalía sin foto.',
+  })
+  @ApiResponse({ status: 200, description: 'Anomalía actualizada (sin foto)' })
+  @ApiUnauthorizedResponse({ description: 'Sesión inválida o ausente' })
+  @ApiForbiddenResponse({
+    description: 'No tiene permiso para resolver anomalías (anomalies.resolve)',
+  })
+  @ApiNotFoundResponse({
+    description:
+      'La anomalía no existe, es de otro condominio o el usuario no ve el condominio completo',
+  })
+  async updateAnomalyStatus(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateAnomalyStatusDto,
+    @CurrentActor() actor: TenantActor,
+    // El interceptor de auditoría lee `auditNewValue` de la request.
+    @Req() req: { auditNewValue?: unknown },
+  ) {
+    const { anomaly, previousStatus } =
+      await this.anomaliesService.updateStatus(id, dto, actor);
+    // Solo el cambio de estado: la nota (texto libre) no va a la bitácora.
+    req.auditNewValue = { status: anomaly.status, previousStatus };
+    return anomaly;
+  }
+
   @Post()
   @UseGuards(ServiceApiKeyGuard)
   @HttpCode(HttpStatus.CREATED)
@@ -114,10 +169,17 @@ export class AnomaliesController {
     @Req() req: ServiceKeyRequest,
     @Body() payload: AnomalyIngestPayload,
   ) {
-    return await this.anomaliesService.createAnomaly(
+    const anomaly = await this.anomaliesService.createAnomaly(
       payload,
       requireServiceKeyOrganizationId(req),
     );
+    // El worker solo mira el código HTTP: no se le devuelve la entidad con la
+    // foto (80-400 KB en base64).
+    return {
+      id: anomaly.id,
+      aiStatus: anomaly.aiStatus,
+      status: anomaly.status,
+    };
   }
 
   // Lo llama el worker Guardián (`lpr/processor/guardian_worker.py`) para

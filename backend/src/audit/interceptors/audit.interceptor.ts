@@ -31,6 +31,12 @@ interface AuditedRequest {
   url: string;
   method: string;
   oldValue?: unknown;
+  /**
+   * `newValue` acotado que deja el handler (p. ej. `{ status, previousStatus }`)
+   * cuando no conviene capturar la respuesta completa. Si está, tiene
+   * prioridad sobre `captureResponse`; se sanea igual que cualquier valor.
+   */
+  auditNewValue?: unknown;
   /** Lo deja `TenantInterceptor` (o un guard de dispositivo) antes del handler. */
   tenantContext?: TenantContext;
 }
@@ -145,9 +151,12 @@ export class AuditInterceptor implements NestInterceptor {
         organizationId: await this.organizationIdOf(audit),
         entityId: entityIdOf(response) ?? request.params?.id,
         entityType: config.entityType,
-        newValue: config.captureResponse
-          ? this.sanitizeData(response, config)
-          : undefined,
+        newValue:
+          request.auditNewValue !== undefined
+            ? this.sanitizeData(request.auditNewValue, config)
+            : config.captureResponse
+              ? this.sanitizeData(response, config)
+              : undefined,
         oldValue: config.captureOldValue
           ? this.sanitizeData(request.oldValue, config)
           : undefined,

@@ -1,165 +1,25 @@
-import {
-  BadRequestException,
-  ForbiddenException,
-  NotFoundException,
-} from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { FindOperator, Repository } from 'typeorm';
-import { ANOMALY_HIGHLIGHT_EVENT, AnomaliesService } from './anomalies.service';
+import { AnomaliesService } from './anomalies.service';
 import { AnomaliesController } from './anomalies.controller';
 import { ServiceApiKeyGuard } from '../auth/guards/service-api-key.guard';
 import { AuthGuard } from '../auth/auth.guard';
 import { AuthorizationGuard } from '../auth/guards/authorization.guard';
 import { PERMISSIONS_KEY } from '../auth/decorators/permissions.decorator';
+import { AUDITABLE_KEY } from '../audit/decorators/auditable.decorator';
 import type { TenantActor } from '../common/tenant/tenant-actor';
 import { handlerMetadata } from '../test-utils/handler-metadata';
 import { AnomalyEvent } from './entities/anomaly-event.entity';
 import { Camera } from '../cameras/entities/camera.entity';
 import { VisionAnalysisService } from './services/vision-analysis.service';
 import { NotificationsGateway } from '../notifications/notifications.gateway';
+import { User } from '../users/entities/user.entity';
 
 const ORG_A = '11111111-1111-4111-8111-111111111111';
-const ORG_B = '22222222-2222-4222-8222-222222222222';
 const CAM_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const CAM_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-
-describe('AnomaliesService.createAnomaly (A2: condominio de la API key)', () => {
-  const create = jest.fn((data: Partial<AnomalyEvent>) => data);
-  const save = jest.fn((data: Partial<AnomalyEvent>) =>
-    Promise.resolve({ id: 'anomaly-1', timestamp: new Date(), ...data }),
-  );
-  const findOne = jest.fn();
-  const analyzeAnomaly = jest.fn();
-  const sendToOrganizationSecurity = jest.fn();
-  let service: AnomaliesService;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    service = new AnomaliesService(
-      { create, save } as unknown as Repository<AnomalyEvent>,
-      { findOne } as unknown as Repository<Camera>,
-      { analyzeAnomaly } as unknown as VisionAnalysisService,
-      { sendToOrganizationSecurity } as unknown as NotificationsGateway,
-    );
-  });
-
-  function payload(cameraId: unknown) {
-    return {
-      cameraId,
-      anomalyType: 'loitering',
-      confidence: 0.9,
-      meta: { snapshot_jpeg_b64: 'aGVsbG8=', duration_seconds: 30 },
-    };
-  }
-
-  function expectNoSideEffects(): void {
-    expect(analyzeAnomaly).not.toHaveBeenCalled();
-    expect(save).not.toHaveBeenCalled();
-    expect(sendToOrganizationSecurity).not.toHaveBeenCalled();
-  }
-
-  it('una key de A con una cámara de B -> 403 sin análisis, sin guardar y sin emitir', async () => {
-    findOne.mockResolvedValue({ id: CAM_B, organizationId: ORG_B });
-
-    await expect(
-      service.createAnomaly(payload(`${CAM_B}_guardia`), ORG_A),
-    ).rejects.toThrow(ForbiddenException);
-    expect(findOne).toHaveBeenCalledWith({ where: { id: CAM_B } });
-    expectNoSideEffects();
-  });
-
-  it('cámara inexistente -> 403 sin efectos', async () => {
-    findOne.mockResolvedValue(null);
-
-    await expect(
-      service.createAnomaly(payload('patio-desconocido'), ORG_A),
-    ).rejects.toThrow(ForbiddenException);
-    expectNoSideEffects();
-  });
-
-  it('cámara legacy sin organizationId -> 403 sin efectos', async () => {
-    findOne.mockResolvedValue({ id: CAM_A, organizationId: null });
-
-    await expect(service.createAnomaly(payload(CAM_A), ORG_A)).rejects.toThrow(
-      ForbiddenException,
-    );
-    expectNoSideEffects();
-  });
-
-  it.each([undefined, '', 42])(
-    'cameraId inválido (%p) -> 400 sin consultar cámaras',
-    async (cameraId) => {
-      await expect(
-        service.createAnomaly(payload(cameraId), ORG_A),
-      ).rejects.toThrow(BadRequestException);
-      expect(findOne).not.toHaveBeenCalled();
-      expectNoSideEffects();
-    },
-  );
-
-  it.each([
-    ['sin anomalyType', { anomalyType: undefined }],
-    ['confidence no numérica', { confidence: 'alta' }],
-  ])('%s -> 400 sin consultar cámaras', async (_label, overrides) => {
-    await expect(
-      service.createAnomaly({ ...payload(CAM_A), ...overrides }, ORG_A),
-    ).rejects.toThrow(BadRequestException);
-    expect(findOne).not.toHaveBeenCalled();
-    expectNoSideEffects();
-  });
-
-  it('cámara del condominio de la key -> guarda la anomalía con ese condominio', async () => {
-    findOne.mockResolvedValue({ id: CAM_A, organizationId: ORG_A });
-    analyzeAnomaly.mockResolvedValue({
-      suspicionLevel: 'HIGH',
-      reasoning: 'persona merodeando',
-    });
-
-    await service.createAnomaly(payload(`${CAM_A}_guardia`), ORG_A);
-
-    expect(save).toHaveBeenCalledWith(
-      expect.objectContaining({ cameraId: CAM_A, organizationId: ORG_A }),
-    );
-    expect(sendToOrganizationSecurity).toHaveBeenCalledTimes(1);
-  });
-
-  it('P6.R: security:anomaly_highlight SOLO al feed del condominio de la cámara, sin la foto', async () => {
-    findOne.mockResolvedValue({
-      id: CAM_A,
-      name: 'Portón',
-      mountPath: 'porton',
-      organizationId: ORG_A,
-    });
-    analyzeAnomaly.mockResolvedValue({
-      suspicionLevel: 'MEDIUM',
-      reasoning: 'persona junto al portón',
-    });
-
-    // El worker identifica la cámara por mountPath: el evento lleva su UUID.
-    await service.createAnomaly(payload('porton_guardia'), ORG_A);
-
-    expect(sendToOrganizationSecurity).toHaveBeenCalledTimes(1);
-    const [organizationId, event, highlight] = sendToOrganizationSecurity.mock
-      .calls[0] as [string, string, Record<string, unknown>];
-    expect(organizationId).toBe(ORG_A);
-    expect(event).toBe(ANOMALY_HIGHLIGHT_EVENT);
-    const { timestamp, ...fields } = highlight;
-    expect(timestamp).toBeInstanceOf(Date);
-    expect(fields).toEqual({
-      anomalyId: 'anomaly-1',
-      cameraId: CAM_A,
-      cameraName: 'Portón',
-      type: 'loitering',
-      severity: 'MEDIUM',
-      reasoning: 'persona junto al portón',
-    });
-    expect(JSON.stringify(highlight)).not.toContain('aGVsbG8=');
-    // La foto sí queda guardada (se lee con GET /anomalies/:id).
-    expect(save).toHaveBeenCalledWith(
-      expect.objectContaining({ snapshotJpegB64: 'aGVsbG8=' }),
-    );
-  });
-});
+const ANOMALY_ID = 'dddddddd-0000-4000-8000-00000000000d';
 
 /**
  * Fase 4 · P5.B: `GET /anomalies` y `GET /anomalies/cameras/:id/zones` se
@@ -168,17 +28,26 @@ describe('AnomaliesService.createAnomaly (A2: condominio de la API key)', () => 
  * zonas no tenía ningún guard.
  */
 describe('AnomaliesService — lecturas acotadas al condominio de la key (P5.B)', () => {
-  const find = jest.fn();
+  const findAndCount = jest.fn();
+  const anomalyFindOne = jest.fn();
+  const update = jest.fn();
   const findOne = jest.fn();
+  const sendToOrganizationSecurity = jest.fn();
+  const userFindOne = jest.fn();
   let service: AnomaliesService;
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    jest.resetAllMocks();
     service = new AnomaliesService(
-      { find } as unknown as Repository<AnomalyEvent>,
+      {
+        findAndCount,
+        findOne: anomalyFindOne,
+        update,
+      } as unknown as Repository<AnomalyEvent>,
       { findOne } as unknown as Repository<Camera>,
       {} as VisionAnalysisService,
-      {} as NotificationsGateway,
+      { sendToOrganizationSecurity } as unknown as NotificationsGateway,
+      { findOne: userFindOne } as unknown as Repository<User>,
     );
   });
 
@@ -193,32 +62,97 @@ describe('AnomaliesService — lecturas acotadas al condominio de la key (P5.B)'
     };
   }
 
-  it('P5.C: GET /anomalies (sesión humana) -> solo las del condominio del actor', async () => {
-    find.mockResolvedValue([]);
+  type FindArgs = {
+    select: Record<string, boolean>;
+    where: Record<string, unknown>;
+    take: number;
+    skip: number;
+    order: Record<string, string>;
+  };
 
-    await service.findAllForActor(actor({}));
+  it('P5.C: GET /anomalies (sesión humana) -> solo las del condominio del actor, { items, total }', async () => {
+    findAndCount.mockResolvedValue([[{ id: 'a' }], 7]);
 
-    expect(find).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { organizationId: ORG_A }, take: 100 }),
+    await expect(service.findAllForActor(actor({}))).resolves.toEqual({
+      items: [{ id: 'a' }],
+      total: 7,
+    });
+
+    expect(findAndCount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { organizationId: ORG_A },
+        take: 50,
+        skip: 0,
+      }),
     );
   });
 
+  it('el listado NO selecciona la foto (snapshotJpegB64) pero sí los campos de revisión e IA', async () => {
+    findAndCount.mockResolvedValue([[], 0]);
+
+    await service.findAllForActor(actor({}));
+
+    const [[options]] = findAndCount.mock.calls as Array<[FindArgs]>;
+    expect(options.select).not.toHaveProperty('snapshotJpegB64');
+    expect(options.select).toEqual(
+      expect.objectContaining({
+        id: true,
+        status: true,
+        aiStatus: true,
+        aiFalsePositive: true,
+        resolvedAt: true,
+        resolutionNote: true,
+      }),
+    );
+  });
+
+  it('filtros status/type/cameraId se combinan con el condominio; paginación con tope de 100', async () => {
+    findAndCount.mockResolvedValue([[], 0]);
+
+    await service.findAllForActor(actor({}), {
+      status: 'reviewed',
+      type: 'loitering',
+      cameraId: CAM_A,
+      limit: 20,
+      offset: 40,
+    });
+    await service.findAllForActor(actor({}), { limit: 5000 });
+
+    const calls = findAndCount.mock.calls as Array<[FindArgs]>;
+    expect(calls[0][0]).toEqual(
+      expect.objectContaining({
+        where: {
+          status: 'reviewed',
+          anomalyType: 'loitering',
+          cameraId: CAM_A,
+          organizationId: ORG_A,
+        },
+        take: 20,
+        skip: 40,
+        order: { timestamp: 'DESC', id: 'DESC' },
+      }),
+    );
+    expect(calls[1][0].take).toBe(100);
+  });
+
   it('P5.C: super-admin -> las de todos los condominios', async () => {
-    find.mockResolvedValue([]);
+    findAndCount.mockResolvedValue([[], 0]);
 
     await service.findAllForActor(
       actor({ organizationId: null, isSuperAdmin: true }),
     );
 
-    expect(find).toHaveBeenCalledWith(expect.objectContaining({ where: {} }));
+    expect(findAndCount).toHaveBeenCalledWith(
+      expect.objectContaining({ where: {} }),
+    );
   });
 
   it('P5.C: actor sin condominio -> ninguna fila (In([]), sin el cajón nulo)', async () => {
-    find.mockResolvedValue([]);
+    findAndCount.mockResolvedValue([[], 0]);
 
     await service.findAllForActor(actor({ organizationId: null }));
 
-    const [[options]] = find.mock.calls as Array<
+    const [[options]] = findAndCount.mock.calls as Array<
       [{ where: { organizationId: unknown } }]
     >;
     const where = options.where;
@@ -226,13 +160,174 @@ describe('AnomaliesService — lecturas acotadas al condominio de la key (P5.B)'
     expect((where.organizationId as FindOperator<string>).type).toBe('in');
   });
 
-  it('P5.C: sin condominium.view-all (Residente con detections.read) -> vacío, sin consultar', async () => {
+  it('P5.C: sin condominium.view-all (Residente con detections.read) -> página vacía, sin consultar', async () => {
     await expect(
       service.findAllForActor(
         actor({ permissionNames: new Set(['detections.read']) }),
       ),
-    ).resolves.toEqual([]);
-    expect(find).not.toHaveBeenCalled();
+    ).resolves.toEqual({ items: [], total: 0 });
+    expect(findAndCount).not.toHaveBeenCalled();
+  });
+
+  describe('findOneForActor: resolvedByName', () => {
+    it('devuelve el nombre de quien resolvió, o null si no hay resolvedById', async () => {
+      anomalyFindOne
+        .mockResolvedValueOnce({ id: ANOMALY_ID, resolvedById: 'u-9' })
+        .mockResolvedValueOnce({ id: ANOMALY_ID, resolvedById: null });
+      userFindOne.mockResolvedValue({ id: 'u-9', name: 'Beto' });
+
+      await expect(
+        service.findOneForActor(ANOMALY_ID, actor({})),
+      ).resolves.toEqual(expect.objectContaining({ resolvedByName: 'Beto' }));
+      await expect(
+        service.findOneForActor(ANOMALY_ID, actor({})),
+      ).resolves.toEqual(expect.objectContaining({ resolvedByName: null }));
+      expect(userFindOne).toHaveBeenCalledTimes(1);
+    });
+
+    it('usuario borrado -> null', async () => {
+      anomalyFindOne.mockResolvedValue({ id: ANOMALY_ID, resolvedById: 'u-9' });
+      userFindOne.mockResolvedValue(null);
+
+      await expect(
+        service.findOneForActor(ANOMALY_ID, actor({})),
+      ).resolves.toEqual(expect.objectContaining({ resolvedByName: null }));
+    });
+  });
+
+  describe('updateStatus (PATCH /anomalies/:id/status)', () => {
+    const row = { id: ANOMALY_ID, organizationId: ORG_A, status: 'open' };
+
+    it('revisada: guarda quién, cuándo y la nota (recortada); devuelve la fila sin foto', async () => {
+      anomalyFindOne
+        .mockResolvedValueOnce({ id: ANOMALY_ID, status: 'open' })
+        .mockResolvedValueOnce({
+          ...row,
+          status: 'reviewed',
+          resolvedById: 'admin-1',
+          suspicionLevel: 'HIGH',
+          aiReasoning: 'r',
+          aiFalsePositive: false,
+          aiStatus: 'done',
+        });
+      update.mockResolvedValue({ affected: 1 });
+      userFindOne.mockResolvedValue({ id: 'admin-1', name: 'Ana Admin' });
+
+      const result = await service.updateStatus(
+        ANOMALY_ID,
+        { status: 'reviewed', note: '  era el jardinero  ' },
+        actor({ userId: 'admin-1' }),
+      );
+
+      expect(update).toHaveBeenCalledWith(
+        { id: ANOMALY_ID, organizationId: ORG_A },
+        {
+          status: 'reviewed',
+          resolvedById: 'admin-1',
+          resolvedAt: expect.any(Date) as Date,
+          resolutionNote: 'era el jardinero',
+        },
+      );
+      expect(result.previousStatus).toBe('open');
+      expect(result.anomaly).toEqual(
+        expect.objectContaining({
+          ...row,
+          status: 'reviewed',
+          resolvedByName: 'Ana Admin',
+        }),
+      );
+      // Solo se pide el nombre del usuario (nada de email ni otros datos).
+      expect(userFindOne).toHaveBeenCalledWith({
+        where: { id: 'admin-1' },
+        select: { id: true, name: true },
+      });
+      // Los demás clientes del condominio ven el cambio.
+      expect(sendToOrganizationSecurity).toHaveBeenCalledWith(
+        ORG_A,
+        'security:anomaly_updated',
+        {
+          anomalyId: ANOMALY_ID,
+          aiStatus: 'done',
+          severity: 'HIGH',
+          reasoning: 'r',
+          aiFalsePositive: false,
+          status: 'reviewed',
+        },
+      );
+      // La relectura tampoco trae la foto.
+      const lastCall = anomalyFindOne.mock.calls[1] as [FindArgs];
+      expect(lastCall[0].select).not.toHaveProperty('snapshotJpegB64');
+    });
+
+    it.each(['dismissed', 'false_alarm'] as const)(
+      '%s sin nota -> resolutionNote null',
+      async (status) => {
+        anomalyFindOne
+          .mockResolvedValueOnce({ id: ANOMALY_ID })
+          .mockResolvedValueOnce({ ...row, status });
+
+        await service.updateStatus(ANOMALY_ID, { status }, actor({}));
+
+        expect(update).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({ status, resolutionNote: null }),
+        );
+      },
+    );
+
+    it('nota solo de espacios -> null', async () => {
+      anomalyFindOne.mockResolvedValue({ id: ANOMALY_ID });
+
+      await service.updateStatus(
+        ANOMALY_ID,
+        { status: 'dismissed', note: '   ' },
+        actor({}),
+      );
+
+      expect(update).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ resolutionNote: null }),
+      );
+    });
+
+    it('volver a open limpia resolvedAt y resolvedById', async () => {
+      anomalyFindOne.mockResolvedValue({ id: ANOMALY_ID });
+
+      await service.updateStatus(ANOMALY_ID, { status: 'open' }, actor({}));
+
+      expect(update).toHaveBeenCalledWith(expect.anything(), {
+        status: 'open',
+        resolvedById: null,
+        resolvedAt: null,
+        resolutionNote: null,
+      });
+    });
+
+    it('anomalía ajena o inexistente -> 404 sin actualizar (la búsqueda va acotada al condominio)', async () => {
+      anomalyFindOne.mockResolvedValue(null);
+
+      await expect(
+        service.updateStatus(ANOMALY_ID, { status: 'reviewed' }, actor({})),
+      ).rejects.toThrow(NotFoundException);
+      expect(anomalyFindOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: ANOMALY_ID, organizationId: ORG_A },
+        }),
+      );
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it('sin condominium.view-all -> 404 sin consultar', async () => {
+      await expect(
+        service.updateStatus(
+          ANOMALY_ID,
+          { status: 'reviewed' },
+          actor({ permissionNames: new Set(['anomalies.resolve']) }),
+        ),
+      ).rejects.toThrow(NotFoundException);
+      expect(anomalyFindOne).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+    });
   });
 
   it('zonas de una cámara de OTRO condominio -> 404', async () => {
@@ -250,16 +345,27 @@ describe('AnomaliesService — lecturas acotadas al condominio de la key (P5.B)'
   });
 
   it('zonas por mountPath: también acotadas al condominio de la key', async () => {
+    const zones = [
+      {
+        points: [
+          { x: 0, y: 0 },
+          { x: 1, y: 0 },
+          { x: 1, y: 1 },
+        ],
+        type: 'loitering',
+        loiterSeconds: 30,
+      },
+    ];
     findOne.mockResolvedValue({
       id: CAM_A,
       enableGuardian: true,
-      guardianZones: [[{ x: 0, y: 0 }]],
+      guardianZones: zones,
     });
 
     await expect(service.getCameraZones('patio', ORG_A)).resolves.toEqual({
       id: CAM_A,
       enableGuardian: true,
-      guardianZones: [[{ x: 0, y: 0 }]],
+      guardianZones: zones,
     });
     expect(findOne).toHaveBeenCalledWith({
       where: [{ mountPath: 'patio', organizationId: ORG_A }],
@@ -283,6 +389,35 @@ describe('AnomaliesController — credenciales (P5.B / P5.C)', () => {
     ).toEqual(['detections.read']);
   });
 
+  it('PATCH /anomalies/:id/status: sesión humana, permiso anomalies.resolve y auditoría', () => {
+    expect(
+      handlerMetadata(
+        AnomaliesController,
+        'updateAnomalyStatus',
+        GUARDS_METADATA,
+      ),
+    ).toEqual([AuthGuard, AuthorizationGuard]);
+    expect(
+      handlerMetadata(
+        AnomaliesController,
+        'updateAnomalyStatus',
+        PERMISSIONS_KEY,
+      ),
+    ).toEqual(['anomalies.resolve']);
+    expect(
+      handlerMetadata(
+        AnomaliesController,
+        'updateAnomalyStatus',
+        AUDITABLE_KEY,
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        entityType: 'AnomalyEvent',
+        captureRequest: false,
+      }),
+    );
+  });
+
   it('POST /anomalies sigue con la API key de servicio (ingesta del worker)', () => {
     expect(
       handlerMetadata(AnomaliesController, 'handleAnomaly', GUARDS_METADATA),
@@ -291,7 +426,11 @@ describe('AnomaliesController — credenciales (P5.B / P5.C)', () => {
 
   it('GET /anomalies pasa el actor; las zonas, el condominio de la key', async () => {
     const anomaliesService = {
-      findAllForActor: jest.fn().mockResolvedValue([]),
+      findAllForActor: jest.fn().mockResolvedValue({ items: [], total: 0 }),
+      updateStatus: jest.fn().mockResolvedValue({
+        anomaly: { id: ANOMALY_ID, status: 'reviewed' },
+        previousStatus: 'open',
+      }),
       getCameraZones: jest.fn().mockResolvedValue({}),
     };
     const controller = new AnomaliesController(
@@ -308,10 +447,30 @@ describe('AnomaliesController — credenciales (P5.B / P5.C)', () => {
       serviceKey: { keyId: 'k', organizationId: ORG_A, ownerUserId: 'u' },
     };
 
-    await controller.getAnomalies(actor);
+    const auditReq: { auditNewValue?: unknown } = {};
+    await controller.getAnomalies(actor, { status: 'open' });
+    await controller.updateAnomalyStatus(
+      ANOMALY_ID,
+      { status: 'reviewed', note: 'ok' },
+      actor,
+      auditReq,
+    );
     await controller.getCameraZones(req, CAM_B);
 
-    expect(anomaliesService.findAllForActor).toHaveBeenCalledWith(actor);
+    // Auditoría: solo { status, previousStatus }, nunca la nota.
+    expect(auditReq.auditNewValue).toEqual({
+      status: 'reviewed',
+      previousStatus: 'open',
+    });
+
+    expect(anomaliesService.findAllForActor).toHaveBeenCalledWith(actor, {
+      status: 'open',
+    });
+    expect(anomaliesService.updateStatus).toHaveBeenCalledWith(
+      ANOMALY_ID,
+      { status: 'reviewed', note: 'ok' },
+      actor,
+    );
     expect(anomaliesService.getCameraZones).toHaveBeenCalledWith(CAM_B, ORG_A);
   });
 

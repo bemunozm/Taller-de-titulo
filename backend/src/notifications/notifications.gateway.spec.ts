@@ -30,6 +30,7 @@ import { PLATFORM_SUPER_ADMIN_ROLE } from '../common/tenant/tenant-context.types
 import { User } from '../users/entities/user.entity';
 import {
   ANOMALY_HIGHLIGHT_EVENT,
+  ANOMALY_UPDATED_EVENT,
   AnomaliesService,
 } from '../anomalies/anomalies.service';
 import type { AnomalyEvent } from '../anomalies/entities/anomaly-event.entity';
@@ -355,6 +356,16 @@ describe('NotificationsGateway — namespace / autenticado (servidor real)', () 
               id: 'anomaly-1',
               timestamp: new Date('2026-10-09T12:00:00.000Z'),
             }),
+          update: () => Promise.resolve({ affected: 1 }),
+          findOne: () =>
+            Promise.resolve({
+              id: 'anomaly-1',
+              suspicionLevel: 'HIGH',
+              aiReasoning: 'Persona merodeando el portón',
+              aiFalsePositive: false,
+              aiStatus: 'done',
+              status: 'open',
+            }),
         } as unknown as Repository<AnomalyEvent>,
         {
           findOne: () =>
@@ -366,10 +377,12 @@ describe('NotificationsGateway — namespace / autenticado (servidor real)', () 
             }),
         } as unknown as Repository<Camera>,
         {
+          isAvailable: () => true,
           analyzeAnomaly: () =>
             Promise.resolve({
               suspicionLevel: 'HIGH',
               reasoning: 'Persona merodeando el portón',
+              isFalsePositive: false,
             }),
         } as unknown as VisionAnalysisService,
         gateway,
@@ -400,11 +413,25 @@ describe('NotificationsGateway — namespace / autenticado (servidor real)', () 
         cameraId: CAM_A,
         cameraName: 'Portón principal',
         type: 'loitering',
-        severity: 'HIGH',
-        reasoning: 'Persona merodeando el portón',
+        severity: 'MEDIUM',
+        reasoning: 'Sin evaluación de IA',
         timestamp: '2026-10-09T12:00:00.000Z',
+        aiStatus: 'pending',
+        status: 'open',
       });
       expect(JSON.stringify(highlight)).not.toContain(SNAPSHOT_B64);
+
+      // El resultado de la IA llega después, por el mismo feed y sin foto.
+      const updated = await conserjeA.client.waitForEvent(ANOMALY_UPDATED_EVENT);
+      expect(updated).toEqual({
+        anomalyId: 'anomaly-1',
+        aiStatus: 'done',
+        severity: 'HIGH',
+        reasoning: 'Persona merodeando el portón',
+        aiFalsePositive: false,
+        status: 'open',
+      });
+      expect(JSON.stringify(updated)).not.toContain(SNAPSHOT_B64);
 
       for (const [viewer, userId] of [
         [residenteA, 'residente-a'],
@@ -413,6 +440,7 @@ describe('NotificationsGateway — namespace / autenticado (servidor real)', () 
       ] as const) {
         await flushTo(viewer.client, userId);
         expect(viewer.client.eventsNamed(ANOMALY_HIGHLIGHT_EVENT)).toEqual([]);
+        expect(viewer.client.eventsNamed(ANOMALY_UPDATED_EVENT)).toEqual([]);
         expect(viewer.client.eventsNamed('security:anomaly_detected')).toEqual(
           [],
         );
