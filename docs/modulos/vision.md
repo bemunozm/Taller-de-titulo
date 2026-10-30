@@ -290,6 +290,57 @@ El worker recoge los cambios por pull, **sin reiniciar**, en ≤ `LPR_ZONES_REFE
   - un `action` desconocido se trata como "solo registrar";
   - en modo `access`, `confirmReads` no puede bajar de 3.
 
+## Guardián visual (personas: intrusión y merodeo)
+
+Worker `guardia` (`lpr/processor/guardian_worker.py`) sobre el camino de decisión compartido `guardian_pipeline.py` y el motor de reglas **puro** `guardian_rules.py`. El worker solo captura, refresca zonas y envía; el replay corre el mismo `GuardianPipeline.process`, así que lo que se mide es lo que corre en producción.
+
+```
+frame -> motion gating (MOG2 + retención) -> YOLO yolo11n clase persona + ByteTrack -> GuardianRules -> POST /anomalies
+```
+
+### Zonas (`Camera.guardianZones`)
+- **Formato actual:** `[{ "points": [{x,y}, ...], "type": "intrusion" | "loitering", "loiterSeconds": 5..600 }]`. Coordenadas normalizadas 0..1, 3 a 100 puntos por zona, hasta 20 zonas.
+- **Formato legacy:** `[[{x,y}, ...]]` (lista de polígonos). El backend lo acepta en `PATCH /cameras/:id/zones` y lo **guarda siempre en el formato nuevo** (cada zona legacy pasa a `intrusion`); al leer filas viejas también las normaliza. El worker acepta ambos.
+- `loiterSeconds` solo aplica a `loitering`; si falta, el worker usa 20 s.
+
+### Reglas
+- **Intrusión:** basta que la **cabeza, el centro o los pies** de la caja caigan en una zona `intrusion`, con un track estable (≥ 3 aciertos). Se mantiene cualquier punto (y no solo los pies) por decisión de Benjamin: hay cámaras de **muro**, donde los pies quedan fuera de cuadro.
+- **Merodeo:** tiempo **acumulado dentro** de una zona `loitering` (umbral `loiterSeconds`). **Sin ninguna zona configurada** se conserva el comportamiento histórico: más de 20 s visible en el cuadro. **Con zonas pero ninguna de merodeo, no hay merodeo.**
+- **Cooldowns:** por track (10 s intrusión, 60 s merodeo) y por (zona, tipo) (**20 s intrusión**, 60 s merodeo; `intrusion_zone_cooldown` y `loitering_zone_cooldown` en `GuardianConfig`).
+- **Supresión espacial:** si en esa (zona, tipo) se alertó hace poco y la nueva persona está a menos de ~1 alto de caja de la última alertada, se suprime aunque ByteTrack le haya dado un id nuevo. **Trade-off:** dos personas que entran juntas a la misma zona producen **una sola alerta durante 20 s** (intrusión) o 60 s (merodeo). Los 20 s salen de medir con 71 clips de Acceso: con 60 s se suprimía la entrada real de visitas que antes esperaron pegadas a la reja (33/54 intrusiones); con 20 s son 44/54 con 41 falsas alarmas, frente a 48/54 y 65 de las reglas anteriores. Se aceptó para no multiplicar avisos por una misma escena; si hace falta contar personas, es una limitación a revisar.
+- **Re-enlace:** un track nuevo que aparece a ≤ ~1 alto de caja de donde se perdió otro hace ≤ 5 s hereda su `first_seen`, su tiempo acumulado en zona, sus aciertos y sus cooldowns (el merodeo no vuelve a cero por un cambio de id). No es ReID: una persona que desaparece más de 5 s o reaparece lejos cuenta como nueva.
+- **Memoria acotada:** tracks y cooldowns se purgan juntos por TTL (30 s) y con tope duro de 256 tracks.
+
+### Captura y rendimiento
+- **Gating con retención:** si hubo personas en los últimos ~10 s, YOLO corre aunque MOG2 no vea movimiento; una persona quieta se funde con el fondo y antes dejaba ciego al merodeo.
+- **Zonas en un hilo de fondo** (daemon que refresca cada `LPR_ZONES_REFETCH_SECONDS`, mínimo 5 s, y reemplaza la lista de forma atómica): la captura nunca espera al backend.
+- **Modelo local** `lpr/yolo11n.pt` (sin descarga en runtime; si falta, el worker termina para que el supervisor reintente) y `device` desde `LPR_DEVICE`.
+- **Sin JPG en disco:** el frame viaja en base64 en el POST.
+- **Heartbeat** cada 30 s en el log: fps de captura, inferencias por segundo, ms promedio por inferencia, device real, tracks activos, zonas y si está habilitado.
+
+### Backend: ingesta, IA y revisión
+- `POST /anomalies` (API key de servicio): `anomalyType` solo `intrusion` o `loitering`. Guarda con `aiStatus='pending'` (o `skipped` sin foto, sin `OPENAI_API_KEY`, con 3 análisis ya en vuelo o con el presupuesto del condominio agotado), emite `security:anomaly_highlight` y responde 201 **sin esperar a la IA**.
+- El análisis corre en segundo plano (timeout de 20 s), actualiza `suspicionLevel`, `aiReasoning`, `aiFalsePositive` y `aiStatus` (`done`/`failed`) y emite `security:anomaly_updated`. Un barrido marca `failed` los `pending` de más de 5 min (el proceso murió a medias).
+- **Presupuesto de IA por condominio** (en memoria del proceso): `AI_VISION_RATE_PER_MINUTE` (default 10) y `AI_VISION_DAILY_CAP` (default 300, día UTC).
+- `GET /anomalies` devuelve `{items,total}` sin foto, con filtros `status`, `type`, `cameraId` y paginación (`limit` ≤ 100, `offset`). `GET /anomalies/:id` trae la foto y `resolvedByName`.
+- `PATCH /anomalies/:id/status` (permiso `anomalies.resolve`: Administrador y Conserje) cambia `status` a `reviewed`, `dismissed`, `false_alarm` o `open`, con una nota opcional de hasta 500 caracteres. La auditoría guarda `{status, previousStatus}`, sin la nota.
+
+### Replay y verdad terreno
+```
+python -m lpr.tools.guardian_replay --clips lpr/eval-data/guardian --gt lpr/eval-data/guardian-gt.csv \
+    --fps 1 --imgsz 960 --device cuda:0 --zone-file zonas.json --label despues
+python -m lpr.tools.guardian_replay ... --rules legacy --label antes   # línea base: reglas de main
+```
+- Verdad terreno: CSV UTF-8 con encabezado `clip,t_inicio_s,t_fin_s,evento,zona,personas`. `evento` es `intrusion`, `loitering` o `ninguno` (ventana en que **no** debe haber alerta); `personas` es cuántas protagonizan el evento (una alerta por persona es lo ideal, las demás cuentan como duplicadas).
+- Reporta aciertos, falsas alarmas, omitidos, alertas duplicadas por persona, latencia de detección y ms por inferencia con el device. `--rules legacy` reproduce las reglas anteriores para la comparación antes/después; `--margin` da tolerancia en segundos alrededor de cada ventana.
+- Los clips muestran personas: viven fuera del repo (`lpr/eval-data/` está en `.gitignore`) y el replay no guarda imágenes ([privacidad §7.2](privacidad-ley-21719.md)).
+- **Estado de la medición:** aún no hay verdad terreno etiquetada, así que **no hay cifras de precisión del Guardián**. La Fase 0 del plan (grabar Acceso y Exterior, etiquetar, correr antes/después) es lo que las producirá.
+
+### Orden de despliegue (importante)
+1. **Desplegar el worker nuevo antes, o junto con, el backend.** El backend nuevo guarda y entrega las zonas en el formato `{points,type,loiterSeconds}`; un **worker viejo no lo entiende** (espera una lista de polígonos) y dejaría de ver las zonas.
+2. Aplicar la migración `1791610000000-AnomalyReviewAndAiStatus` (columnas de revisión e IA; las filas existentes quedan `open` y con `aiStatus` NULL) y reiniciar el backend: el permiso `anomalies.resolve` se sincroniza al arrancar.
+3. **Las cámaras con zonas legacy pierden el merodeo** hasta que alguien marque una zona como **Merodeo** en el editor: al normalizarse todas pasan a `intrusion`, y con zonas configuradas pero ninguna de merodeo no hay merodeo. Las cámaras **sin zonas** conservan el merodeo de cuadro completo.
+
 ## Fuentes clave (2025–2026)
 - YOLO26: arXiv 2509.25164, docs.ultralytics.com/models/yolo26, anuncio 14-ene-2026.
 - RPi5 runtimes: docs.ultralytics.com/guides/raspberry-pi.

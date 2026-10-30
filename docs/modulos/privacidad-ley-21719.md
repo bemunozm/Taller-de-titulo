@@ -155,6 +155,17 @@ Para calibrar el LPR de `porton-hd` se grabaron clips reales del portón y se ar
 - Anexo del dataset de entrenamiento (finalidad, plazo, custodia y anonimización para la tesis) y autorización escrita de la administración para el relay (7.1).
 - Borrar los clips y la verdad terreno de la evaluación del LPR del 2026-10-20 al cerrar la calibración (7.2).
 
+## 9. Anexo: Guardián visual (2026-10-22)
+
+El Guardián detecta personas (intrusión y merodeo); sus fotos y textos son datos personales. Qué cambió y qué falta:
+
+- **Sin JPG en disco.** El worker ya no escribe imágenes: el frame viaja en el POST y la foto vive solo en `anomaly_events.snapshotJpegB64`, sujeta a la retención de imágenes de 30 días (§3, `RETENTION_IMAGES_DAYS`). La fila se borra a los 90 días (`RETENTION_ANOMALIES_DAYS`).
+- **Texto libre con posible dato personal.** `resolutionNote` (nota del revisor, hasta 500 caracteres) y `aiReasoning` (descripción de lo que la IA "ve") pueden nombrar o describir personas. Hoy se conservan los 90 días de la fila. La auditoría del cambio de estado guarda solo `{status, previousStatus}`, sin la nota.
+- **Pendiente:** limpiar `resolutionNote` y `aiReasoning` junto con la imagen (a los 30 días) y cubrirlos en la supresión y la exportación de datos de un titular (§4); hoy el barrido de imágenes no los toca.
+- **Frames a OpenAI.** El análisis envía la foto de la anomalía a OpenAI (Vision). Está acotado por un **presupuesto por condominio** (`AI_VISION_RATE_PER_MINUTE`, `AI_VISION_DAILY_CAP`) y sin foto o sin `OPENAI_API_KEY` no se envía nada. Sigue pendiente el DPA de OpenAI (§8) y decidir si cada condominio puede desactivar la IA.
+- **Reconocimiento facial descartado** (dato biométrico, Ley 21.719): el Guardián no identifica personas.
+- **Datos de evaluación.** Los clips para medir el Guardián siguen las mismas reglas que §7.2: fuera del repo, autorización de la administración y borrado al cerrar la calibración.
+
 ## Fuentes (consultadas el 2026-10-09)
 
 - [BCN, Ley 21.719](https://www.bcn.cl/leychile/consulta/obtxml?opt=7&idNorma=1209272)
